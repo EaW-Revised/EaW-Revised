@@ -20,6 +20,7 @@
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/campaign/ai_selection_content.hpp"
 #include "eawr/campaign/ai_perception_content.hpp"
+#include "galactic_object_perception.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/core/sync_digest.hpp"
 #include "eawr/sim/world.hpp"
@@ -2187,6 +2188,17 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
             player.ai = chosen != out->lifecycle.players.end();
             if (player.ai) player.difficulty = chosen->difficulty;
         }
+        // GA-10/12/13: the campaign facts the story scripts' world reads use (the same values the AI's perception reads).
+        for (auto& story_player : out->story_players.players)
+            for (const auto& facts : perception.players)
+                if (facts.player == story_player.id) story_player.neutral = facts.neutral;
+        for (const auto& force : perception.force_types) out->story_players.type_combat_ratings.emplace(force.type, force.power);
+        for (const auto& planet : perception.planets)
+            if (planet.base_income) out->story_players.planet_base_income.emplace(planet.planet, *planet.base_income);
+        out->story_players.seed = plan.galaxy().seed;
+        if (out->story_scripts && out->story_scripts->uses_perception())
+            out->story_players.perception = out->object_scripts && out->object_scripts->perception() ? out->object_scripts->perception()
+                : require(GalacticObjectPerception::load(files));
         phase.emplace("prep.ai_runtime.route_z_adjust");
         for (const auto& location : plan.locations()) if (location.planet) {
             // CGS-22: a planet type with no loadable base is skipped (noted once by space-entry preparation) and keeps the

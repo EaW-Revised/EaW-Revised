@@ -11,6 +11,7 @@
 
 #include "../script/foc/ai_equations.hpp"
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -28,10 +29,12 @@ public:
     // Identity of the loaded equation text, for the content fingerprint of a saved game.
     [[nodiscard]] const std::string& digest() const noexcept { return digest_; }
     // The equation's value for `player` with `target` as the planet under evaluation, read from the completed world.
-    // nullopt: no value; `why` then says which equation or lookup could not be answered.
+    // nullopt: no value; `why` then says which equation or lookup could not be answered. `base_income` holds the
+    // campaign's normalized authored planet incomes (Variable_Target.BaseIncome); without it that lookup is unanswered.
     [[nodiscard]] std::optional<script::foc::ai::Real> evaluate(std::string_view name, sim::galactic::PlayerId player,
         std::optional<sim::galactic::PlanetId> target, const sim::galactic::GalacticSnapshot&, std::uint64_t seed,
-        std::string& why, std::uint64_t& visited) const;
+        std::string& why, std::uint64_t& visited,
+        const std::map<sim::galactic::PlanetId, script::foc::ai::Real>* base_income = nullptr) const;
 
 private:
     script::foc::ai::EquationSet equations_;

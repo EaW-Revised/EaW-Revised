@@ -14,6 +14,9 @@ struct GarrisonUnit { bool value{true}; };
 // TL-03: presence retains the object's Lua Make_Invulnerable flag through gather and commit.
 struct ScriptInvulnerable { bool value{true}; };
 
+// Lua Prevent_All_Fire flag: presence retains it through gather and commit.
+struct HoldFire { bool value{true}; };
+
 struct Identity {
     TypeId type_id{};
     PlayerId owner{};

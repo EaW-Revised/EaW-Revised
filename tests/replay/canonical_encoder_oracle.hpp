@@ -87,6 +87,10 @@ void test_canonical_encoder_oracle(const std::string& fixtures) {
         unit.abilities->stealth_end = index + 1;
         unit.abilities->self_destruct_script.emplace();
         unit.abilities->mc30_script.emplace();
+        unit.abilities->deploy_pose.emplace();
+        unit.abilities->deploy_pose->on = true;
+        unit.abilities->deploy_pose->since = 7;
+        unit.abilities->deploy_pose->start_frame = 3;
         unit.abilities->charged_blast.emplace();
         unit.abilities->pending_buzz_position.emplace();
         unit.abilities->concentrate_recruits = {1, index + 1};
@@ -220,6 +224,7 @@ void test_canonical_encoder_oracle(const std::string& fixtures) {
     block([&](auto& bytes) { state.append_canonical_ion_stuns_state(bytes, live); }, "ion_stuns_state");
     block([&](auto& bytes) { state.append_canonical_hazard_moves_state(bytes, live); }, "hazard_moves_state");
     block([&](auto& bytes) { state.append_canonical_final_facing_state(bytes, live); }, "final_facing_state");
+    block([&](auto& bytes) { state.append_canonical_deploy_pose_state(bytes, live); }, "deploy_pose_state");
     block([&](auto& bytes) { state.append_canonical_asteroids_state(bytes, live); }, "asteroids_state");
     block([&](auto& bytes) { state.append_canonical_engine_disable_state(bytes, live); }, "engine_disable_state");
     block([&](auto& bytes) { state.append_canonical_nebula_state(bytes, live); }, "nebula_state");

@@ -14,6 +14,7 @@ set(EAWR_ASSETS_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/mega_texture.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/model.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/model_facts.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/model_shaders.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/texture.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/texture_chain.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/texture_codecs.cpp"

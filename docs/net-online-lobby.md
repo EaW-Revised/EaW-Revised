@@ -186,8 +186,13 @@ replay, snapshots used for display, and chat.
 
 Clients send requests bound to session/revision and their admitted seat. The host
 validates each request against loaded map capacity and setup rules, then commits
-one revision in host order. A stale request is rejected with a fresh snapshot;
-never silently applied against another map or reassigned seat. Reject spoofed
+one revision in host order. A stale request is rejected with a fresh snapshot,
+except a guest's own-seat choice: the host applies it against the current room
+when only guest self-edits, joins and leaves happened since the revision the
+guest saw, and only if it is valid there (a real conflict is refused as an
+invalid choice). A choice that also moved another seat or the game, a game or
+option change, a host reassignment and a Start cancel make older requests stale.
+A stale leave (or any other non-choice action) is never rebased: it is rejected with a fresh snapshot and the guest re-sends it. Never silently applied against another map or reassigned seat. Reject spoofed
 seats, foreign sessions, oversized text/rosters, unknown options and unauthorized
 host controls. Bound request queues, snapshot bytes and chat; sanitize UTF-8 at
 the network boundary following the existing LAN model. No network arrival order

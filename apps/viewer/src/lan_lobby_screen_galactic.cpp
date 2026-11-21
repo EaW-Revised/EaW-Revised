@@ -6,9 +6,13 @@
 #include "galactic/faction_choices.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <random>
+
+#include <godot_cpp/classes/font.hpp>
+#include <godot_cpp/classes/text_server.hpp>
 
 // GCMP-07 (#4363): the Galactic Conquest mode of the LAN/online staging. The host picks it with the retail "Campaign"
 // game type before the room opens; the mode, the campaign and the options then travel in the lobby's game blob, so
@@ -23,6 +27,8 @@ constexpr const char* galactic_difficulty = "Normal_Default";
 // Item ids of the host's Open / AI choice on a playable, unheld row (kick entries use 10000 + peer).
 constexpr int galactic_row_open_id = 20000;
 constexpr int galactic_row_ai_id = 20001;
+// The informational (disabled) lines of a slot held by several humans (#8020).
+constexpr int stack_line_id = 30000;
 
 std::string row_label(const model::StagingRow& row) {
     if (!row.name.empty()) return row.name;
@@ -444,6 +450,9 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
     impl.galactic_row_order = model::galactic_row_order(facts, dialog_rows);
     const auto& order = impl.galactic_row_order;
     const std::size_t shown_rows = order.size();
+    // #8020: the humans of a slot, one entry each (name and mods state), in seat order.
+    struct SlotPlayer final { net::PeerIndex peer{}; std::string name; std::string line; std::array<std::string, 3> tags; };
+    std::vector<std::vector<SlotPlayer>> slot_players(dialog_rows);
     for (std::size_t slot = 0; slot < shown_rows; ++slot) {
         const std::size_t index = order[slot]; // the campaign row drawn on dialog row `slot`
         const auto& source = options->rows[index];
@@ -458,7 +467,13 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             if (seat.selection.slot != source.player) continue;
             if (first) row.name.clear();
             row.kind = model::RowKind::human;
-            row.name += (first ? "" : ", ") + seat.selection.name;
+            // Owner 2026-11-19: every player's mod check is visible next to the name, in the host's and in every guest's room.
+            const auto mod_check = std::find_if(room->mod_checks.begin(), room->mod_checks.end(), [&](const auto& entry) { return entry.peer == seat.peer; });
+            const bool tag_known = room->mod_checks_known && mod_check != room->mod_checks.end();
+            const bool tag_done = mod_check != room->mod_checks.end() && mod_check->done;
+            const std::string line = seat.selection.name + model::mod_check_tag(tag_known, tag_done);
+            row.name += (first ? "" : ", ") + line;
+            if (slot < slot_players.size()) slot_players[slot].push_back({seat.peer, seat.selection.name, line, model::mod_check_tag_tiers(tag_known, tag_done)});
             row.local = row.local || seat.peer == view.seat;
             row.accepted = first ? seat.ready : row.accepted && seat.ready;
             first = false;
@@ -481,6 +496,53 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
     impl.rows_signature = signature;
     state.loading = true;
     impl.row_states.clear();
+    // #8020: a slot held by 2+ humans draws one name cell per human, one below the other. The rows under it move down by
+    // the added cells, as far as the dialog's own last row lets them (the band under the rows is never entered); the
+    // single-human slots and every slot without a stack stay on their authored rectangles.
+    std::vector<std::size_t> cells(dialog_rows, 1U);
+    std::vector<float> shift(dialog_rows, 0.0F);
+    float pitch = 0.0F;
+    if (dialog_rows >= 2U && shown_rows > 0U) {
+        const auto* first = find_gadget(*state.dialog, "IDC_PLAYER_NAME_0");
+        const auto* second = find_gadget(*state.dialog, "IDC_PLAYER_NAME_1");
+        const auto* last = find_gadget(*state.dialog, "IDC_PLAYER_NAME_" + std::to_string(dialog_rows - 1U));
+        const auto* drawn_last = find_gadget(*state.dialog, "IDC_PLAYER_NAME_" + std::to_string(shown_rows - 1U));
+        if (first != nullptr && second != nullptr && last != nullptr && drawn_last != nullptr) {
+            pitch = local_rect(*state.dialog, *second).position.y - local_rect(*state.dialog, *first).position.y;
+            const float slack = local_rect(*state.dialog, *last).position.y - local_rect(*state.dialog, *drawn_last).position.y;
+            std::size_t budget = pitch > 0.0F ? static_cast<std::size_t>(std::max(0.0F, slack / pitch + 0.01F)) : 0U;
+            float moved = 0.0F;
+            for (std::size_t slot = 0; slot < shown_rows; ++slot) {
+                shift[slot] = moved;
+                const std::size_t want = slot_players[slot].size() >= 2U ? slot_players[slot].size() - 1U : 0U;
+                const std::size_t give = std::min(want, budget);
+                budget -= give;
+                cells[slot] = 1U + give;
+                moved += static_cast<float>(give) * pitch;
+            }
+        }
+    }
+    // What a stacked cell shows for one player: the name with the longest mods note that fits the box whole, the shorter notes
+    // next, and only then the name cut with an ellipsis in front of the shortest note (the note is never the part that is cut).
+    // The pop-down button takes the box height. `whole` says the name was not cut.
+    const auto cell_text = [](const EawrUiCombo& combo, const SlotPlayer& player) {
+        const Ref<Font> font = combo.get_theme_font("font");
+        const int font_size = combo.get_theme_font_size("font_size");
+        constexpr float pop_down_button_ratio = 1.3F; // the pop-down button is 1.3 box heights wide
+        const float box_width = combo.get_size().x - combo.get_size().y * pop_down_button_ratio;
+        const auto wide = [&](const String& value) {
+            return font.is_valid() ? font->get_string_size(value, HORIZONTAL_ALIGNMENT_LEFT, -1.0F, font_size).x : 0.0F;
+        };
+        for (const std::string& tag : player.tags) {
+            const String whole = text(player.name + tag);
+            if (wide(whole) <= box_width) return std::make_pair(whole, true);
+        }
+        const String tag = text(player.tags.back());
+        const String ellipsis = String::utf8("\xE2\x80\xA6");
+        String head = text(player.name);
+        while (head.length() > 1 && wide(head + ellipsis + tag) > box_width) head = head.substr(0, head.length() - 1);
+        return std::make_pair(head + ellipsis + tag, false);
+    };
     for (std::size_t slot = 0; slot < dialog_rows; ++slot) {
         const model::StagingRow& row = rows[slot];
         const std::string suffix = std::to_string(slot);
@@ -523,6 +585,82 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
                 }
             }
         }
+        // #8020: the stacked cells of a slot held by 2+ humans. Every cell lists all the humans (one per line, not selectable)
+        // and a Kick entry per non-host player, and shows its own player; the first cell is the row's own name combo.
+        const auto& players = slot_players[slot];
+        const bool stacked = shown && has_row && players.size() >= 2U;
+        const auto place = [&](Control* control, const std::string& gadget_id) {
+            if (control == nullptr) return;
+            if (const auto* authored = find_gadget(*state.dialog, gadget_id))
+                control->set_position(local_rect(*state.dialog, *authored).position + Vector2(0.0F, shift[slot]));
+        };
+        RowState row_state;
+        const auto fill_stack = [&](EawrUiCombo& combo, const std::size_t selected) {
+            combo.clear();
+            std::string everyone;
+            for (std::size_t j = 0; j < players.size(); ++j) {
+                combo.add_item(text(players[j].line), static_cast<int>(stack_line_id + j));
+                combo.set_item_disabled(static_cast<int>(j), true);
+                everyone += (j ? "\n" : "") + players[j].line;
+            }
+            bool kickable = false;
+            if (impl.host && room)
+                for (const auto& player : players) {
+                    if (player.peer == room->snapshot.host) continue;
+                    combo.add_item(resolved(resources.text, "TEXT_KICK") + " " + text(player.name), static_cast<int>(10000 + player.peer));
+                    kickable = true;
+                }
+            combo.select(static_cast<int>(selected));
+            combo.set_tooltip_text(text(everyone));
+            combo.set_text_overrun_behavior(TextServer::OVERRUN_TRIM_ELLIPSIS);
+            combo.set_disabled(!(kickable && staging));
+        };
+        if (name != nullptr) {
+            name->set_text_overrun_behavior(TextServer::OVERRUN_TRIM_ELLIPSIS);
+            place(name, "IDC_PLAYER_NAME_" + suffix);
+            if (stacked) {
+                fill_stack(*name, 0U);
+                const auto shown_text = cell_text(*name, players[0]);
+                name->set_text(shown_text.first);
+                row_state.cell_texts.push_back(utf8(shown_text.first));
+                row_state.line_fits.push_back(shown_text.second ? 1 : 0);
+            }
+        }
+        for (std::size_t j = 1; j < dialog_rows; ++j) {
+            const std::string line_id = "EAWR_SLOT_LINE_" + suffix + "_" + std::to_string(j);
+            auto* cell = EAWR_CONTROL(EawrUiCombo, line_id);
+            const bool used = stacked && j < cells[slot];
+            if (cell == nullptr) {
+                if (!used || name == nullptr || name->get_parent() == nullptr) continue;
+                cell = memnew(EawrUiCombo);
+                cell->set_name(text(line_id));
+                cell->set_theme_type_variation(name->get_theme_type_variation());
+                cell->set_fit_to_longest_item(false);
+                cell->set_clip_text(true);
+                cell->set_retail_list(true);
+                cell->set_list_height(name->get_list_height());
+                cell->set_size(name->get_size());
+                // A pick on a stacked cell is handled as a pick on the row's name combo (the lists are identical).
+                cell->connect("item_selected", callable_mp(this, &EawrLanLobby::on_item_selected).bind(text("IDC_PLAYER_NAME_" + suffix)));
+                name->get_parent()->add_child(cell);
+                state.controls[line_id] = cell;
+            }
+            cell->set_visible(used);
+            if (!used) continue;
+            place(cell, "IDC_PLAYER_NAME_" + suffix);
+            cell->set_position(cell->get_position() + Vector2(0.0F, static_cast<float>(j) * pitch));
+            fill_stack(*cell, j);
+            const auto shown_text = cell_text(*cell, players[j]);
+            cell->set_text(shown_text.first);
+            row_state.cell_texts.push_back(utf8(shown_text.first));
+            row_state.line_fits.push_back(shown_text.second ? 1 : 0);
+        }
+        if (stacked)
+            for (const auto& player : players) row_state.lines.push_back(player.line);
+        row_state.cells = stacked ? cells[slot] : 1U;
+        if (stacked && name != nullptr)
+            for (int item = 0; item < name->get_item_count(); ++item) row_state.items.push_back(utf8(name->get_item_text(item)));
+        if (name != nullptr) row_state.top = name->get_position().y;
         if (faction != nullptr) {
             faction->clear();
             faction->set_visible(shown);
@@ -558,15 +696,21 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
         if (auto* kick = EAWR_CONTROL(EawrUiButton, "IDC_BUTTON_KICK_PLAYER" + suffix)) {
             const bool remote = room && options && has_row && std::any_of(room->snapshot.seats.begin(), room->snapshot.seats.end(),
                 [&](const auto& seat) { return seat.selection.slot == options->rows[index].player && seat.peer != room->snapshot.host; });
-            kick->set_visible(shown && impl.host && remote);
+            // A stacked slot kicks per player (each cell's list), so its single Kick button stays out.
+            kick->set_visible(shown && impl.host && remote && !stacked);
             kick->set_disabled(!staging);
+            place(kick, "IDC_BUTTON_KICK_PLAYER" + suffix);
         }
+        place(faction, "IDC_PLAYER_FACTION_" + suffix);
+        place(colour, "IDC_PLAYER_COLOR_" + suffix);
+        place(team, "IDC_PLAYER_TEAM_" + suffix);
         const auto icon = state.accept_icons.find("IDC_ACCEPT_PLAYER_" + suffix);
         if (icon != state.accept_icons.end()) {
+            if (const auto* authored = find_gadget(*state.dialog, "IDC_ACCEPT_PLAYER_" + suffix))
+                icon->second->set_position(local_rect(*state.dialog, *authored).position + Vector2(2.0F, 2.0F + shift[slot]));
             icon->second->set_visible(shown && row.occupied());
             icon->second->set_color(row.accepted ? Color(0.2F, 0.85F, 0.3F, 0.95F) : Color(0.15F, 0.15F, 0.15F, 0.9F));
         }
-        RowState row_state;
         row_state.kind = row.kind == model::RowKind::human ? "human" : row.kind == model::RowKind::ai ? "ai"
                        : row.kind == model::RowKind::open ? "open" : "none";
         row_state.name = row.name;

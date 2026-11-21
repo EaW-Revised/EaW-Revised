@@ -389,7 +389,13 @@ GalacticCheckpointTransfer::GalacticCheckpointTransfer(bool recovery_only) : imp
 GalacticCheckpointTransfer::~GalacticCheckpointTransfer() = default;
 GalacticCheckpointTransfer::GalacticCheckpointTransfer(GalacticCheckpointTransfer&&) noexcept = default;
 GalacticCheckpointTransfer& GalacticCheckpointTransfer::operator=(GalacticCheckpointTransfer&&) noexcept = default;
-SaveTransferView GalacticCheckpointTransfer::view() const { return impl_->view; }
+SaveTransferView GalacticCheckpointTransfer::view() const {
+    auto result = impl_->view;
+    if (impl_->selected && !result.refusal && !impl_->restored.empty())
+        for (const auto peer : impl_->selected->peers)
+            if (peer != 0 && !(peer < impl_->restored.size() && impl_->restored[peer])) result.unrestored.push_back(peer);
+    return result;
+}
 const SaveManifest* GalacticCheckpointTransfer::manifest() const { return impl_->selected ? &*impl_->selected : nullptr; }
 std::shared_ptr<const Bytes> GalacticCheckpointTransfer::restored_bytes() const noexcept {
     return impl_->view.restored && !impl_->view.refusal ? impl_->staged : nullptr;

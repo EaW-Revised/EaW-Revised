@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include "../support/env.hpp"
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
@@ -1463,6 +1464,67 @@ void published_story_fault() {
     }
 }
 
+// #7826: a story's FORCE_CLICK_GUI on the pause control is the session's own clock change. Two peers fed the same click
+// toggle at the same tick (paused and running, so both directions), end in the expected pause state and keep equal digests
+// on 1/2/4/8 workers; the HUD is handed no press for it; a save taken right after the toggle loads back with the same
+// pause depth (the load prologue carries the saved depth, a story-caused pause included).
+void story_pause_toggle() {
+    const auto plots = [] {
+        auto a = make("PAUSE_TOGGLE", "STORY_CLICK_GUI", {"b_go"}); a.perpetual = true;
+        a.reward_type = "FORCE_CLICK_GUI"; a.reward_params[0] = {"B_Play_Pause"}; // the control's name matches in any case
+        return std::vector<st::SubPlotDef>{sub("P.xml", 1, {a})};
+    };
+    const auto depth = [](eawr::campaign::GameSession& game) { return game.galaxy().clock().pause_depth; };
+    // Both transports: the multiplayer flag takes the shared human hold path (protected system pause), the other the nested counter.
+    for (const bool multiplayer : {false, true}) {
+    const auto setup = [multiplayer] { auto s = session_setup(); s.networked_transport = multiplayer; return s; };
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::array<eawr::campaign::GameSession, 2> peers{take(eawr::campaign::GameSession::create(setup())),
+                                                          take(eawr::campaign::GameSession::create(setup()))};
+        for (auto& peer : peers) take(peer.install_story({}, {{1, "p.xml"}}, plots()));
+        std::uint64_t sequence{};
+        std::vector<std::string> digests;
+        const auto click_both = [&](const std::string_view label, const std::uint32_t expected) {
+            ++sequence;
+            for (auto& peer : peers) take(peer.submit(gc::GameCommand{{peer.completed_tick(), {1}, sequence}, gc::GuiClick{"b_go"}}));
+            std::array<eawr::campaign::GameTick, 2> ticks{take(peers[0].step(executor)), take(peers[1].step(executor))};
+            for (std::size_t i = 0; i < 2; ++i) {
+                expect(depth(peers[i]) == expected, std::string(label) + ": peer " + std::to_string(i) + " pause depth");
+                const bool hud_press = std::any_of(ticks[i].story_presentation.begin(), ticks[i].story_presentation.end(), [](const auto& row) {
+                    const auto* request = std::get_if<st::ConsumerRequest>(&row.payload);
+                    return request && request->reward_name == "FORCE_CLICK_GUI";
+                });
+                expect(!hud_press, std::string(label) + ": the HUD is handed no press for the pause control");
+                expect(ticks[i].story_triggers.size() == 1 && ticks[i].story_triggers.front().outcome == "applied", std::string(label) + ": an applied reward");
+            }
+            expect(peers[0].completed_tick() == peers[1].completed_tick() && peers[0].state_sha256() == peers[1].state_sha256(),
+                std::string(label) + ": both peers at the same tick with equal digests");
+            digests.push_back(peers[0].state_sha256());
+        };
+        click_both("running -> paused", 1);
+        // The pause holds across plain ticks (no story, no command).
+        for (auto& peer : peers) take(peer.step(executor));
+        expect(depth(peers[0]) == 1 && depth(peers[1]) == 1, "paused stays paused");
+        // A save right after the toggle (paused by the story) loads back paused.
+        const auto saved = take(peers[0].save_checkpoint_state());
+        auto loaded = take(eawr::campaign::GameSession::create(setup()));
+        take(loaded.install_story({}, {{1, "p.xml"}}, plots())); // a checkpoint loads into a campaign with the same plots
+        take(loaded.load_checkpoint_state(saved));
+        expect(depth(loaded) == 1, "a save taken while a story's pause holds loads back with the same pause depth");
+        click_both("paused -> running", 0);
+        const auto saved_running = take(peers[0].save_checkpoint_state());
+        auto loaded_running = take(eawr::campaign::GameSession::create(setup()));
+        take(loaded_running.install_story({}, {{1, "p.xml"}}, plots())); // a checkpoint loads into a campaign with the same plots
+        take(loaded_running.load_checkpoint_state(saved_running));
+        expect(depth(loaded_running) == 0, "a save taken after the story's resume loads back running");
+        if (baseline.empty()) baseline = digests;
+        expect(digests == baseline, "the toggle digests are equal on " + std::to_string(workers) + " workers (multiplayer " + std::to_string(multiplayer) + ")");
+    }
+    }
+}
+
 // #5857: FORCE_CLICK_GUI becomes a presentation request for the plot owner's seat, and the per-tick bound drops the
 // clicks a self-forcing loop would pile up, deterministically and without ending the match.
 void forced_clicks() {
@@ -1798,7 +1860,7 @@ int case_galactic_story_engine_tests(int argc, char** argv) {
         loader(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
         campaign_story_routes(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
         battle_events(); battle_perpetual_and_classes(); conquest_events(); loss_events(); counters_save_and_digest(); counter_restart_after_lua_edit(); travel_events(); move_events(); hero_moves_per_arrival(); hero_defeat_events(); construct_events();
-        session(); counters_in_the_game_checkpoint(); holocron_goals(); forced_clicks(); story_hud_requests(); story_lock_release(); story_objectives(); story_goal_rewards(); click_every_control(); session_rewards(); published_story_fault();
+        session(); counters_in_the_game_checkpoint(); holocron_goals(); forced_clicks(); story_pause_toggle(); story_hud_requests(); story_lock_release(); story_objectives(); story_goal_rewards(); click_every_control(); session_rewards(); published_story_fault();
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

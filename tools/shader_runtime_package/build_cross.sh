@@ -15,6 +15,9 @@ lock_dir=${EAWR_BUILD_LOCK_DIR:-/var/lib/eawr-build}
 [ -w "$lock_dir/build.lock" ] || lock_dir=$base
 # shellcheck source=../offload/linux_build_slots.sh
 source "$helper"
+# The per-job memory cap (tools/offload/linux_mem_cap.sh), a sibling of the slot helper unless EAWR_MEM_CAP_HELPER names it.
+# shellcheck source=../offload/linux_mem_cap.sh
+source "${EAWR_MEM_CAP_HELPER:-$(dirname "$helper")/linux_mem_cap.sh}"
 job="shader-cross-p2-$$"
 slot_acquire "$lock_dir" "$job" 14400 shader-cross-p2 "$queue_helper" 3 new
 slot_label "dependency $job since $(date -u +%Y-%m-%dT%H:%M:%SZ) (pid $$)"
@@ -29,7 +32,16 @@ export SOURCE_DATE_EPOCH=0
     ninja --version
     dpkg-query -W gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32 binutils-mingw-w64-x86-64 mingw-w64-x86-64-dev
 } > "$output/toolchain.txt" 2>&1
-nice -n 10 cmake -S "$output/source" -B "$output/build" -G Ninja \
+# A capped command that failed: say so when the cap stopped it (the same mem-cap-exceeded line the other jobs print), then
+# leave with its exit code (set -e would otherwise end the script with no line at all).
+shader_capped_end() {
+    [ "$1" = 0 ] && return 0
+    if eawr_mem_cap_report "$1" "$2"; then echo "EAWR-RESULT mem-cap-exceeded"; fi
+    exit "$1"
+}
+eawr_mem_cap_wrap shader-cross-configure
+code=0
+"${eawr_mem_cap_cmd[@]}" nice -n 10 cmake -S "$output/source" -B "$output/build" -G Ninja \
     -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc-win32 \
     -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++-win32 \
@@ -39,7 +51,11 @@ nice -n 10 cmake -S "$output/source" -B "$output/build" -G Ninja \
     -DSPIRV_CROSS_ENABLE_TESTS=OFF -DSPIRV_CROSS_ENABLE_GLSL=ON \
     -DSPIRV_CROSS_ENABLE_HLSL=OFF -DSPIRV_CROSS_ENABLE_MSL=OFF \
     -DSPIRV_CROSS_ENABLE_CPP=OFF -DSPIRV_CROSS_ENABLE_REFLECT=OFF -DSPIRV_CROSS_ENABLE_UTIL=OFF \
-    > "$output/configure.log" 2>&1
-nice -n 10 cmake --build "$output/build" --target spirv-cross-c-shared -j 2 > "$output/build.log" 2>&1
+    > "$output/configure.log" 2>&1 || code=$?
+shader_capped_end "$code" "$output/configure.log"
+eawr_mem_cap_wrap shader-cross-build
+code=0
+"${eawr_mem_cap_cmd[@]}" nice -n 10 cmake --build "$output/build" --target spirv-cross-c-shared -j 2 > "$output/build.log" 2>&1 || code=$?
+shader_capped_end "$code" "$output/build.log"
 x86_64-w64-mingw32-objdump -p "$output/build/libspirv-cross-c-shared.dll" > "$output/imports.txt"
 sha256sum "$output/build/libspirv-cross-c-shared.dll"

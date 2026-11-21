@@ -351,6 +351,9 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_beam_abi
         phase.impl_->release_beam(source, payload.ability, command_tick);
         if (payload.ability == AbilityKind::tractor_beam) phase.impl_->register_tractor(source, nullptr);
     } else {
+        // Prevent_All_Fire: a held unit cannot start a beam weapon (the beams that damage: energy weapon, super laser).
+        if (source.hold_fire && (payload.ability == AbilityKind::energy_weapon || payload.ability == AbilityKind::super_laser))
+            return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
         if (!phase.impl_->beam_usable(source, payload.ability, command_tick))
             return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
         const auto target = staged.find(payload.target);
@@ -726,8 +729,8 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::switch_ordinar
                     return core::Result<RejectReason>::failure(stopped.error());
             }
             if (switched.changed && payload.ability == AbilityKind::sensor_jamming) {
-                phase.impl_->jammer_reactivated(*live, profile_of(*live));
-                phase.register_jammer(live->state.entity_id, true);
+                if (phase.impl_->jammer_reactivated(*live, profile_of(*live))) // WJM-05
+                    phase.register_jammer(live->state.entity_id, true);
             }
             if (switched.changed && payload.ability == AbilityKind::defend) phase.impl_->defend_switched_on(*live, command_tick);
             if (switched.changed && payload.ability == AbilityKind::self_destruct) Impl::self_destruct_switched(*live);

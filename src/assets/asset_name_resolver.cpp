@@ -1,4 +1,5 @@
 #include "eawr/assets/asset_name_resolver.hpp"
+#include "eawr/assets/model_listing.hpp"
 
 #include "eawr/core/degradation_ledger.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -124,6 +125,14 @@ std::string resolve_model(const vfs::Vfs& filesystem, const std::string_view nam
                           const std::string_view root) {
     return resolve_model_reporting(root, name, site,
         [&filesystem](const std::string_view path) { return static_cast<bool>(filesystem.stat(path)); });
+}
+
+} // namespace eawr::assets
+
+namespace eawr::assets {
+
+core::Result<std::vector<vfs::AssetRecord>> list_models(const vfs::Vfs& filesystem) {
+    return filesystem.enumerate("data/art/models", ".alo");
 }
 
 } // namespace eawr::assets

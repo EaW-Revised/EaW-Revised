@@ -27,6 +27,11 @@ void screens() {
     expect(ui::dialog_name(FrontEndScreen::skirmish_setup).empty() && ui::dialog_name(FrontEndScreen::lan_setup).empty()
                && ui::dialog_name(FrontEndScreen::options).empty(),
            "FES-01: the setup and settings screens are drawn elsewhere");
+    expect(ui::covers_backdrop(FrontEndScreen::lan_setup) && ui::covers_backdrop(FrontEndScreen::online_setup)
+               && !ui::covers_backdrop(FrontEndScreen::main_menu) && !ui::covers_backdrop(FrontEndScreen::multiplayer)
+               && !ui::covers_backdrop(FrontEndScreen::skirmish_setup) && !ui::covers_backdrop(FrontEndScreen::load_game)
+               && !ui::covers_backdrop(FrontEndScreen::options) && !ui::covers_backdrop(FrontEndScreen::campaign_setup),
+           "MAT-22: only the lobby screens cover the demo battle");
 }
 
 void navigation() {

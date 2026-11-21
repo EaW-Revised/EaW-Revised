@@ -138,6 +138,8 @@ private:
     // The object weapon of a body (Projectile_Types and its recharge, pulse, scatter, cone and muzzle rows).
     // `object_damage` also reads the object's own Projectile_Damage (land objects).
     void read_object_weapon(Object& object, UnitType& unit, const Frames* model, bool object_damage);
+    // WDP-01: the weapon bones' places at each frame of a SPOILER_LOCK type's DEPLOY and UNDEPLOY clips.
+    void load_deploy_poses(Object& object, UnitType& unit);
     // LS shoot PR 1: a ground object's body in a land table (Land_Model_Name, health, armor, weapon, targeting,
     // collision and death rows). No hardpoints, turrets, abilities or production: those stay with their later PRs.
     void load_land_body(Object& object, UnitType& unit);

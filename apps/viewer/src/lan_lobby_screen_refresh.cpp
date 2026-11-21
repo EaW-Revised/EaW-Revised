@@ -658,6 +658,13 @@ bool EawrLanLobby::run_action(const std::string& action) {
         return number(argument, seconds) && restore_fixture(static_cast<int>(seconds));
     }
     if (verb == "restore_cancel" && page_ == Page::staging) return press_cancel_restore();
+    // #7881 fixture: a host whose restore was refused for finished-battle records of an older build, with a canned conversion.
+    if (verb == "recover_fixture" && page_ == Page::staging && match_->galactic_room()) {
+        std::uint32_t battles{};
+        return number(argument, battles) && recover_fixture(battles);
+    }
+    // #7881: the host's Load without old battle history button, pressed through the panel's real signal path.
+    if (verb == "recover_history" && page_ == Page::staging) return press_load_without_old_battle_history();
     if (verb == "host") return action_host(impl, argument);
     if (verb == "join") return action_join(impl, argument);
     if (verb == "password") return action_password(impl, argument);
@@ -674,7 +681,7 @@ bool EawrLanLobby::run_action(const std::string& action) {
     if (verb == "team" && page_ == Page::staging) return action_team(argument, number);
     if ((verb == "ready" || verb == "unready") && page_ == Page::staging && match_->lobby_state()) return action_ready(verb);
     if (verb == "kick" && impl.host && page_ == Page::staging) return action_kick(argument, number);
-    if (page_ == Page::staging && match_->lobby_state() && (verb == "slot" || verb == "faction" || verb == "name" || verb == "colour")) return action_staging_selection(verb, argument, number);
+    if (page_ == Page::staging && match_->lobby_state() && (verb == "slot" || verb == "share" || verb == "faction" || verb == "name" || verb == "colour")) return action_staging_selection(verb, argument, number);
     if (verb == "start" && impl.host) return action_start(impl);
     if (verb == "accept" && !impl.host) return action_accept(impl);
     return false;
@@ -958,6 +965,12 @@ bool EawrLanLobby::action_staging_selection(const std::string& verb, const std::
     if (verb == "name") choice.name = model::clamp_player_name(argument);
     else if (verb == "faction") choice.faction = argument;
     else if (verb == "slot") { if (!number(argument, choice.slot)) return false; }
+    else if (verb == "share") {
+        // share:<player name>: take the slot that player holds (the co-op scripts put several humans on one faction).
+        const auto other = std::find_if(room.snapshot.seats.begin(), room.snapshot.seats.end(), [&](const auto& seat) { return seat.selection.name == argument; });
+        if (other == room.snapshot.seats.end()) return false;
+        choice.slot = other->selection.slot;
+    }
     else if (!number(argument, choice.colour)) return false;
     return match_->lobby_select(std::move(choice));
 }

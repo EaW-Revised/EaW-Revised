@@ -566,9 +566,11 @@ void test_passive_damage_aura() {
 void test_team_company_healing() {
     constexpr tactical::TypeId team_type = 40, member_type = 41, ship_type = 100;
     constexpr eawr::sim::EntityId company = 10, near_ally = 20, low_ally = 21, far_ally = 22, enemy = 23;
-    struct Variant { bool passive; bool single; bool kill_low; };
-    for (const Variant variant : {Variant{false, true, false}, Variant{false, false, false}, Variant{false, true, true},
-                                  Variant{true, false, false}}) {
+    // members_die: the command tick at which both members are destroyed (0 = never). An emptied company is erased
+    // by the team's destroy and no longer serves; a hangar-held squadron has no session entity before it launches.
+    struct Variant { bool passive; bool single; bool kill_low; std::uint64_t members_die; };
+    for (const Variant variant : {Variant{false, true, false, 0}, Variant{false, false, false, 0}, Variant{false, true, true, 0},
+                                  Variant{true, false, false, 0}, Variant{false, false, false, 70}, Variant{false, false, false, 1}}) {
         tactical::TacticalSetup initial;
         initial.seed = 7911;
         initial.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 3, 3, tactical::player_flag_commandable}};
@@ -615,15 +617,24 @@ void test_team_company_healing() {
             auto session = std::move(made.value());
             expect(!session.durability_state(company), "WSH-13: the company has no hull");
             const auto first_poll = session.ability_state(company)->special.slots[0].next_service_frame;
-            for (const eawr::sim::EntityId id : {near_ally, low_ally, far_ally, enemy}) {
-                expect(static_cast<bool>(session.submit(command(1, 1, id, id,
-                    tactical::DamagePayload{units(id == near_ally ? 300 : 600), tactical::hull_target}))),
-                    "WSH-13: recipient damage submits");
-            }
-            if (variant.kill_low) {
-                expect(static_cast<bool>(session.submit(command(100, 1, 100, low_ally,
-                    tactical::DamagePayload{units(5000), tactical::hull_target}))), "WSH-13: the lowest recipient is killed mid-run");
-            }
+            const auto submit_all = [&](tactical::TacticalSession& target) {
+                for (const eawr::sim::EntityId id : {near_ally, low_ally, far_ally, enemy}) {
+                    expect(static_cast<bool>(target.submit(command(1, 1, id, id,
+                        tactical::DamagePayload{units(id == near_ally ? 300 : 600), tactical::hull_target}))),
+                        "WSH-13: recipient damage submits");
+                }
+                if (variant.kill_low) {
+                    expect(static_cast<bool>(target.submit(command(100, 1, 100, low_ally,
+                        tactical::DamagePayload{units(5000), tactical::hull_target}))), "WSH-13: the lowest recipient is killed mid-run");
+                }
+                if (variant.members_die != 0) {
+                    for (const eawr::sim::EntityId member : {11U, 12U}) {
+                        expect(static_cast<bool>(target.submit(command(variant.members_die, 1, 200 + member, member,
+                            tactical::DamagePayload{units(5000), tactical::hull_target}))), "WSH-13: a member is destroyed");
+                    }
+                }
+            };
+            submit_all(session);
             const eawr::platform::ThreadWorkerAdapter executor(workers);
             std::vector<std::string> hashes;
             std::size_t pulses_near = 0, pulses_low = 0, pulses_after_kill = 0;
@@ -644,12 +655,60 @@ void test_team_company_healing() {
                     pulses_low += event.target == low_ally ? 1U : 0U;
                     if (variant.kill_low && tick > 100) pulses_after_kill += event.target == near_ally ? 1U : 0U;
                 }
-                expect((pulses_now != 0) == (tick >= 1 && tick >= first_poll && (tick - first_poll) % interval == 0),
-                    "WSH-13: the company pulses on the authored interval from its first poll");
+                if (variant.members_die == 0) {
+                    expect((pulses_now != 0) == (tick >= 1 && tick >= first_poll && (tick - first_poll) % interval == 0),
+                        "WSH-13: the company pulses on the authored interval from its first poll");
+                } else {
+                    // An emptied company is erased before the systems stage of the next tick: it never serves again.
+                    expect(pulses_now == 0 || tick <= variant.members_die + 1,
+                        "WSH-13: a company whose members are all gone no longer heals");
+                    // The first poll is a keyed 0..1-frame phase and the destroy commands follow that tick's poll: a company emptied on
+                    // tick 1 may serve at its own first poll, never after it.
+                    if (variant.members_die == 1) expect(pulses_now == 0 || tick == first_poll, "WSH-13: a company emptied on its first poll tick never heals after it");
+                }
             }
             if (baseline.empty()) baseline = hashes; else expect(hashes == baseline, "WSH-13: team healing 1/2/4/8 hashes match");
+            // A checkpoint saved mid-run and loaded into a fresh session continues exactly as the uninterrupted run.
+            {
+                auto first = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, combat, {}, abilities);
+                auto second = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, combat, {}, abilities);
+                expect(static_cast<bool>(first) && static_cast<bool>(second), "WSH-13: the checkpoint sessions create");
+                if (first && second) {
+                    auto original = std::move(first.value());
+                    auto restored = std::move(second.value());
+                    submit_all(original);
+                    for (std::uint64_t tick = 0; tick < 90; ++tick) {
+                        const auto stepped = original.step(executor);
+                        expect(static_cast<bool>(stepped), "WSH-13: the checkpoint source advances");
+                        if (!stepped) break;
+                    }
+                    const auto saved = original.save_checkpoint_state();
+                    expect(static_cast<bool>(saved), "WSH-13: the mid-run checkpoint saves");
+                    if (saved) {
+                        // The fresh session is built the way the battle was: same content and the same accepted commands,
+                        // so the checkpoint's command cursors agree with its log.
+                        submit_all(restored);
+                        const auto loaded = restored.load_checkpoint_state(saved.value());
+                        expect(static_cast<bool>(loaded), "WSH-13: the mid-run checkpoint loads");
+                        if (!loaded) std::cerr << loaded.error().message << '\n';
+                        for (std::uint64_t tick = 90; tick <= 180; ++tick) {
+                            const auto stepped = restored.step(executor);
+                            expect(static_cast<bool>(stepped), "WSH-13: the restored session advances");
+                            if (!stepped) break;
+                            expect(stepped.value().state_sha256 == hashes[tick],
+                                "WSH-13: a restored team-healing run matches the uninterrupted run");
+                        }
+                    }
+                }
+            }
             const auto hull = [&](const eawr::sim::EntityId id) { return session.durability_state(id)->hull.raw(); };
-            if (variant.passive) {
+            if (variant.members_die != 0) {
+                const auto live = session.units();
+                expect(std::none_of(live.begin(), live.end(), [&](const tactical::UnitState& unit) { return unit.entity_id == company; }),
+                    "WSH-13: a company with no live member is erased by the team's destroy");
+                expect(hull(near_ally) <= units(1000).raw() && hull(far_ally) == units(400).raw() && hull(enemy) == units(400).raw(),
+                    "WSH-13: nothing heals once the company is gone, and out-of-range or hostile units are never healed");
+            } else if (variant.passive) {
                 expect(pulses_near == 0 && pulses_low == 0 && hull(near_ally) == units(700).raw() && hull(far_ally) == units(400).raw(),
                     "WSH-13: passive damage leaves allies untouched");
                 expect(hull(enemy) < units(400).raw(), "WSH-13: passive damage reaches the enemy inside the range");
@@ -1050,6 +1109,72 @@ void test_radar_lifecycle_work_budget() {
     expect(static_cast<bool>(world.stage_remove(born.value())), "FC-75: radar station removes");
     expect(static_cast<bool>(world.step(executor)) && executor.phases == 2,
         "FC-75: removing the last radar source restores zero radar work");
+}
+
+
+void test_radar_enemy_admission_by_mode() {
+    // WRAD-06: a player without a radar permission list keeps the mode default: enemies admitted in a campaign battle
+    // (the Skirmish_Automatic handler never applies there), excluded otherwise. A skirmish radar owner follows its list.
+    // A single-player skirmish against an AI has no campaign binding and no native scene, so it is the multiplayer case here.
+    tactical::SpecialAbilityProfile radar;
+    radar.name = "Comm_Radar"; radar.kind = tactical::SpecialAbilityKind::enable_radar;
+    radar.style = tactical::SpecialActivationStyle::skirmish_automatic;
+    for (const bool multiplayer : {true, false}) {
+        for (const bool enabled : {false, true}) {
+            radar.initially_enabled = enabled;
+            tactical::UnitAbilityProfile profile; profile.type_id = corvette_type; profile.special = {radar};
+            tactical::AbilityTable table; table.profiles = {profile};
+            auto start = setup();
+            if (!multiplayer) start.native_scene = tactical::ReplayNativeScene{false, {}, {}, {}};
+            auto made = tactical::TacticalSession::create(start, {}, durability(), {}, {}, {}, {}, table);
+            expect(static_cast<bool>(made), "WRAD-06: radar mode fixture creates");
+            if (!made) continue;
+            auto world = std::move(made).value();
+            const auto admitted = [&](const tactical::PlayerId id) {
+                for (const auto& player : world.snapshot()->players()) if (player.player_id == id) return player.radar_enabled;
+                return false;
+            };
+            const bool expected_owner = multiplayer ? enabled : true;
+            const bool expected_free = !multiplayer;
+            expect(admitted(1) == expected_owner && admitted(2) == expected_free,
+                "WRAD-06: a skirmish radar owner follows its list; a source-free player keeps the mode default");
+            eawr::sim::InlineExecutor executor;
+            for (unsigned tick = 0; tick < 3; ++tick)
+                expect(static_cast<bool>(world.step(executor)), "WRAD-06: radar mode fixture steps");
+            expect(admitted(1) == expected_owner && admitted(2) == expected_free,
+                "WRAD-06: the admission flag is stable while the battle runs");
+        }
+    }
+}
+
+
+void test_radar_initially_enabled_source_retains_list() {
+    // WRAD-06: a skirmish radar handler that is enabled from battle start (no Initially_Enabled, no hardpoint naming it)
+    // is applied without any lock event. Its owner is admitted while the source lives; losing the source leaves an empty
+    // list, so the owner stays excluded afterwards, as for a source created later.
+    tactical::SpecialAbilityProfile radar;
+    radar.name = "Comm_Radar"; radar.kind = tactical::SpecialAbilityKind::enable_radar;
+    radar.style = tactical::SpecialActivationStyle::skirmish_automatic;
+    tactical::UnitAbilityProfile profile; profile.type_id = corvette_type; profile.special = {radar};
+    tactical::AbilityTable table; table.profiles = {profile};
+    const auto start = setup();
+    auto made = tactical::TacticalSession::create(start, {}, durability(), {}, {}, {}, {}, table);
+    expect(static_cast<bool>(made), "WRAD-06: initially enabled radar fixture creates");
+    if (!made) return;
+    auto world = std::move(made).value();
+    const auto admitted = [&](const tactical::PlayerId id) {
+        for (const auto& player : world.snapshot()->players()) if (player.player_id == id) return player.radar_enabled;
+        return false;
+    };
+    eawr::sim::InlineExecutor executor;
+    expect(static_cast<bool>(world.step(executor)) && admitted(1), "WRAD-06: an applied start-up radar source admits its owner");
+    eawr::sim::EntityId source = eawr::sim::invalid_entity_id;
+    for (const auto& unit : start.units) if (unit.owner == 1 && unit.type_id == corvette_type) source = unit.entity_id;
+    expect(source != eawr::sim::invalid_entity_id, "WRAD-06: the fixture has a radar source");
+    expect(static_cast<bool>(world.stage_remove(source)), "WRAD-06: the start-up radar source removes");
+    expect(static_cast<bool>(world.step(executor)) && !admitted(1),
+        "WRAD-06: losing a start-up radar source leaves an empty list, not the default");
+    expect(static_cast<bool>(world.step(executor)) && !admitted(1), "WRAD-06: the empty list persists");
 }
 
 

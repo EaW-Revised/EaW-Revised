@@ -523,7 +523,14 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
         const auto requested = rounded(number(key.bindings, "PARAMETER_COUNT").value_or(real(1)));
         const auto types = selected_type_ids(type_names_, key.bindings);
         std::int64_t owned{}, matches{}, structures{};
-        PlanetSlot current_slot{{"VARIABLE_TARGET", token == "MAXEDSTARBASES" ? "STARBASELEVEL" : "GROUNDBASELEVEL"}};
+        Real levels{}, highest{};
+        const bool starbase_token = token == "MAXEDSTARBASES" || token == "AVERAGESTARBASE"
+            || token == "MAXSTARBASELEVEL" || token == "MAXSTARBASELEVELUNNORMALIZED";
+        const bool average_token = token == "AVERAGESTARBASE" || token == "AVERAGEGROUNDBASE";
+        const bool highest_token = token == "MAXSTARBASELEVEL" || token == "MAXGROUNDBASELEVEL"
+            || token == "MAXSTARBASELEVELUNNORMALIZED" || token == "MAXGROUNDBASELEVELUNNORMALIZED";
+        PlanetSlot current_slot{{"VARIABLE_TARGET", std::string(starbase_token ? "STARBASELEVEL" : "GROUNDBASELEVEL")
+            + (token.ends_with("UNNORMALIZED") ? "UNNORMALIZED" : "")}};
         PlanetSlot maximum_slot{{"VARIABLE_TARGET", token == "MAXEDSTARBASES" ? "MAXSTARBASELEVEL" : "MAXGROUNDBASELEVEL"}};
         PlanetSlot qualifies_slot{{"VARIABLE_TARGET", token.find("STARBASE") != std::string_view::npos ? "HASSTARBASEOFLEVEL" : "HASGROUNDBASEOFLEVEL"}};
         PlanetSlot structure_slot{{"VARIABLE_TARGET", std::string(token)}};
@@ -536,6 +543,11 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
                 const auto current = read_slot(current_slot, no_bindings, row.planet); if (!current) return {};
                 const auto maximum = read_slot(maximum_slot, no_bindings, row.planet); if (!maximum) return {};
                 if (*current == *maximum) ++matches;
+            } else if (average_token || highest_token) {
+                // WGA-504: the owned planets' base levels (target tokens), averaged or maximized; a failed read fails the token.
+                const auto current = read_slot(current_slot, no_bindings, row.planet); if (!current) return {};
+                levels = levels + *current;
+                if (highest < *current) highest = *current;
             } else if (token == "HASSTARBASEOFLEVEL" || token == "NUMSTARBASEOFLEVEL"
                 || token == "HASGROUNDBASEOFLEVEL" || token == "NUMGROUNDBASEOFLEVEL") {
                 if (!level || *level < 1 || !requested) return {};
@@ -547,6 +559,8 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
             }
         }
         if (token == "MAXEDSTARBASES" || token == "MAXEDGROUNDBASES") return fraction(real(matches), real(owned));
+        if (average_token) return fraction(levels, real(owned)); // WGA-504: 0 when nothing is owned
+        if (highest_token) return highest; // WGA-504: starts at 0
         if (token == "STRUCTURECOUNT") return types ? std::optional{real(structures)} : std::nullopt;
         if (token == "HASSTRUCTURE" || token == "HASSTARBASEOFLEVEL" || token == "NUMSTARBASEOFLEVEL"
             || token == "HASGROUNDBASEOFLEVEL" || token == "NUMGROUNDBASEOFLEVEL") {

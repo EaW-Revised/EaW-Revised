@@ -141,6 +141,7 @@ class CallSite:
     pc: int | None
     reason: str | None
     opcode: str
+    function: str | None = None  # outermost named enclosing function; None = file top level (source calls only)
 
 
 class LuaParser:
@@ -153,6 +154,7 @@ class LuaParser:
         self.calls: list[CallSite] = []
         self.scopes: list[dict[str, str | None]] = [{}]
         self.script_globals: set[str] = set()
+        self.function_stack: list[str] = []
 
     @property
     def tok(self) -> Token: return self.tokens[self.pos]
@@ -221,12 +223,12 @@ class LuaParser:
             method = self.accept(":")
             if method: parts.append(self.name().value)
             if len(parts) == 1: self.script_globals.add(parts[0])
-            self.function_body("self" if method else None); return
+            self.function_body("self" if method else None, ".".join(parts)); return
         if value == "local":
             self.take()
             if self.accept("function"):
                 token = self.name(); self.scopes[-1][token.value] = "<script>"
-                self.function_body(None); return
+                self.function_body(None, token.value); return
             names = [self.name()]
             while self.accept(","): names.append(self.name())
             values: list[Expr] = []
@@ -271,7 +273,12 @@ class LuaParser:
             if name in scope: return True, scope[name]
         return False, None
 
-    def function_body(self, implicit: str | None) -> Expr:
+    def function_body(self, implicit: str | None, name: str | None = None) -> Expr:
+        self.function_stack.append(name or "<anon>")
+        try: return self._function_body(implicit)
+        finally: self.function_stack.pop()
+
+    def _function_body(self, implicit: str | None) -> Expr:
         token = self.take("("); params: list[str] = []
         if self.tok.value != ")":
             if self.accept("..."): pass
@@ -368,7 +375,9 @@ class LuaParser:
             symbol, kind, receiver = target.value, "method", base
             if base is None: reason = "dynamic method receiver"
         else: reason = "dynamic call expression"
-        self.calls.append(CallSite(symbol, kind, receiver, token.line, token.column, None, None, reason, "source-call"))
+        named = [n for n in self.function_stack if n != "<anon>"]
+        context = named[0] if named else ("<anon>" if self.function_stack else None)
+        self.calls.append(CallSite(symbol, kind, receiver, token.line, token.column, None, None, reason, "source-call", context))
         return Expr("call", token, children=[target])
 
 

@@ -100,6 +100,27 @@ template <class DigestsSettled>
 // The line shown while the gate is closed; the file counts (0 when unknown) go into the mod-files line.
 [[nodiscard]] std::string galactic_content_gate_text(GalacticContentGate gate, std::uint64_t files_done,
                                                      std::uint64_t files_total);
+// What a campaign room is waiting for, in plain words (owner 2026-11-19: no button stays greyed without saying why). One line, in the
+// order the player needs to hear it: the player's own mod check, the campaign preparation, the saved game being restored, the
+// content still loading, then other players still checking the host's mods or still loading the saved game. Empty: nothing waits.
+struct LobbyWaitInput {
+    std::string own_mod_check;                      // this player's mod check line while it runs
+    std::string preparing;                          // the campaign preparation line
+    std::string restoring;                          // the host's own saved game restore line
+    std::string content_loading;                    // the content gate line (Create / Load Game waiting)
+    std::vector<std::string> checking_mods;         // players who have not finished checking the host's mods
+    std::vector<std::string> loading_saved_game;    // players who have not restored the saved game yet
+    std::string start_off;                          // the host's Start button is off and this is why (last: only when nothing above waits)
+};
+[[nodiscard]] std::string lobby_wait_line(const LobbyWaitInput& input);
+// "A", "A and B", "A, B and 2 more": the names a waiting line lists (at most two are spelled out).
+[[nodiscard]] std::string wait_names(const std::vector<std::string>& names);
+// The note after a player's name in the room list: whether that player has finished checking the host's mods. Empty while the room
+// does not know (a guest before the host's first report), so no row claims a state nobody reported.
+[[nodiscard]] std::string mod_check_tag(bool known, bool done);
+// The same note in three lengths, longest first (the first is mod_check_tag's): a small cell (a slot's stacked player lines, #8020)
+// takes the longest that fits whole, so the state is never the part that is cut.
+[[nodiscard]] std::array<std::string, 3> mod_check_tag_tiers(bool known, bool done);
 // The optional four-letter-or-digit room code: trimmed, upper-cased, nothing else accepted.
 [[nodiscard]] std::optional<std::string> normalize_short_code(std::string_view typed);
 

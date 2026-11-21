@@ -1,6 +1,7 @@
 #include "galactic_ai_world.hpp"
 #include "ai_script_evaluators.hpp"
 #include "eawr/core/gc_profile.hpp"
+#include "eawr/script/numeric/binary64.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -767,7 +768,8 @@ std::optional<Real> GalacticWorld::uncached(const GalacticQueryKey& key, ReadMod
         const auto* who = id ? player(*id) : nullptr; if (!who) return {};
         if (token == "MARKUP") return markup_->value({key.player, true, *id}); // WGA-461.
         static const std::set<std::string, std::less<>> economy_tokens{
-            "MAXEDSTARBASES", "MAXEDGROUNDBASES", "HASSTARBASEOFLEVEL", "HASGROUNDBASEOFLEVEL",
+            "MAXEDSTARBASES", "MAXEDGROUNDBASES", "AVERAGESTARBASE", "AVERAGEGROUNDBASE", "MAXSTARBASELEVEL", "MAXGROUNDBASELEVEL",
+            "MAXSTARBASELEVELUNNORMALIZED", "MAXGROUNDBASELEVELUNNORMALIZED", "HASSTARBASEOFLEVEL", "HASGROUNDBASEOFLEVEL",
             "NUMSTARBASEOFLEVEL", "NUMGROUNDBASEOFLEVEL", "HASSTRUCTURE", "STRUCTURECOUNT",
             "HASUNIT", "HASTECHTOPRODUCE", "CANADVANCETECH", "MAINTENANCE",
             "MAINTENANCEUNNORMALIZED", "GROSSINCOMEUNNORMALIZED", "NETINCOMEUNNORMALIZED",
@@ -1027,6 +1029,9 @@ std::optional<Real> GalacticWorld::uncached(const GalacticQueryKey& key, ReadMod
     if (token == "STARBASELEVEL") return setup_.maximum_space_level ? std::optional{real(production->space_level) / *setup_.maximum_space_level} : std::nullopt;
     if (token == "MAXGROUNDBASELEVEL") return setup_.maximum_ground_level ? std::optional{real(std::min<std::int64_t>(production->ground_slots, 5)) / *setup_.maximum_ground_level} : std::nullopt;
     if (token == "MAXSTARBASELEVEL") return setup_.maximum_space_level ? std::optional{real(production->maximum_space_level) / *setup_.maximum_space_level} : std::nullopt;
+    // WGA-504: the unnormalized forms of the two maxima above (mod equations read them; stock does not).
+    if (token == "MAXGROUNDBASELEVELUNNORMALIZED") return real(std::min<std::int64_t>(production->ground_slots, 5));
+    if (token == "MAXSTARBASELEVELUNNORMALIZED") return real(production->maximum_space_level);
     if (token == "ISSURFACEACCESSIBLE") return boolean_value(production->surface_accessible);
     if (token == "MAXSTRUCTURESLOTSUNNORMALIZED") return real(production->ground_slots);
     if (token == "OPENCOMPANYSLOTSUNNORMALIZED") return real(production->maximum_ground_forces - production->landed_transports); // WGA-62 raw, including negatives
@@ -1137,7 +1142,8 @@ core::Result<void> GalacticWorld::restore(GalacticPerceptionState state) {
             || (row.key.human && !player(*row.key.human)) || row.interval < real(-1)
             || row.frame > bound().synchronized_frame_ || row.key.tokens.size() < 2 || row.key.tokens.front() != "VARIABLE_TARGET"
             || interval == setup_.cache_intervals.end() || interval->second != row.interval
-            || (row.value.repr & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL
+            || ((row.value.repr & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL && row.value.repr != numeric::binary64::canonical_nan
+                && row.value.repr != numeric::binary64::positive_infinity && row.value.repr != numeric::binary64::negative_infinity) // WGA-192a
             || (row.interval.repr & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL)
             return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "invalid galactic perception cache state"));
         for (const auto& token : row.key.tokens) if (token.empty() || upper_case(token) != token)

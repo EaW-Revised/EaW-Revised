@@ -428,7 +428,7 @@ bool derive_production_controllers(PoliticalControlSetup& control, const Product
 core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& s, const ControlPlanet& p,
     const PlanetControl& previous, const std::span<const Fleet> orbit, const MovementSetup* movement,
     const std::span<const Route> routes, const std::uint64_t frame, const std::span<const CensusObject> actors,
-    const std::map<FleetId, core::Result<bool>>* cached_skip) {
+    const std::map<FleetId, core::Result<bool>>* cached_skip, const PlanetProduction* live_production) {
     ControlStep out; out.state = previous;
     const auto degrade = [&](std::string_view code, std::string_view message, std::string effective) {
         core::LoadNote note; note.code = code; note.object = std::to_string(p.planet);
@@ -508,7 +508,38 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
     if (!controller) for (const auto& player : s.players) if (player.neutral) { controller = player.player; break; }
     Fixed target = add(military, Fixed::from_raw(std::min(fleet_control, std::int64_t{0}) * Fixed::scale), "political category sum overflow");
     target = add(target, leaning, "political category sum overflow");
-    for (const auto value : p.special_control) target = add(target, value, "special political category overflow");
+    if (live_production) {
+        if (live_production->planet != p.planet) return invalid<ControlStep>("political structure planet differs from control planet");
+        // WGM-70: current ground list, then current orbital list. Zero values
+        // consume no category; source ownership/faction does not filter them.
+        const auto special_modifiers = [&] {
+            std::size_t categories{};
+            for (const auto domain : {ProductionDomain::ground, ProductionDomain::space})
+                for (const auto& object : live_production->objects) {
+                    if (object.kind != ProductionKind::structure || object.domain != domain) continue;
+                    const auto actor = std::lower_bound(actors.begin(), actors.end(), object.id,
+                        [](const auto& row, auto id) { return row.id < id; });
+                    const auto current_type = actor != actors.end() && actor->id == object.id
+                        ? actor->current_type : object.type;
+                    const auto* source = type(s, current_type);
+                    if (!source) {
+                        degrade("EAWR-LOAD-1112", "missing live special political type at control service", "skip contribution");
+                        continue;
+                    }
+                    const auto value = source->signed_political_control.value_or(source->political_control);
+                    if (value == 0) continue;
+                    if (categories == 3) {
+                        degrade("EAWR-LOAD-1116", "special political category range exhausted", "retain first three special categories");
+                        return;
+                    }
+                    target = add(target, Fixed::from_raw(value * Fixed::scale), "special political category overflow");
+                    ++categories;
+                }
+        };
+        special_modifiers();
+    } else {
+        for (const auto value : p.special_control) target = add(target, value, "special political category overflow");
+    }
     Fixed trade{};
     for (const auto& route : routes) {
         ++out.route_visits;
@@ -821,7 +852,8 @@ core::Result<void> GalacticSession::Impl::service_control(const PartitionExecuto
             const auto links = std::as_const(incident_routes).find(inputs.planets[i].planet);
             const std::span<const Route> routes = links == incident_routes.end() ? std::span<const Route>{} : links->second;
             staged[i] = calculate_planet_control(inputs, inputs.planets[i], inputs.state[i], presence,
-                movement_inputs ? movement_inputs.get() : nullptr, routes, clock.galactic_frame, actors, cached_skip);
+                movement_inputs ? movement_inputs.get() : nullptr, routes, clock.galactic_frame, actors, cached_skip,
+                production ? &production->planets[i] : nullptr);
         }
     });
     if (!phase) return core::Result<void>::failure(phase.error());
@@ -892,7 +924,8 @@ core::Result<void> GalacticSession::Impl::initialize_control() {
         for (const auto& fleet : all_fleets) if (fleet.orbit == inputs.planets[i].planet) orbit.push_back(fleet);
         std::stable_sort(orbit.begin(), orbit.end(), [](const auto& a, const auto& b) { return a.motion.orbit_entry < b.motion.orbit_entry; });
         auto calculated = calculate_planet_control(inputs, inputs.planets[i], inputs.state[i], orbit,
-            setup.movement ? &*setup.movement : nullptr, {}, 0, actor_inputs());
+            setup.movement ? &*setup.movement : nullptr, {}, 0, actor_inputs(), nullptr,
+            production ? &production->planets[i] : nullptr);
         if (!calculated) return core::Result<void>::failure(calculated.error());
         if (calculated.value().degraded) merge_load_notes(calculated.value().notes);
         control->state[i] = calculated.value().state;

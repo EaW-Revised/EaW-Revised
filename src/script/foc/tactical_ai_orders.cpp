@@ -74,6 +74,16 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         return OrderResult::success({static_cast<tactical::PlayerId>(player.value()), {},
             tactical::RevealAllPayload{static_cast<tactical::PlayerId>(recipient->id)}});
     }
+    if (command.verb == verb_despawn) {
+        if (arguments.size() != 2) return bad("expects issuer and unit");
+        const auto* issuer = std::get_if<LuaNumber>(&arguments[0].data);
+        const Handle* unit = as_handle(arguments[1], handle_game_object);
+        if (issuer == nullptr || unit == nullptr) return bad("malformed issuer or unit");
+        const auto player = numeric::to_exact_integer(*issuer);
+        if (!player || player.value() < 0 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("malformed issuer");
+        return OrderResult::success({static_cast<tactical::PlayerId>(player.value()), {unit->id}, tactical::ScriptDespawnPayload{}});
+    }
     if (arguments.size() < 3) return bad("too few arguments");
     const auto* issuer = std::get_if<LuaNumber>(&arguments[0].data);
     const Handle* unit = as_handle(arguments[1], handle_game_object);
@@ -90,6 +100,46 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         const auto* enabled = std::get_if<bool>(&arguments[2].data);
         if (enabled == nullptr) return bad("malformed enabled flag");
         return OrderResult::success(make_order({unit->id}, tactical::ScriptInvulnerablePayload{*enabled}));
+    }
+    if (command.verb == verb_prevent_all_fire) {
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit and enabled");
+        const auto* enabled = std::get_if<bool>(&arguments[2].data);
+        if (enabled == nullptr) return bad("malformed enabled flag");
+        return OrderResult::success(make_order({unit->id}, tactical::ScriptHoldFirePayload{*enabled}));
+    }
+    if (command.verb == verb_change_owner) {
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit and new owner");
+        const Handle* owner = as_handle(arguments[2], handle_player);
+        if (owner == nullptr || owner->id > std::numeric_limits<tactical::PlayerId>::max()) return bad("malformed new owner");
+        return OrderResult::success(make_order({unit->id}, tactical::ScriptChangeOwnerPayload{static_cast<tactical::PlayerId>(owner->id)}));
+    }
+    if (command.verb == verb_teleport_and_face) {
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit and target");
+        const Handle* target = as_handle(arguments[2], handle_game_object);
+        if (target == nullptr || target->id == 0) return bad("malformed target");
+        return OrderResult::success(make_order({unit->id}, tactical::ScriptTeleportPayload{target->id}));
+    }
+    if (command.verb == verb_take_damage) {
+        // HD-30: the retail wrapper's debug-cheat damage. A hardpoint index of 0xffffffff is the hull.
+        if ((arguments.size() != 3 && arguments.size() != 4) || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit, amount and an optional hardpoint");
+        const auto* amount = std::get_if<LuaNumber>(&arguments[2].data);
+        if (amount == nullptr) return bad("malformed amount");
+        const auto fixed = numeric::to_fixed(*amount);
+        if (!fixed || fixed.value().raw() < 0) return bad("invalid amount");
+        std::uint32_t hardpoint = tactical::hull_target;
+        if (arguments.size() == 4) {
+            const auto* index = std::get_if<LuaNumber>(&arguments[3].data);
+            if (index == nullptr) return bad("malformed hardpoint");
+            const auto value = numeric::to_exact_integer(*index);
+            if (!value || value.value() < 0 || value.value() >= std::numeric_limits<std::uint32_t>::max())
+                return bad("malformed hardpoint");
+            hardpoint = static_cast<std::uint32_t>(value.value());
+        }
+        return OrderResult::success(make_order({unit->id}, tactical::DamagePayload{fixed.value(), hardpoint}));
     }
     if (command.verb == verb_tactical_superweapon) {
         // TSW-07: the script call stages the shared switch command with the AI admission, never a human one.

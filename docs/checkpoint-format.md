@@ -793,6 +793,23 @@ in-flight projectiles and an unfinished sliced path search. A refusing tick exec
 that loading a full-state checkpoint performs no battle ticks.
 The continuation adapter also requires zero re-simulated ticks for every new save.
 
+## Older battle records
+
+A history or admission record in the conflicts section embeds the battle setup as a tactical replay. When that setup's
+campaign extension was written by an older build (versions 5 and 6; this build reads 7 and 8), the replay parser fails with
+its own code (`EAWR-SIM-0314`, used by nothing else) and the load refuses the save with `EAWR-CKP-0112` and a message naming
+the battle record. Every other unreadable setup stays an invalid tactical entry, with its reason. The format is not read (no
+pre-1.0 save compatibility).
+
+`recover_checkpoint_history` is the host-side way out for `EAWR-CKP-0112` only. It loads the save, replaces each unreadable
+battle setup with an empty one and drops the latest battle summary when its record is unreadable. The galaxy state must equal
+the saved one (state hash and both clock speeds), and every other byte must too: each section except the three it rewrites is
+compared with the saved bytes, the conflicts section record by record with the setups of the replaced battles set aside (the
+loaded game builds a new setup for each from the galaxy state, which must read as an ordinary one), the return section with the saved return state followed by "no summary", and the resume section outside its capture
+commitment (bytes 32..64). The result is a new ordinary checkpoint written by the usual capture; the strict loader accepts it,
+so every peer that receives it reads the same bytes. A save with a battle in progress is refused: its battle record cannot be
+replaced.
+
 ## Diagnostics
 
 | Code | Meaning |
@@ -808,6 +825,7 @@ The continuation adapter also requires zero re-simulated ticks for every new sav
 | `EAWR-CKP-0109` | sections or header disagree with each other |
 | `EAWR-CKP-0110` | the restore failed: re-simulation failed or reached another state |
 | `EAWR-CKP-0111` | a save request that cannot be saved |
+| `EAWR-CKP-0112` | a finished-battle record in the conflicts section was written by another build (see Older battle records) |
 
 Codes up to `EAWR-CKP-0115` are reserved for this container.
 
@@ -843,7 +861,13 @@ TL-03 adds 2 to the domain (31 without, 32 with a fire-range bonus) when any liv
 A flagged domain with no flagged unit is noncanonical and refused.
 MV-40 adds 4 to the domain (33 to 36) when any live unit's order or queued waypoint leg carries a final
 facing: each order then archives its optional yaw after the hazard flag, and each queued leg after its append
-flag. A facing domain with no facing is noncanonical and refused; domains above 36 are unsupported. These optional fields
+flag. A facing domain with no facing is noncanonical and refused.
+SSU-03 moved the base domain to 37 (the 29 to 36 range above is now 37 to 44 with the same optional adds). WDP-02 adds 8 to the domain (45 to 52) when any live unit holds a deploy clip (a type whose SPOILER_LOCK clips move a
+weapon bone): each ability state then archives its optional deploy clip (running clip, switch frame, start frame) after
+the optional Mc30 script. A deploy-clip domain with no such unit is noncanonical and refused. Lua `Prevent_All_Fire` adds 16
+(domains 53 to 68 with the other adds) when any live unit holds the hold-fire flag: each unit then archives one more boolean
+after the invulnerability flag, and a hold-fire domain with no held unit is noncanonical and refused; domains above 68 are
+unsupported. These optional fields
 select a domain within the current format family. Earlier raw child-state domains are refused;
 the committed small skirmish save is regenerated with the format change.
 It includes the retained hardpoint of each squadron's formation attack destination,

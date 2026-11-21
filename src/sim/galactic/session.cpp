@@ -1583,6 +1583,23 @@ core::Result<void> GalacticSession::adjust_conflict_pause(bool begin) {
     impl_->refresh_snapshot();
     return core::Result<void>::success();
 }
+core::Result<void> GalacticSession::story_toggle_pause(const bool pending_local_conflict) {
+    auto& galaxy_clock = impl_->clock;
+    const bool multiplayer = impl_->multiplayer_flag();
+    const std::uint32_t protected_pause = pending_local_conflict ? 1U : 0U;
+    const bool paused = multiplayer ? galaxy_clock.pause_depth > protected_pause : galaxy_clock.pause_depth != 0;
+    if (paused) {
+        if (multiplayer) galaxy_clock.pause_depth = protected_pause;
+        else --galaxy_clock.pause_depth;
+    } else {
+        if (galaxy_clock.pause_depth == std::numeric_limits<std::uint32_t>::max())
+            return fail<void>(diagnostic_codes::resource_limit, "story pause depth overflow");
+        ++galaxy_clock.pause_depth;
+    }
+    impl_->dirty[static_cast<std::size_t>(StateSection::session)] = true;
+    impl_->refresh_snapshot();
+    return core::Result<void>::success();
+}
 core::Result<void> GalacticSession::reserve_conflict_entities(EntityId first_free) {
     if (!first_free || !impl_->next_id || first_free < impl_->next_id)
         return fail<void>(diagnostic_codes::invalid_setup, "conflict reservation rewinds the shared allocator");

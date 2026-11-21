@@ -89,6 +89,34 @@ void shell_widescreen_card() {
     expect(hud.hit_test_screen({1000,668},narrow),"screen hit test uses shell placement");
     const auto wide = ui::reference_space({2560,1080});
     expect(hud.placement(wide) == ui::place_shell(wide,1352),"existing safe-area placement uses visible right extent");
+    // GHUD-S99: a shell that asks for a margin keeps it on the right at every viewport, and on the left too once it has
+    // to move; a shell that fits is where it was; one that does not ask is unchanged (the clip above).
+    const auto unmoved = [&](const ui::ReferenceSpace& space) { hud.right_margin = 0.0F; const auto base = hud.placement(space); hud.right_margin = 6.0F; return base; };
+    hud.right_margin = 6.0F;
+    const float shell_right = hud.visible_extent->right();
+    for (const auto& [width, height] : std::vector<std::pair<std::uint32_t, std::uint32_t>>{{1024,768},{1280,720},{1366,768},
+             {1600,900},{1920,1080},{2560,1080},{3440,1440}}) {
+        const auto space = ui::reference_space({width, height});
+        const auto placed = hud.placement(space);
+        const auto base = unmoved(space);
+        const double right_gap = static_cast<double>(width) - (placed.left + static_cast<double>(shell_right) * placed.scale);
+        const double left_gap = placed.left + static_cast<double>(hud.visible_extent->x) * placed.scale;
+        const std::string where = std::to_string(width) + "x" + std::to_string(height);
+        expect(right_gap >= 6.0 * placed.scale - 0.01, ("the shell keeps its right margin at " + where).c_str());
+        expect(placed.bottom == height && placed.scale > 0.0 && placed.scale <= space.scale + 1e-9,
+            ("the shell only moves left or shrinks, bottom anchored, at " + where).c_str());
+        if (placed == base) continue; // it fitted: left where retail puts it
+        expect(left_gap >= 6.0 * placed.scale - 0.01, ("a moved shell keeps the same margin on its left at " + where).c_str());
+        expect(right_gap <= 6.0 * placed.scale + 0.01 || placed.left < base.left,
+            ("a moved shell sits as far right as the margin allows, or has shifted left at " + where).c_str());
+    }
+    const auto clipped = hud.placement(narrow);
+    expect(clipped.scale < 1.0, "a 1352-unit shell on 4:3 shrinks instead of clipping");
+    expect(std::abs((narrow.viewport.width - (clipped.left + shell_right * clipped.scale)) - 6.0 * clipped.scale) < 0.01
+            && std::abs((clipped.left + hud.visible_extent->x * clipped.scale) - 6.0 * clipped.scale) < 0.01,
+        "the shrunk shell has the same margin, 6 units of its own scale, on both sides");
+    hud.right_margin = 0.0F;
+    expect(hud.placement(narrow).left == 0 && hud.placement(narrow).scale == 1, "no margin asked: the clip is unchanged");
     // Bound components can exceed the faceplate.
     auto extra = anchors.shell;
     data::ui::ShellAnchor far;

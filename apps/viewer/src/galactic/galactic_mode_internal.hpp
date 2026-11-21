@@ -30,6 +30,9 @@
 #include "story_hud_state.hpp"
 #include "advisor_hints.hpp"
 #include "hud_retained.hpp"
+#include "planet_ui_depth.hpp"
+#include <godot_cpp/classes/shader.hpp>
+#include <godot_cpp/classes/shader_material.hpp>
 #include "fleet_stacks.hpp"
 #include "fleet_panels.hpp"
 #include "orbit_landing_view.hpp"
@@ -40,6 +43,7 @@
 #include "orbit_hud.hpp"
 #include "radar_hud.hpp"
 #include "corruption_hud.hpp"
+#include "corruption_hovercard.hpp"
 #include "hero_action_hud.hpp"
 #include "hero_map_bar.hpp"
 #include "destruction_hud.hpp"
@@ -318,7 +322,7 @@ struct GalacticMode::State final {
     std::unique_ptr<PauseBannerWidget> pause_banner; // the "Game Paused" banner with its Resume Game button (#6759)
     std::unique_ptr<StorySummaryWidget> story_summary; // WST-58: the summary of the intro holocron goal
     std::unique_ptr<PlanetSearchWidget> planet_search;
-    // The galactic build tray (GBT-01 to GBT-03): drawn on top of the bar only when the bar omits choices.
+    // The galactic build tray (GBT-01 to GBT-03): a handle above the bar for every planet with build choices, and the tray it opens.
     std::unique_ptr<GalacticBuildTray> build_tray;
     std::unique_ptr<PlanetSearchThumbnails> planet_search_thumbnails;
     std::optional<galactic_view::PlanetSearchLayout> planet_search_layout;
@@ -431,6 +435,15 @@ struct GalacticMode::State final {
     [[nodiscard]] galactic_view::HudBounds planet_control_bounds(galactic_view::ObjectId planet, godot::Vector2 anchor) const;
     void hide_planet_overlays(galactic_view::ObjectId planet);
     void reset_label_placement();
+    // #7809: one group node per planet holds that planet's controls; the groups are stacked by camera depth.
+    godot::Control* planet_ui_layer{};
+    std::map<galactic_view::ObjectId, godot::Control*> planet_ui_groups;
+    std::vector<galactic_view::ObjectId> planet_ui_order;
+    std::vector<galactic_view::ObjectId> planet_ui_occluded;
+    godot::Ref<godot::Shader> planet_ui_occluder_shader;
+    [[nodiscard]] godot::Control* planet_ui_group(galactic_view::ObjectId planet);
+    void add_planet_overlay(galactic_view::ObjectId planet, godot::Control* control);
+    void stack_planet_ui(const galactic_view::PlanetUiDepthPlan& plan);
     std::vector<std::size_t> hud_planet_indices;
     std::vector<galactic_view::ObjectId> visible_planet_labels;
     std::map<galactic_view::ObjectId, std::pair<std::uint64_t, std::uint32_t>> hud_label_content_versions;
@@ -815,6 +828,9 @@ struct GalacticMode::State final {
     std::size_t fleet_preview_quads{};
     [[nodiscard]] bool build_radar_hud();
     CorruptionHudState corruption_menu;
+    CorruptionHovercardState corruption_hovercard;
+    void configure_corruption_hovercard(const pugi::xml_document&);
+    void show_corruption_hovercard(sim::galactic::PlanetId);
     [[nodiscard]] bool build_corruption_hud();
     void update_corruption_hud();
     void open_corruption_information(sim::galactic::PlanetId);
@@ -863,6 +879,12 @@ struct GalacticMode::State final {
     std::uint32_t planet_info_card_height{};
     void update_planet_info_card(const presentation::ui::ShellPlacement& placement);
     void clear_planet_info_card();
+    // GPI-03..06: the card's style from the mod's zoomed_back, zoomed_header_text and planet_info anchor; none when the
+    // mod lacks one of them.
+    [[nodiscard]] std::optional<galactic_view::PlanetInfoCardStyle> planet_info_card_style() const;
+    // The screen x of the card's frame left edge, where the card is drawn whenever it is shown (GBT-06 keeps the build
+    // tray left of it, #7952); none without the card's data or the organization shell.
+    [[nodiscard]] std::optional<float> planet_info_card_left() const;
     // GPD-14: the advanced map orbiting ground-unit tray, read-only.
     std::array<EawrHudButton*, 20> land_fleet_buttons{};
     std::array<std::optional<sim::galactic::TypeId>, 20> land_fleet_shown{}; // nullopt = no icon set yet
@@ -1332,6 +1354,7 @@ struct GalacticMode::State final {
     [[nodiscard]] bool refresh_game();
     [[nodiscard]] bool queue_requested_build();
     void request_pause(bool value);
+    void toggle_pause(); // a press on what the pause button shows (the request in flight, else the agreed state)
     // WST-37: raises a clicked HUD component to this seat's story plots as STORY_CLICK_GUI.
     void submit_gui_click(const std::string& component);
     // #5922: a press of a command-bar control with an action of its own (production card, queue slot, help button) reaches the
@@ -1363,6 +1386,8 @@ struct GalacticMode::State final {
     // weapon and corruption menus, an action menu): the one set the tour start and the pointer confinement both ask.
     [[nodiscard]] galactic_view::GalaxyModals galaxy_modals() const;
     [[nodiscard]] bool galaxy_modal_open() const { return galaxy_modals().any(); }
+    // #7798: the modals that take the camera and the finder (a pending battle choice does not).
+    [[nodiscard]] bool camera_modal_open() const { return galaxy_modals().blocks_camera(); }
     // GCT-02/03: starts a tour, or a new one while one plays (the battle camera key again); false when there is nothing to visit.
     bool start_tour();
     // GCT-08: ends it (the bands slide out, the GUI returns); a no-op when none plays.

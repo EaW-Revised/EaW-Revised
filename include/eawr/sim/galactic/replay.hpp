@@ -19,7 +19,7 @@ namespace eawr::sim::galactic {
 
 class OfferPool;
 
-inline constexpr std::uint16_t galactic_replay_format_version = 14;
+inline constexpr std::uint16_t galactic_replay_format_version = 15;
 inline constexpr std::uint32_t galactic_rules_version = 7;
 inline constexpr std::size_t galactic_replay_max_bytes = core::checkpoint_byte_limit;
 inline constexpr std::size_t galactic_replay_max_payload = 64U * 1024U;

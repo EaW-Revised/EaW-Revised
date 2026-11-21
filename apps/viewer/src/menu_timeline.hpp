@@ -42,6 +42,20 @@ public:
         return value;
     }
 
+    // CPU time (user + kernel, ms, all threads) of this process; 0 where the platform has no counter.
+    [[nodiscard]] static double process_cpu_ms() {
+#if defined(_WIN32)
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0.0;
+        const auto ticks = [](const FILETIME& time) {
+            return static_cast<double>((static_cast<std::uint64_t>(time.dwHighDateTime) << 32U) | time.dwLowDateTime) / 1.0e4;
+        };
+        return ticks(kernel) + ticks(user);
+#else
+        return 0.0;
+#endif
+    }
+
     // CPU time (user + kernel, ms) of the calling thread; 0 where the platform has no counter. Pure Win32, no engine
     // object: the attract load worker calls it.
     [[nodiscard]] static double thread_cpu_ms() {

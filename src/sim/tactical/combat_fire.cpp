@@ -81,10 +81,17 @@ core::Result<CombatStep> UnitCombat::fire_planetary(const CombatUnit& target) {
         {}, {}, std::move(aim_offsets_), {}, {}, charged_blast_});
 }
 
+const WeaponBonePose* UnitCombat::posed_bones(const std::uint32_t slot) const noexcept {
+    if (!unit_.deploy_pose || unit_.profile == nullptr || !unit_.profile->deploy_poses) return nullptr;
+    const auto* segment = deploy_pose_segment(*unit_.profile->deploy_poses, *unit_.deploy_pose, world_.frame);
+    return segment != nullptr && slot < segment->weapons.size() ? &segment->weapons[slot] : nullptr;
+}
+
 bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, CombatRandom& random,
     const bool burst_begun, const CombatUnit* planetary_target) {
         const auto& mode_weapon = profile_.weapons[slot];
         if (!mode_weapon.fires_in_mode(unit_.rocket_attack)) return false;
+        if (!unit_.mode_allows(mode_weapon)) return false; // WAB-81 (#7940): entry 0, then entry 1
         if (!unit_.weapons_enabled) return false; // WR-44/46: covers direct/manual/burst fire too
         // WAD-34, FD-54: these gates read the budget after each earlier successful attempt.
         if (charged_blast_ && charged_blast_->charge_remaining != 0) return false;
@@ -123,7 +130,15 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         if (authored.requires_manual_target && assignment && authored.manual_turret) {
             posed = manual_pose(authored, *assignment);
         }
-        const auto& weapon = posed ? *posed : authored;
+        const auto& unmoved = posed ? *posed : authored;
+        // WDP-05: the shot leaves the weapon bones where the unit's running DEPLOY/UNDEPLOY clip has put them, as read
+        // when the shot is made (the opportunity scan reads the same frame), so a bone parked far from the hull is out of reach.
+        // Only a unit holding a deploy clip state looks anything up; the posed bones are read in place, never copied.
+        const WeaponBonePose* bones = posed_bones(slot);
+        const auto& weapon = unmoved;
+        const auto& muzzles = bones ? bones->muzzles : weapon.muzzles;
+        const auto bone_a = bones ? bones->fire_a : weapon.fire_a;
+        const auto bone_b = bones ? bones->fire_b : weapon.fire_b;
         // WAD-31/39: a missing selected SPECIAL projectile produces no shot;
         // manual-only guns wait for their dedicated assignment consumer.
         if (weapon.special && !weapon.shot) return false;
@@ -132,11 +147,11 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         // muzzle. A team's target metadata alone is not an ordinary combat binding.
         // A hardpoint weapon takes a random craft of the team each attempt (WWP-19).
         const bool own_weapon = weapon.hardpoint == object_weapon;
-        const bool muzzled = own_weapon && !weapon.muzzles.empty();
-        const auto muzzle_index = muzzled ? state_.weapons[slot].next_muzzle % weapon.muzzles.size() : std::size_t{0};
+        const bool muzzled = own_weapon && !muzzles.empty();
+        const auto muzzle_index = muzzled ? state_.weapons[slot].next_muzzle % muzzles.size() : std::size_t{0};
         const auto* parent = own_weapon ? world_.find(world_.container_of(unit_.id)) : nullptr;
         const auto reference = parent != nullptr && parent->combat != nullptr ? parent->position
-            : muzzled ? world_point(unit_, weapon.muzzles[muzzle_index]) : unit_.position;
+            : muzzled ? world_point(unit_, muzzles[muzzle_index]) : unit_.position;
         const auto* held = planetary_target ? planetary_target : world_.find(target_id);
         const auto* target = planetary_target ? planetary_target
             : own_weapon                         ? world_.resolve_target(held, reference)
@@ -159,7 +174,7 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
             return false;
         }
         const auto local_middle = !weapon.requires_manual_target && weapon.manual_turret && assignment
-            ? hardpoint_turret_position(weapon, *assignment, local_midpoint(weapon)) : local_midpoint(weapon);
+            ? hardpoint_turret_position(weapon, *assignment, local_midpoint(weapon.has_fire_b, bone_a, bone_b)) : local_midpoint(weapon.has_fire_b, bone_a, bone_b);
         const auto midpoint = world_point(unit_, local_middle);
         // WWP-47: the object weapon's next muzzle bone, else the unit's origin. The shot leaves it,
         // the lead starts there and the weapon's cone opens about the unit's facing there (WWP-53).
@@ -224,16 +239,16 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
                 squared({}, {weapon.min_range, {}, {}}, RangeMetric::planar)) < 0) return false;
         // WWP-47: the weapon takes its next muzzle and advances the index before the launch can fail
         // on its lead or cone (debug build), so a rejected shot still uses its muzzle up.
-        if (muzzled) state_.weapons[slot].next_muzzle = static_cast<std::uint32_t>((muzzle_index + 1) % weapon.muzzles.size());
-        auto origin = muzzled ? weapon.muzzles[muzzle_index] : weapon.fire_a;
+        if (muzzled) state_.weapons[slot].next_muzzle = static_cast<std::uint32_t>((muzzle_index + 1) % muzzles.size());
+        auto origin = muzzled ? muzzles[muzzle_index] : bone_a;
         const bool random_box = !own_weapon && weapon.has_fire_b && weapon.randomize_between_fire_bones;
-        if (!muzzled && weapon.has_fire_b && !random_box && random.uniform(0, 99) >= 50U) origin = weapon.fire_b;
+        if (!muzzled && weapon.has_fire_b && !random_box && random.uniform(0, 99) >= 50U) origin = bone_b;
         if (!weapon.requires_manual_target && weapon.manual_turret && assignment)
             origin = hardpoint_turret_position(weapon, *assignment, origin);
         if (muzzled && state_.weapons[slot].turret) origin = object_turret_muzzle(weapon, *state_.weapons[slot].turret, origin);
         auto muzzle = world_point(unit_, origin);
         if (random_box) {
-            auto other = weapon.fire_b;
+            auto other = bone_b;
             if (!weapon.requires_manual_target && weapon.manual_turret && assignment)
                 other = hardpoint_turret_position(weapon, *assignment, other);
             other = world_point(unit_, other);
@@ -319,13 +334,19 @@ math::Fixed UnitCombat::fire_reach(const WeaponProfile& weapon) {
 }
 
 math::Fixed UnitCombat::delay_factor(const WeaponProfile& weapon) const noexcept {
-    if (!unit_.full_salvo || weapon.hardpoint == object_weapon || weapon.full_salvo_delay.raw() == one_raw) {
-        return unit_.weapon_delay;
-    }
-    // Both factors are validated to [0, 64] x [-64, 64]: the exact product fits.
-    const auto raw = unit_.weapon_delay.raw() * weapon.full_salvo_delay.raw();
-    const auto half = one_raw / 2;
-    return math::Fixed::from_raw(raw >= 0 ? (raw + half) / one_raw : -((-raw + half) / one_raw));
+    // WAB-81 (#7940): the hardpoint's multiplier for the unit's first listed ability (if on) x the unit's weapon
+    // delay multiplier x its multiplier for the second (if on). An object weapon reads only the unit-level one.
+    if (weapon.hardpoint == object_weapon) return unit_.weapon_delay;
+    const auto first = weapon.mode_delay(unit_.mode_ability[0]);
+    const auto second = weapon.mode_delay(unit_.mode_ability[1]);
+    if (first.raw() == one_raw && second.raw() == one_raw) return unit_.weapon_delay;
+    // Every factor is validated to [0, 64] (negative values are refused at load): each exact product fits.
+    const auto times = [](const math::Fixed left, const math::Fixed right) noexcept {
+        const auto raw = left.raw() * right.raw();
+        const auto half = one_raw / 2;
+        return math::Fixed::from_raw(raw >= 0 ? (raw + half) / one_raw : -((-raw + half) / one_raw));
+    };
+    return times(times(first, unit_.weapon_delay), second);
 }
 
 void UnitCombat::spend_pulse(const WeaponProfile& weapon, WeaponState& state, CombatRandom& random) {
@@ -396,7 +417,7 @@ void UnitCombat::service_weapon(const std::uint32_t slot) {
             if (target == nullptr) return;
             // WAD-39: state eligibility owns the timeout. Range, fog and cone are later
             // attempt gates and cannot manufacture timeout feedback.
-            const bool eligible = weapon.fires_in_mode(unit_.rocket_attack)
+            const bool eligible = weapon.fires_in_mode(unit_.rocket_attack) && unit_.mode_allows(weapon)
                 && target->profile != nullptr && !restricted(weapon, *target)
                 && (target->durability == nullptr || target->durability->hull.raw() > 0);
             if (!eligible) {

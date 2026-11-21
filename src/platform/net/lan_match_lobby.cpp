@@ -262,6 +262,23 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
             : io_->transport.tcp->mesh_complete(admitted_seats(state.snapshot)));
         const bool all_ready = std::all_of(state.snapshot.seats.begin(), state.snapshot.seats.end(), [](const auto& seat) { return seat.ready; });
         state.connections_pending = hosting && online_options_.has_value() && !mesh_complete;
+        // Who has finished checking the host's mods. The host knows every guest's acknowledgement; a guest knows its own (it is past
+        // its own review here, lobby_state() is empty before) and what the host last reported for the others.
+        if (galactic_room()) {
+            const auto shown = view();
+            state.mod_checks_known = hosting || shown.mod_review_state_known;
+            for (const auto& seat : state.snapshot.seats) {
+                bool done = seat.peer == state.snapshot.host || seat.peer == lobby_self_;
+                if (!done && hosting && io_->transport.tcp) {
+                    const auto found = mod_review_edges_.find(seat.peer);
+                    done = found != mod_review_edges_.end() && found->second == room_edge(seat.peer);
+                } else if (!done) {
+                    done = std::find(shown.mod_review_done_peers.begin(), shown.mod_review_done_peers.end(), seat.peer)
+                        != shown.mod_review_done_peers.end();
+                }
+                state.mod_checks.push_back({seat.peer, done});
+            }
+        }
         state.start_reason = state.ready_reason;
         // #6468: the host's mod digests are still being computed and its refresh has not gone out yet; Start waits for it.
         const bool refresh_owed = hosting && host_mod_refresh_owed_;
@@ -288,6 +305,29 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
             && mesh_complete && all_ready;
         return state;
     }
+
+void TcpLanMatch::send_mod_review_state(net::MessageTransport& transport, const net::LobbySnapshot& snapshot) {
+    std::vector<std::uint8_t> frame{net::lobby_mod_review_state_kind, static_cast<std::uint8_t>(0)};
+    std::size_t count = 0;
+    for (const auto& seat : snapshot.seats) {
+        if (seat.peer > 0xFEU || count >= 0xFFU) continue;
+        const auto found = mod_review_edges_.find(seat.peer);
+        const bool done = seat.peer == snapshot.host || (found != mod_review_edges_.end() && found->second == room_edge(seat.peer));
+        frame.push_back(static_cast<std::uint8_t>(seat.peer)); frame.push_back(done ? 1U : 0U); ++count;
+    }
+    frame[1] = static_cast<std::uint8_t>(count);
+    for (const auto& seat : snapshot.seats) {
+        if (seat.peer == snapshot.host || transport.link(seat.peer) != net::LinkState::open) continue;
+        const auto edge = room_edge(seat.peer);
+        const auto sent = mod_review_state_sent_.find(seat.peer);
+        if (sent != mod_review_state_sent_.end() && sent->second.first == edge && sent->second.second == frame) continue;
+        if (transport.send(seat.peer, frame)) mod_review_state_sent_[seat.peer] = {edge, frame};
+    }
+    for (auto it = mod_review_state_sent_.begin(); it != mod_review_state_sent_.end();) {
+        const bool held = std::any_of(snapshot.seats.begin(), snapshot.seats.end(), [&](const auto& seat) { return seat.peer == it->first; });
+        it = held ? std::next(it) : mod_review_state_sent_.erase(it);
+    }
+}
 
 void TcpLanMatch::accept_mod_review() {
     if (!view().mod_review_pending || !io_->transport.tcp) return;
@@ -481,6 +521,18 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
                 : core::Result<std::vector<net::SetupSeat>>::success(ordinary);
         };
         hooks.application_frame = [this](auto& transport, const auto& snapshot, const auto& frame, auto now) {
+            if (!frame.frame.empty() && frame.frame.front() == net::lobby_mod_review_state_kind) {
+                // The host's report of who has finished checking its mods; display only (a malformed one is ignored).
+                if (!view().host && frame.from == snapshot.host && frame.frame.size() >= 2
+                    && frame.frame.size() == 2U + 2U * static_cast<std::size_t>(frame.frame[1])) {
+                    std::vector<net::PeerIndex> done;
+                    for (std::size_t i = 0; i < frame.frame[1]; ++i)
+                        if (frame.frame[3U + 2U * i] != 0) done.push_back(frame.frame[2U + 2U * i]);
+                    const std::lock_guard lock(mutex_);
+                    view_.mod_review_done_peers = std::move(done); view_.mod_review_state_known = true;
+                }
+                return true;
+            }
             if (frame.frame.size() == 1 && frame.frame.front() == net::lobby_mod_review_ack_kind) {
                 if (view().host && net::lobby_game_mode(snapshot.game) == net::LobbyGameMode::galactic
                     && frame.from != snapshot.host && std::any_of(snapshot.seats.begin(), snapshot.seats.end(),
@@ -497,6 +549,7 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
         hooks.application_pump = [this](auto& transport, const auto& snapshot, auto now) {
             if (!galactic_ || net::lobby_game_mode(snapshot.game) != net::LobbyGameMode::galactic
                 || snapshot.phase != net::LobbyPhase::staging) return false;
+            if (view().host) send_mod_review_state(transport, snapshot);
             if (view().host) for (const auto& seat : snapshot.seats) {
                 if (seat.peer == snapshot.host) continue;
                 const auto found = mod_review_edges_.find(seat.peer);
@@ -693,7 +746,7 @@ void TcpLanMatch::reset_lobby() {
         if (io_->transport.tcp) io_->transport.tcp->stop_checkpoint();
         gate_.reset();
         lobby_.reset(); lobby_result_.reset(); lobby_stream_ = nullptr; prepared_setup_.reset(); prepare_failed_game_.reset(); lobby_setup_accepted_ = false; lobby_room_committed_ = false;
-        removed_peers_.clear(); known_edges_.clear(); mod_review_edges_.clear(); closing_peers_.clear(); lobby_notice_.reset(); last_lobby_state_.reset(); identity_retry_at_ms_ = 0;
+        removed_peers_.clear(); known_edges_.clear(); mod_review_edges_.clear(); mod_review_state_sent_.clear(); closing_peers_.clear(); lobby_notice_.reset(); last_lobby_state_.reset(); identity_retry_at_ms_ = 0;
         galactic_host_game_.reset(); galactic_start_.reset(); galactic_flush_started_.reset(); galactic_pending_start_.reset();
         if (galactic_) galactic_->release_prepare();
     }
@@ -995,7 +1048,7 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
                     // A room slot keeps its roster identity when its occupant returns, so a removal cannot outlive the closed pair
                     // (a leave, a refusal or a retry would otherwise be answered "removed from the room"). The service's own
                     // denylist covers a kicked player.
-                    if (io_->transport.tcp->mesh()) { removed_peers_.erase(peer); known_edges_.erase(peer); mod_review_edges_.erase(peer); }
+                    if (io_->transport.tcp->mesh()) { removed_peers_.erase(peer); known_edges_.erase(peer); mod_review_edges_.erase(peer); mod_review_state_sent_.erase(peer); }
                     continue;
                 }
                 if (std::any_of(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(), [&](const auto& seat) { return seat.peer == peer; })) continue;

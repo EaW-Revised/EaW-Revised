@@ -23,7 +23,11 @@ PROJECT = "eaw-revised"
 MIN_UPDATER = 1
 MANIFEST_NAME = "update-manifest.json"
 COMPONENTS = ("game", "launcher", "service", "layers")
-CHANNELS = ("stable", "preview")
+PUBLIC_CHANNELS = ("stable", "preview")
+# The launcher's opt-in private test channel: tag "kit-<version>", never a public release (publish_kit.py).
+KIT_CHANNEL = "private"
+KIT_PREFIX = "kit-"
+CHANNELS = PUBLIC_CHANNELS + (KIT_CHANNEL,)
 MAX_BYTES = 2 * 1024 * 1024
 MAX_FILES = 20000
 MAX_EXPANDED = 4 * 1024 ** 3
@@ -32,6 +36,8 @@ SERVICE_FILES = frozenset({"eawr_mods_service.exe", "eawr_loadcheck.exe"})
 LAUNCHER_FILES = frozenset({"EAWR Mods.exe", "launcher-pin.json"})
 # <major>.<minor>.<patch>[<letters>]<-|+><label> (a bare 0.3.2m is not a version): owner test kits use 0.3.2m-f8bf25ed or 0.1.0+4e2da633 (label [0-9A-Za-z.+-]).
 _VERSION = re.compile(r"v?(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:[0-9A-Za-z]*[-+]([0-9A-Za-z.+-]+))?")
+# The launcher parses a kit version more strictly: <major>.<minor>.<patch>[-<alphanumeric identifiers separated by dots>].
+_KIT_VERSION = re.compile(r"(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?")
 _NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*[A-Za-z0-9_-]|[A-Za-z0-9_-]")
 _HEX = re.compile(r"[0-9a-f]{64}")
 
@@ -46,6 +52,12 @@ def split_version(text: str) -> tuple[str, str, bool]:
         raise ValueError(f"update manifest: {text!r} has an invalid pre-release suffix")
     version = text.strip().removeprefix("v")
     return "v" + version, version, pre is not None
+
+
+def _check_kit_version(version: str) -> None:
+    """A kit version is what the launcher can parse after the kit- prefix: no leading v, no letters glued to the patch."""
+    if len(version) > 40 or _KIT_VERSION.fullmatch(version) is None:
+        raise ValueError(f"update manifest: {version!r} is not a kit version (0.3.6-kit.1)")
 
 
 def component_of(path: str) -> str:
@@ -81,7 +93,12 @@ def _hash_zip_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> str:
 
 def build(player_zip: Path, version: str, build_id: str, channel: str | None = None, notes: str = "") -> dict[str, Any]:
     """The manifest dictionary for one player zip (single top folder; every file listed, SHA256SUMS included)."""
-    tag, plain, prerelease = split_version(version)
+    if channel == KIT_CHANNEL:
+        plain = version.strip()
+        _check_kit_version(plain)
+        tag, prerelease = KIT_PREFIX + plain, False
+    else:
+        tag, plain, prerelease = split_version(version)
     if channel is None:
         channel = "preview" if prerelease else "stable"
     if channel not in CHANNELS:
@@ -136,8 +153,17 @@ def validate(manifest: dict[str, Any], expected_tag: str = "", expected_channel:
     need(manifest.get("project") == PROJECT, "wrong project")
     for key in ("tag", "version", "channel", "build_id", "notes"):
         need(isinstance(manifest.get(key), str), f"field {key} is missing")
-    tag, plain, _ = split_version(manifest["tag"])
+    is_kit = manifest["channel"] == KIT_CHANNEL
+    need(is_kit == manifest["tag"].startswith(KIT_PREFIX), "channel and tag do not agree")
+    if is_kit:
+        plain = manifest["tag"][len(KIT_PREFIX):]
+        _check_kit_version(plain)
+        tag = manifest["tag"]
+    else:
+        tag, plain, _ = split_version(manifest["tag"])
     need(manifest["tag"] == tag and plain == manifest["version"], "tag and version do not agree")
+    if is_kit:
+        need(_NAME.fullmatch(tag) is not None and len(tag) <= NAME_LENGTH, "kit tag is not a plain name")
     for key in ("version", "build_id"):
         value = manifest[key]
         need(len(value) <= NAME_LENGTH and _NAME.fullmatch(value) is not None and not value.startswith("."),

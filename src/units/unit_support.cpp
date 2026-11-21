@@ -670,6 +670,88 @@ Vec3 translation(const sim::math::Mat3x4& frame) noexcept {
     return Vec3{frame.rows[0][3], frame.rows[1][3], frame.rows[2][3]};
 }
 
+// WDP-01: where the wanted bones stand at each shown frame of a clip, in model space. A bone with a track takes the
+// track's sample (translation, rotation, scale) as its local frame, any other keeps its bind frame; frames compose root
+// to bone in Q24 like the bind frames do. The binary32 samples go straight into the converter (the simulation boundary
+// rule). Empty where a track names the wrong bone, or a sample or composition is not representable.
+std::optional<std::vector<std::vector<Vec3>>> clip_pose_points(const assets::Model& model, const assets::Animation& clip,
+    const std::vector<std::uint32_t>& wanted) {
+    using sim::math::Mat3x4;
+    const std::size_t count = model.bones.size();
+    std::vector<const assets::AnimationTrack*> track_of_bone(count, nullptr);
+    for (const auto& track : clip.tracks) {
+        if (track.bone_index < count && track.bone_name == model.bones[track.bone_index].name)
+            track_of_bone[track.bone_index] = &track;
+    }
+    for (const auto bone : wanted) {
+        if (bone >= count) return std::nullopt;
+    }
+    std::vector<std::vector<Vec3>> shown;
+    for (std::uint32_t frame = 0; frame < clip.playable_frame_count; ++frame) {
+        std::vector<std::optional<Mat3x4>> world(count);
+        bool failed = false;
+        std::function<const Mat3x4*(std::size_t)> build = [&](const std::size_t index) -> const Mat3x4* {
+            if (failed) return nullptr;
+            if (world[index]) return &*world[index];
+            const auto& bone = model.bones[index];
+            Mat3x4 local;
+            if (const auto* track = track_of_bone[index]; track != nullptr && frame < track->samples.size()) {
+                const auto& sample = track->samples[frame];
+                const auto qx = scene::fixed_from_binary32(sample.rotation.x);
+                const auto qy = scene::fixed_from_binary32(sample.rotation.y);
+                const auto qz = scene::fixed_from_binary32(sample.rotation.z);
+                const auto qw = scene::fixed_from_binary32(sample.rotation.w);
+                const auto tx = scene::fixed_from_binary32(sample.translation.x);
+                const auto ty = scene::fixed_from_binary32(sample.translation.y);
+                const auto tz = scene::fixed_from_binary32(sample.translation.z);
+                const auto sx = scene::fixed_from_binary32(sample.scale.x);
+                const auto sy = scene::fixed_from_binary32(sample.scale.y);
+                const auto sz = scene::fixed_from_binary32(sample.scale.z);
+                if (!qx || !qy || !qz || !qw || !tx || !ty || !tz || !sx || !sy || !sz) { failed = true; return nullptr; }
+                const auto rotation = sim::math::normalize(sim::math::Quat{qx.value(), qy.value(), qz.value(), qw.value()});
+                if (!rotation) { failed = true; return nullptr; }
+                const auto matrix = sim::math::to_matrix(rotation.value(), Vec3{tx.value(), ty.value(), tz.value()});
+                if (!matrix) { failed = true; return nullptr; }
+                local = matrix.value();
+                const std::array<Fixed, 3> scale{sx.value(), sy.value(), sz.value()};
+                for (std::size_t column = 0; column < 3; ++column) {
+                    for (std::size_t row = 0; row < 3; ++row) {
+                        const auto scaled = sim::math::multiply(local.rows[row][column], scale[column]);
+                        if (!scaled) { failed = true; return nullptr; }
+                        local.rows[row][column] = scaled.value();
+                    }
+                }
+            } else {
+                for (std::size_t row = 0; row < 3; ++row) {
+                    for (std::size_t column = 0; column < 4; ++column) {
+                        const auto value = scene::fixed_from_binary32(bone.relative_transform[row * 4 + column]);
+                        if (!value) { failed = true; return nullptr; }
+                        local.rows[row][column] = value.value();
+                    }
+                }
+            }
+            if (bone.parent < 0) {
+                world[index] = local;
+            } else {
+                const auto* parent = build(static_cast<std::size_t>(bone.parent));
+                if (parent == nullptr) return nullptr;
+                const auto composed = sim::math::compose(*parent, local);
+                if (!composed) { failed = true; return nullptr; }
+                world[index] = composed.value();
+            }
+            return &*world[index];
+        };
+        std::vector<Vec3> points;
+        for (const auto bone : wanted) {
+            const auto* placed = build(bone);
+            if (placed == nullptr) return std::nullopt;
+            points.push_back(translation(*placed));
+        }
+        shown.push_back(std::move(points));
+    }
+    return shown;
+}
+
 std::array<Vec3, 3> axes(const sim::math::Mat3x4& frame) noexcept {
     const auto column = [&](const std::size_t index) {
         return Vec3{frame.rows[0][index], frame.rows[1][index], frame.rows[2][index]};
@@ -912,13 +994,17 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
     }
 }
 
-Fixed clip_frames_per_second(const assets::Animation& clip) {
-    const auto raw = scene::fixed_from_binary32(clip.frames_per_second).value().raw();
+std::optional<Fixed> clip_frames_per_second(const assets::Animation& clip) {
+    const auto converted = scene::fixed_from_binary32(clip.frames_per_second);
+    if (!converted) return std::nullopt;
+    const auto raw = converted.value().raw();
     const auto whole = raw / Fixed::scale;
     const auto remainder = raw % Fixed::scale;
     const auto scaled_remainder = remainder * 1000;
     const auto rounded = (scaled_remainder + (remainder < 0 ? -Fixed::scale / 2 : Fixed::scale / 2)) / Fixed::scale;
-    return Fixed::from_ratio(whole * 1000 + rounded, 1000).value();
+    const auto ratio = Fixed::from_ratio(whole * 1000 + rounded, 1000);
+    if (!ratio) return std::nullopt;
+    return ratio.value();
 }
 
 // The model's collision bounds in the bind pose (the debug build's object-space bounds

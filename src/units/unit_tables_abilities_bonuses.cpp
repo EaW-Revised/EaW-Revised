@@ -20,26 +20,48 @@ void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::str
         && iequals(node.name, "Battlefield_Modifier_Ability") && unit.hull.has_value()
         && unit.kind != UnitKind::squadron && !iequals(unit.xml_type, "UpgradeObject")
         && !has_behavior(object, "DUMMY_UPGRADE");
-    if ((input_.campaign_scene || space_reveal)
-        && (iequals(node.name, "Enhance_Defense_Ability") || iequals(node.name, "Battlefield_Modifier_Ability"))
-        && iequals(child_text("Activation_Style"), automatic_activation_name(input_.domain))) {
+    // WBR-02: a live standalone source runs when its style is automatic in the game mode (a skirmish is a
+    // multiplayer tactical game); an absent style is invalid and never automatic. A campaign scene keeps its
+    // own Space_Automatic admission.
+    const auto battlefield_style = child_text("Activation_Style");
+    const bool admitted = input_.campaign_scene
+        ? (iequals(node.name, "Enhance_Defense_Ability") || iequals(node.name, "Battlefield_Modifier_Ability"))
+            && iequals(battlefield_style, automatic_activation_name(input_.domain))
+        : space_reveal && !battlefield_style.empty()
+            && sim::tactical::automatic_ability_style(battlefield_style, input_.domain, true);
+    if (admitted) {
         BattlefieldBonus bonus; bonus.name = name;
         bonus.enabled = boolean(child_text("Initially_Enabled")).value_or(true);
         bonus.all_allies = boolean(child_text("Apply_To_All_Allies")).value_or(false);
+        bonus.reverse = boolean(child_text("Reverse_Application_Logic")).value_or(false); // WBR-04
         const auto category = number(child_text("Stacking_Category"));
         if (category && category->raw() >= 0 && category->trunc_to_integer() <= std::numeric_limits<std::uint32_t>::max())
             bonus.category = static_cast<std::uint32_t>(category->trunc_to_integer());
+        // WBR-01/02: a multiplier is stored as (multiplier - 1); one is no entry and a nonpositive value
+        // is corrected to one, as the original's validation does.
+        const auto delta_of = [&](const char* tag) {
+            Fixed delta{};
+            if (const auto multiplier = number(child_text(tag))) {
+                const auto effective = *multiplier > Fixed{} ? *multiplier : Fixed::from_raw(Fixed::scale);
+                if (*multiplier <= Fixed{}) report_.note(unit.id, tag, child_text(tag), "nonpositive multiplier; retained one");
+                const auto minus_one = sim::math::subtract(effective, Fixed::from_raw(Fixed::scale));
+                if (minus_one) delta = minus_one.value();
+                else report_.missing(unit.id, tag, {}, "multiplier overflows");
+            }
+            return delta;
+        };
         if (iequals(node.name, "Enhance_Defense_Ability")) bonus.defence = number(child_text("Enhancement_Percentage")).value_or(Fixed{});
-        else if (const auto multiplier = number(child_text("FOW_Reveal_Range_Multiplier"))) {
-            // WBR-01: nonpositive authoring retains the neutral multiplier.
-            const auto effective = *multiplier > Fixed{} ? *multiplier : Fixed::from_raw(Fixed::scale);
-            if (*multiplier <= Fixed{}) report_.note(unit.id, "FOW_Reveal_Range_Multiplier",
-                child_text("FOW_Reveal_Range_Multiplier"), "nonpositive multiplier; retained one");
-            const auto delta = sim::math::subtract(effective, Fixed::from_raw(Fixed::scale));
-            if (delta) bonus.reveal_delta = delta.value();
-            else report_.missing(unit.id, "FOW_Reveal_Range_Multiplier", {}, "range multiplier overflows");
+        else {
+            bonus.reveal_delta = delta_of("FOW_Reveal_Range_Multiplier");
+            if (!input_.campaign_scene) {
+                bonus.stealth_delta = delta_of("Stealth_Duration_Multiplier");
+                bonus.capture_delta = delta_of("Capture_Point_Time_Multiplier");
+                bonus.special_weapons = boolean(child_text("Enable_Special_Weapons")).value_or(false);
+            }
         }
-        if (bonus.defence != Fixed{} || bonus.reveal_delta != Fixed{}) unit.production.battlefield_bonuses.push_back(std::move(bonus));
+        if (bonus.defence != Fixed{} || bonus.reveal_delta != Fixed{} || bonus.stealth_delta != Fixed{}
+            || bonus.capture_delta != Fixed{} || bonus.special_weapons)
+            unit.production.battlefield_bonuses.push_back(std::move(bonus));
     }
     if (iequals(node.name, "Battlefield_Modifier_Ability") && iequals(child_text("Activation_Style"), automatic_activation_name(input_.domain))) {
         // WST-03: the debug build adds (multiplier - 1) to the cloak-duration list only when

@@ -72,6 +72,23 @@ gc::PreparedAbility prepare(eawr::campaign::GameSession& game, const gc::Galacti
     expect(game.galaxy().ability_state()->preparations.at(0).corruption_choices.size() == 2, "authored slot gaps and unaffordable corruption choices remain visible");
     return gc::prepared_ability(game.galaxy().ability_state()->preparations.at(0), 0);
 }
+// The production way to restrict a planet: a story reward applied inside a step (a recorded corruption_lifecycle effect).
+// A fresh or restored game installs the same plot and provider; the click is submitted by seat 1, the plot's owner.
+eawr::core::Result<void> install_restriction_story(eawr::campaign::GameSession& game, gc::PlanetId planet) {
+    namespace story = gc::story;
+    story::EventDef event; event.name = "RESTRICT"; event.type = "STORY_CLICK_GUI"; event.params[0] = {"restrict"};
+    event.reward_type = "RESTRICT_CORRUPTION"; event.reward_params[0] = {"PLANET"};
+    story::SubPlotDef plot; plot.name = "RESTRICT.xml"; plot.owner = 1; plot.active = true; plot.events = {event};
+    if (auto installed = game.install_story({}, {{1, "RESTRICT.xml"}}, {plot}); !installed) return installed;
+    game.set_story_rewards([planet](gc::GalacticSession& world, const story::Triggered&, const eawr::sim::PartitionExecutor&)
+        -> eawr::core::Result<eawr::campaign::GameSession::StoryRewardOutcome> {
+        using Outcome = eawr::campaign::GameSession::StoryRewardOutcome;
+        auto changed = world.set_corruption_flag(planet, gc::CorruptionPlanetFlag::restricted, true);
+        if (!changed) return eawr::core::Result<Outcome>::failure(changed.error());
+        return eawr::core::Result<Outcome>::success(Outcome{changed.value(), {}});
+    });
+    return eawr::core::Result<void>::success();
+}
 void information(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     auto config = setup();
     ability_fixture::add_observer(config, 1, {1000, 3000});
@@ -95,6 +112,9 @@ void information(const eawr::sim::PartitionExecutor& pool, std::vector<std::stri
         expect(!info->choices[0].missions_satisfied, "information tests the local player's own mission uses");
         expect(info->choices[0].units_satisfied && !info->choices[1].units_satisfied && info->choices[0].planets_satisfied,
             "shared requirement facts deduplicate alternatives and retain the global owned-planet ANY rule");
+        expect(info->choices[0].available_units == 1 && info->choices[1].available_units == 1 && info->choices[1].required_unit_type == 1000
+            && info->choices[0].completed_missions == 0,
+            "hover facts retain the partial owner-scoped pooled unit count, representative art and the actual mission count");
     }
     const auto* empty = snapshot->corruption_information(config.planets[1].id);
     expect(empty && empty->information_only && empty->choices.empty(), "an empty information menu is a valid publication");
@@ -235,7 +255,9 @@ void direct_voice(const eawr::sim::PartitionExecutor& pool, std::vector<std::str
 void staged_ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     namespace auth = eawr::script::authoritative;
     namespace foc = eawr::script::foc;
-    for (const bool stale : {false, true}) {
+    // Variants: 0 admitted, 1 stale location, 2 the target planet is restricted by a story reward (the ground dispatch skips it).
+    for (unsigned variant = 0; variant < 3; ++variant) {
+        const bool stale = variant == 1, restricted = variant == 2;
         auto config = setup(true);
         config.seats[1].kind = gc::SeatKind::ai; config.seats[1].human_side_id = 0;
         auto& payer = config.production->players[1];
@@ -243,6 +265,13 @@ void staged_ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<
         config.economy_corruption->players[1].human = false;
         config.ability_host->profiles[0].ground_activated = {gc::AbilityKind::corruption};
         auto game = take(eawr::campaign::GameSession::create(config));
+        if (restricted) {
+            const auto target = config.planets[0].id;
+            take(game.configure_native_replay_owners([&](gc::GalacticSession& world) {
+                auto changed = world.set_corruption_flag(target, gc::CorruptionPlanetFlag::restricted, true);
+                return changed ? eawr::core::Result<void>::success() : eawr::core::Result<void>::failure(changed.error());
+            }));
+        }
         auth::SessionConfig clock; clock.tick_duration = {1, 30}; clock.galactic_clock = true;
         auth::ModuleManifest manifest;
         take(manifest.add("Ground.lua", "function Start() Activate() end"));
@@ -263,16 +292,20 @@ void staged_ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<
         hashes.push_back(take(game.step(pool)).state_hash.get());
         expect(!game.galaxy().ability_state()->transitions[0].transition.active(), "staged AI activation does not mutate during Lua service");
         hashes.push_back(take(game.step(pool)).state_hash.get());
-        expect(game.galaxy().ability_state()->transitions[0].transition.active() != stale,
-            "ground activation rechecks the actor's actual planet at the ordinary command barrier");
-        expect(game.galaxy().snapshot()->player_economy()->players[1].credits == f(stale ? 1000 : 900),
+        const bool admitted = variant == 0;
+        expect(game.galaxy().ability_state()->transitions[0].transition.active() == admitted,
+            "ground activation rechecks the actor's actual planet and the planet restriction at the ordinary command barrier");
+        expect(game.galaxy().snapshot()->player_economy()->players[1].credits == f(admitted ? 900 : 1000),
             "staged AI corruption charges once only for an admitted current location");
-        expect(game.return_state().heroes.size() == (stale ? 0U : 1U), "staged AI corruption uses the ordinary hero return owner");
+        expect(game.return_state().heroes.size() == (admitted ? 1U : 0U), "staged AI corruption uses the ordinary hero return owner");
+        if (restricted) expect(game.galaxy().ability_state()->preparations.empty(),
+            "a restricted planet opens no preparation for an AI landing");
     }
 }
 void ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     // Each individual prerequisite can exclude the otherwise affordable piracy slot.
-    for (unsigned gate = 0; gate < 5; ++gate) {
+    // Gate 5 is not a prerequisite: the planet is restricted by a story reward, which refuses an AI seat like a human one.
+    for (unsigned gate = 0; gate < 6; ++gate) {
         auto config = setup(true); config.economy_corruption->players[1].human = false;
         auto& choice = config.ability_host->corruption_planets[0].slots[0];
         if (gate == 1) choice.price = f(1001);
@@ -289,6 +322,12 @@ void ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<std::st
             choice.planet_types = {3001}; // the only active instance belongs to the enemy
         }
         auto game = take(eawr::campaign::GameSession::create(config));
+        if (gate == 5) {
+            take(install_restriction_story(game, config.planets[0].id));
+            take(game.submit({{game.completed_tick(), {1}, 1}, gc::GuiClick{"restrict"}}));
+            hashes.push_back(take(game.step(pool)).state_hash.get());
+            expect(game.galaxy().ability_state()->transitions[0].restricted, "the story reward restricted the AI's target planet");
+        }
         const auto before = game.galaxy().economy_corruption()->random_draws;
         order(game, 1, gc::PrepareGalacticAbility{buyer(config), config.planets[0].id, gc::AbilityKind::corruption});
         hashes.push_back(take(game.step(pool)).state_hash.get());
@@ -308,7 +347,9 @@ void ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<std::st
             expect(game.galaxy().economy_corruption()->random_draws == before, "AI no-choice refusal consumes no selection draw");
         }
         const auto ids = cp::game_identities(config); const auto saved = take(cp::save_game_checkpoint(game, ids));
-        auto fresh = take(cp::load_game_checkpoint(saved, ids, {}, pool));
+        cp::GameLoadOptions load;
+        if (gate == 5) load.configure_session = [planet = config.planets[0].id](eawr::campaign::GameSession& fresh) { return install_restriction_story(fresh, planet); };
+        auto fresh = take(cp::load_game_checkpoint(saved, ids, load, pool));
         expect(take(cp::save_game_checkpoint(fresh.session, ids)) == saved, "AI settled/refused state reconstructs exactly");
         hashes.push_back(take(game.step(pool)).state_hash.get());
         expect(take(fresh.session.step(pool)).state_hash.get() == hashes.back(), "AI invocation restore continuation matches");
@@ -338,10 +379,118 @@ void ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<std::st
     }
     expect(selected_racketeering, "weighted selection also exercises the later racketeering slot");
 }
+void story_policy(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    auto config = setup(); ability_fixture::add_observer(config, 2, {1000, 3000});
+    auto world = take(gc::GalacticSession::create(config));
+    world.set_ability_consumption_handler([&](const gc::HeroDefeat& defeat) {
+        return world.apply_battle_losses(std::span<const eawr::sim::EntityId>(&defeat.id, 1));
+    });
+    const auto planet = config.planets[0].id;
+    expect(take(world.set_corruption_flag(planet, gc::CorruptionPlanetFlag::restricted, true)), "story restricts a known planet");
+    expect(take(world.set_corruption_flag(planet, gc::CorruptionPlanetFlag::hologram, true)), "story enables its hologram flag");
+    expect(!take(world.set_corruption_flag(999999, gc::CorruptionPlanetFlag::restricted, true)), "unknown planet flag refuses without mutation");
+    take(world.submit({{world.completed_tick(), {2}, 1}, gc::PrepareGalacticAbility{buyer(config), planet, gc::AbilityKind::corruption}}));
+    hashes.push_back(take(world.step(pool)).state_hash.get());
+    expect(world.ability_state()->preparations.empty() && world.snapshot()->player_economy()->players[1].credits == f(1000),
+        "restricted corruption refuses before preparation, debit, consumption and draw");
+    const auto view = world.snapshot();
+    const auto target = std::find_if(view->actor_records().begin(), view->actor_records().end(), [&](const auto& row) { return row.id == buyer(config); });
+    expect(target != view->actor_records().end() && !eawr::viewer::galactic::ability_preview::target_admitted(
+        *view, *target, planet, *config.ability_host, gc::AbilityKind::corruption), "corruption preview reads the same planet restriction");
+    expect(!world.ability_state()->transitions[1].restricted && !world.ability_state()->transitions[1].hologram_enabled,
+        "restriction and hologram flags are local to their planet");
+    const auto saved = take(world.save_checkpoint_state());
+    // A direct restore adopts the journal of the recording its owner was built from, so the restoring owner is built from this one's recording.
+    auto restored = take(gc::GalacticSession::from_replay(world.record())); take(restored.load_checkpoint_state(saved));
+    expect(restored.ability_state()->transitions == world.ability_state()->transitions, "checkpoint retains both planet flags");
+    restored.set_ability_consumption_handler([&](const gc::HeroDefeat& defeat) {
+        return restored.apply_battle_losses(std::span<const eawr::sim::EntityId>(&defeat.id, 1));
+    });
+    // Every later command goes to the original and to the restored session, which must agree after each tick (save/load in between).
+    const auto lockstep = [&](const char* what, const auto& act) {
+        act(world); act(restored);
+        const auto hash = take(world.step(pool)).state_hash.get();
+        hashes.push_back(hash);
+        expect(take(restored.step(pool)).state_hash.get() == hash, what);
+    };
+    lockstep("the restored session refuses the restricted corruption exactly like the original", [&](gc::GalacticSession& s) {
+        take(s.submit({{s.completed_tick(), {2}, 91}, gc::PrepareGalacticAbility{buyer(config), planet, gc::AbilityKind::corruption}}));
+    });
+    expect(restored.ability_state()->preparations.empty() && restored.snapshot()->player_economy()->players[1].credits == f(1000),
+        "the restored session keeps the restriction: no preparation, no debit");
+    lockstep("lifting the restriction after a restore keeps both sessions in step", [&](gc::GalacticSession& s) {
+        expect(take(s.set_corruption_flag(planet, gc::CorruptionPlanetFlag::restricted, false)), "zero lifts the restriction");
+        take(s.submit({{s.completed_tick(), {2}, 2}, gc::PrepareGalacticAbility{buyer(config), planet, gc::AbilityKind::corruption}}));
+    });
+    expect(!world.ability_state()->preparations.empty() && !restored.ability_state()->preparations.empty(),
+        "lifting restriction restores ordinary corruption admission, also after a restore");
+    const auto prepared = gc::prepared_ability(world.ability_state()->preparations.front(), 0);
+    lockstep("a stale prepared choice is refused identically by the restored session", [&](gc::GalacticSession& s) {
+        take(s.set_corruption_flag(planet, gc::CorruptionPlanetFlag::restricted, true));
+        take(s.submit({{s.completed_tick(), {2}, 3}, gc::ExecutePreparedAbility{prepared}}));
+    });
+    expect(world.snapshot()->player_economy()->players[1].credits == f(1000)
+        && restored.snapshot()->player_economy()->players[1].credits == f(1000),
+        "a stale prepared choice rechecks the planet restriction before debit");
+    // Story removal bypasses actor admission and never charges an actor, even on a restricted planet.
+    auto corrupted = config; corrupted.economy_corruption->planets[0].corruption = gc::corruption_fixture::Type::piracy;
+    auto removal_world = take(gc::GalacticSession::create(corrupted));
+    take(removal_world.set_corruption_flag(planet, gc::CorruptionPlanetFlag::restricted, true));
+    expect(take(removal_world.begin_corruption(planet, gc::corruption_fixture::Type::none, f(10))), "actor-free story removal starts on a corrupted planet");
+    const auto transition = removal_world.ability_state()->transitions[0].transition;
+    expect(transition.decreasing && transition.end - transition.start == 300
+        && removal_world.snapshot()->player_economy()->players[1].credits == f(1000), "ten-second story removal has no actor debit");
+    auto destroyed = corrupted; destroyed.economy_corruption->planets[0].destroyed = true;
+    auto destroyed_world = take(gc::GalacticSession::create(destroyed));
+    expect(!take(destroyed_world.begin_corruption(planet, gc::corruption_fixture::Type::none, f(10)))
+        && destroyed_world.record().native_effects.empty(), "destroyed-planet story removal refuses without journaling");
+    const auto journal = world.record(); auto replayed = take(gc::GalacticSession::from_replay(journal));
+    while (replayed.completed_tick() < journal.final_tick_count) (void)take(replayed.step(pool));
+    expect(replayed.ability_state()->transitions == world.ability_state()->transitions, "native journal reconstructs per-planet policy changes");
+}
+// A story restriction belongs to the planet, not to its owner: after the acting owner takes the planet by the ordinary
+// political change, both flags are kept and that owner's own removal hero is still refused (unrestricted control: admitted).
+void story_policy_capture(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    for (const bool restricted : {false, true}) {
+        auto config = setup(); const auto target = config.planets[0].id, actor = buyer(config);
+        expect(config.planets[0].owner == 1, "the capture fixture planet starts with the enemy");
+        config.economy_corruption->planets[0].corruption = gc::corruption_fixture::Type::piracy;
+        // Neither player benefits, so the capture itself starts no removal and the actor's own removal is the only transition.
+        config.economy_corruption->players[0].benefits = false;
+        auto& profile = config.ability_host->profiles[0]; profile.corruption.reset();
+        profile.removal.emplace(); profile.removal->name = "MOD_REMOVE"; profile.removal->text_identity = "ModHero";
+        profile.removal->hero = true; profile.removal->cost_multiplier = Fixed::from_ratio(1, 2).value();
+        profile.removal->seconds = f(1);
+        profile.ground_activated = {gc::AbilityKind::remove_corruption};
+        config.ability_host->activated_removal_abilities = {"MOD_REMOVE"};
+        config.ability_host->corruption_planets[0].removal_base_cost = f(100);
+        ability_fixture::add_observer(config, 2, {1000, 3000});
+        auto world = take(gc::GalacticSession::create(config));
+        world.set_ability_consumption_handler([&](const gc::HeroDefeat& defeat) {
+            return world.apply_battle_losses(std::span<const eawr::sim::EntityId>(&defeat.id, 1));
+        });
+        if (restricted) {
+            expect(take(world.set_corruption_flag(target, gc::CorruptionPlanetFlag::restricted, true)), "the planet is restricted");
+            expect(take(world.set_corruption_flag(target, gc::CorruptionPlanetFlag::hologram, true)), "the planet's hologram flag is on");
+        }
+        // The planet-faction story reward gives the planet to the acting owner through the ordinary ownership change.
+        expect(take(world.set_planet_faction(target, 2)), "the acting owner takes the planet");
+        hashes.push_back(take(world.step(pool)).state_hash.get());
+        expect(world.snapshot()->planets()[0].owner == 2, "the capture reached the planet's owner");
+        const auto& kept = world.ability_state()->transitions[0];
+        expect(kept.restricted == restricted && kept.hologram_enabled == restricted
+            && world.snapshot()->economy_corruption()->planets[0].corruption == gc::corruption_fixture::Type::piracy,
+            "a capture keeps the planet's restriction and hologram flags and its corruption");
+        take(world.submit({{world.completed_tick(), {2}, 1}, gc::DeployGroundAbility{actor, target}}));
+        hashes.push_back(take(world.step(pool)).state_hash.get());
+        expect(world.ability_state()->transitions[0].transition.active() == !restricted
+            && world.snapshot()->player_economy()->players[1].credits == (restricted ? f(1000) : f(950)),
+            "after the capture the new owner's removal hero is refused on a restricted planet and admitted otherwise");
+    }
+}
 void human_refusal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
-    for (unsigned gate = 0; gate < 3; ++gate) {
+    for (unsigned gate = 1; gate < 3; ++gate) {
         auto config = setup();
-        if (gate == 0) config.ability_host->tutorial_corruption_allowed = false;
         if (gate == 1) config.ability_host->activated_corruption_abilities.clear();
         if (gate == 2) config.economy_corruption->planets[0].destroyed = true;
         auto game = take(eawr::campaign::GameSession::create(config));
@@ -657,7 +806,7 @@ void stale_owned_target(const eawr::sim::PartitionExecutor& pool, std::vector<st
         "a stale preparation against the actor's own planet takes the direct route: charged once, no mission, the transition runs");
 }
 void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
-    for (unsigned variant = 0; variant < 15; ++variant) {
+    for (unsigned variant = 0; variant < 16; ++variant) {
         auto config = setup(); const auto target = config.planets[0].id, actor = buyer(config);
         config.planets[0].owner = 2;
         config.control->planets[0].ground_base.owner = config.control->planets[0].starbase.owner = 2;
@@ -718,13 +867,20 @@ void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>&
             take(game.set_ability_lifecycle(actor, true, true, gc::AbilityKind::remove_corruption));
             hashes.push_back(take(game.step(pool)).state_hash.get()); // publish the lifecycle change before preview
         }
+        if (variant == 15) {
+            take(install_restriction_story(game, target));
+            take(game.submit({{game.completed_tick(), {1}, 1}, gc::GuiClick{"restrict"}}));
+            hashes.push_back(take(game.step(pool)).state_hash.get());
+            hashes.push_back(take(game.step(pool)).state_hash.get()); // publish the restriction to the viewer snapshot
+            expect(game.galaxy().ability_state()->transitions[0].restricted, "the story reward restricted the removal target");
+        }
         const auto preview = eawr::viewer::galactic::ability_drop_candidate(*game.galaxy().snapshot(), 2,
             config.fleets[1].id, *config.ability_host);
-        expect(bool(preview) == (variant < 4 || variant == 6 || variant == 8 || variant == 11 || variant >= 13),
+        expect(bool(preview) == (variant < 4 || variant == 6 || variant == 8 || variant == 11 || variant == 13 || variant == 14),
             "shared viewer slot admits authored enabled removal on a corrupted owned target independently of price");
         order(game, 1, gc::DeployGroundAbility{actor, target});
         hashes.push_back(take(game.step(pool)).state_hash.get());
-        const bool success = variant < 4 || variant == 8 || variant == 11 || variant == 12 || variant >= 13;
+        const bool success = variant < 4 || variant == 8 || variant == 11 || variant == 12 || variant == 13 || variant == 14;
         const auto price = variant == 1 ? f(200) : variant == 8 || variant == 11 ? Fixed{} : f(50);
         expect(game.galaxy().snapshot()->player_economy()->players[1].credits == take(eawr::sim::math::subtract(f(1000), success ? price : Fixed{})),
             "removal uses authored base times multiplier, clamps negative cost and never charges a refusal");
@@ -738,7 +894,7 @@ void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>&
             [&](const auto& event) { return event.kind == gc::GalacticEventKind::corruption_removal_started
                 && event.subject == target && event.value == profile.type; }) == (success ? 1 : 0),
             "successful removal publishes one typed source/target event even when the actor is consumed");
-        if (variant >= 13) {
+        if (variant == 13 || variant == 14) {
             // #6257: the corrupt-militia removal is no longer refused; it starts like any other removal.
             expect(game.galaxy().snapshot()->economy_corruption()->planets[0].corruption == gc::corruption_fixture::Type::militia
                 && game.galaxy().ability_state()->transitions[0].transition.decreasing
@@ -747,15 +903,19 @@ void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>&
         }
         const auto ids = cp::game_identities(config);
         const auto saved = take(cp::save_game_checkpoint(game, ids));
-        auto fresh = take(cp::load_game_checkpoint(saved, ids, {}, pool));
+        cp::GameLoadOptions load; // variant 15 restores a game that carries a story plot: the restored game reinstalls it
+        if (variant == 15) load.configure_session = [target](eawr::campaign::GameSession& fresh) { return install_restriction_story(fresh, target); };
+        auto fresh = take(cp::load_game_checkpoint(saved, ids, load, pool));
         expect(take(cp::save_game_checkpoint(fresh.session, ids)) == saved, "removal profile and lifecycle state restore byte for byte");
+        if (variant == 15) expect(fresh.session.galaxy().ability_state()->transitions[0].restricted,
+            "a restriction set by a recorded story reward restores with the game");
         for (unsigned tick = 0; tick < 70; ++tick) {
             hashes.push_back(take(game.step(pool)).state_hash.get());
             expect(take(fresh.session.step(pool)).state_hash.get() == hashes.back(), "saved removal continuation equals uninterrupted state");
         }
         expect(!success || game.galaxy().snapshot()->economy_corruption()->planets[0].corruption == gc::corruption_fixture::Type::none,
             "successful removal finishes through the existing corruption completion owner");
-        if (variant >= 13) {
+        if (variant == 13 || variant == 14) {
             // WGCH-17: the completed militia removal cleared the starbase, special and political sources, the enemy
             // fleet left orbit, and allegiance went neutral at 1.
             const auto* control = game.galaxy().snapshot()->control();
@@ -825,17 +985,19 @@ void undiscovered_target(const eawr::sim::PartitionExecutor& pool, std::vector<s
 }
 int case_galactic_ability_corruption_tests() {
     ability_fixture::arm_watchdog();
+    std::size_t phase_index = 0; // names the phase in a thrown failure
     try {
         using Phase = void (*)(const eawr::sim::PartitionExecutor&, std::vector<std::string>&);
-        const Phase phases[] = {information, information_admission, direct, direct_voice, ai_invocation, staged_ai_invocation, human_refusal, undiscovered_target, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, stale_owned_target, startup, removal};
+        const Phase phases[] = {information, information_admission, direct, direct_voice, ai_invocation, staged_ai_invocation, story_policy, story_policy_capture, human_refusal, undiscovered_target, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, stale_owned_target, startup, removal};
         std::vector<std::string> baseline;
         for (std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter workers(count); std::vector<std::string> hashes;
-            for (const Phase phase : phases) phase(workers, hashes);
+            phase_index = 0;
+            for (const Phase phase : phases) { phase(workers, hashes); ++phase_index; }
             if (count == 1) baseline = hashes;
             else expect(hashes == baseline, "corruption command, transition, reward and restore hashes equal on 1/2/4/8");
         }
         observer_idle();
-    } catch (const std::exception& error) { std::cerr << error.what() << std::endl; return 1; }
+    } catch (const std::exception& error) { std::cerr << "phase " << phase_index << ": " << error.what() << std::endl; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

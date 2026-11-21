@@ -63,7 +63,7 @@ enum class StateSection : std::uint16_t {
     history = 22, // GREF-24..26: session-owned per-player chart archives
 };
 inline constexpr std::size_t state_section_count = 23;
-inline constexpr std::string_view state_encoding_name = "eawr-galactic-state-v13";
+inline constexpr std::string_view state_encoding_name = "eawr-galactic-state-v14";
 
 struct GalacticTick {
     std::uint64_t completed_tick{};
@@ -198,6 +198,8 @@ public:
     using CorruptionResultHandler = std::function<core::Result<void>(const LiveCorruptionMission&)>;
     void set_corruption_result_handler(CorruptionResultHandler);
     [[nodiscard]] core::Result<bool> begin_corruption(PlanetId, corruption_fixture::Type, math::Fixed);
+    // WGCH-200/201: trusted story writes, journaled through corruption_lifecycle.
+    [[nodiscard]] core::Result<bool> set_corruption_flag(PlanetId, CorruptionPlanetFlag, bool);
     // WGCH-67/140..142: shared live ruins cleanup, journaled as native effect 17 (coordinator-reserved).
     // The story handler runs FIRST (destroy mode only), before any cleanup and while the flag is still unset.
     // false = nothing was applied (unavailable inputs, already ruined, or an unresolved named seam).
@@ -846,6 +848,11 @@ public:
     // defended landing remains unavailable; requests never perform an uncontested landing.
     void enable_conflict_requests(bool enabled);
     [[nodiscard]] core::Result<void> adjust_conflict_pause(bool begin);
+    // #7826: a story's FORCE_CLICK_GUI on the pause control, applied by the session itself at the agreed tick on every
+    // peer (never a seat command, so no seat debounce and nothing a client can forge). It does what the control's press
+    // does: paused -> resume, running -> pause, by the same nested-counter rule as PauseGalaxy/ResumeGalaxy
+    // (multiplayer: one shared human hold above the system holds in `pending_local_conflict`).
+    [[nodiscard]] core::Result<void> story_toggle_pause(bool pending_local_conflict);
     [[nodiscard]] core::Result<void> reserve_conflict_entities(EntityId first_free);
     void publish_conflict_events(std::span<const GalacticEvent> events);
     using ConflictTailHandler = std::function<core::Result<void>(GalacticSession&)>;

@@ -969,7 +969,7 @@ struct EconomyCorruptionState {
 // GFS-C-01/WGCH-70: live content is immutable; actors remain in the canonical census.
 enum class AbilityKind : std::uint8_t { black_market = 1, technology_theft = 2, corruption = 3,
     superweapon_hack = 4, planet_destruction = 5, structure_sabotage = 6, hero_neutralization = 7, system_spy = 8,
-    remove_corruption = 9 };
+    remove_corruption = 9, credit_siphon = 10 };
 struct CorruptionChoice {
     corruption_fixture::Type type{}, required_mission_type{};
     math::Fixed price, credit_reward, unlock_build_cost;
@@ -992,6 +992,15 @@ struct RemovalAbilityProfile {
     math::Fixed seconds{math::Fixed::from_raw(10 * math::Fixed::scale)};
     bool initially_enabled{true}, causes_despawn{}, hero{};
     friend bool operator==(const RemovalAbilityProfile&, const RemovalAbilityProfile&) = default;
+};
+// WGCH-39/40/103..107: authored credit siphon. The sampled percentage lies in [minimum, maximum] and the siphon runs for
+// `cycles` fiscal cycles from deployment.
+struct SiphonAbilityProfile {
+    std::string name, text_identity;
+    math::Fixed minimum, maximum;
+    std::uint32_t cycles{};
+    bool initially_enabled{true}, causes_despawn{}, hero{};
+    friend bool operator==(const SiphonAbilityProfile&, const SiphonAbilityProfile&) = default;
 };
 // WGCH-57/139: a named activated hack ability; names route through the authored activated list.
 struct HackAbilityProfile {
@@ -1034,9 +1043,11 @@ struct PreparedCorruption {
     std::uint8_t slot{};
     friend bool operator==(const PreparedCorruption&, const PreparedCorruption&) = default;
 };
+enum class CorruptionPlanetFlag : std::uint8_t { restricted, hologram };
 struct LiveCorruptionTransition {
     PlanetId planet{};
     corruption_fixture::Transition transition;
+    bool restricted{}, hologram_enabled{}; // WGCH-200/201: per-planet story policy
     friend bool operator==(const LiveCorruptionTransition&, const LiveCorruptionTransition&) = default;
 };
 enum class CorruptionMissionState : std::uint8_t { queued, succeeded, failed, cancelled };
@@ -1159,6 +1170,7 @@ struct GalacticAbilityProfile {
     std::vector<AbilityKind> ground_activated{}; // WGCH-157: authored Activation_Style membership
     std::vector<AutoSpyProfile> auto_spies{}; // initially enabled automatic spies, authored order
     std::optional<RemovalAbilityProfile> removal{};
+    std::optional<SiphonAbilityProfile> siphon{};
     friend bool operator==(const GalacticAbilityProfile&, const GalacticAbilityProfile&) = default;
 };
 struct GalacticAbilitySetup {
@@ -1181,8 +1193,9 @@ struct GalacticAbilitySetup {
     std::vector<std::string> activated_sabotage_abilities{}, activated_neutralize_abilities{}; // WGCH-97 authored routing order
     std::vector<SabotageStructureCost> sabotage_costs{}; // ascending type
     std::vector<NeutralizationTarget> neutralization_targets{}; // ascending type
-    bool multiplayer{}, fast_corruption{}, tutorial_corruption_allowed{true};
+    bool multiplayer{}, fast_corruption{};
     std::vector<std::string> activated_removal_abilities{};
+    std::vector<std::string> activated_siphon_abilities{}; // WGCH-39 preview routing; execution uses ground membership
     friend bool operator==(const GalacticAbilitySetup&, const GalacticAbilitySetup&) = default;
 };
 struct PreparedAbility {
@@ -1247,6 +1260,7 @@ struct AbilityActorState {
     std::vector<PlanetId> spy_targets{}; // WGCH-108: registered even after a refused insertion
     bool contested_check_disabled{}; // WGCH-58/160: false (the default) keeps the contested-orbit refusal armed
     bool removal_enabled{}, removal_cancelled{};
+    bool siphon_enabled{}, siphon_cancelled{};
     friend bool operator==(const AbilityActorState&, const AbilityActorState&) = default;
 };
 struct SabotageHistory {

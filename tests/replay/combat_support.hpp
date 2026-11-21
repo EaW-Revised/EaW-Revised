@@ -75,6 +75,8 @@ void test_hardpoint_turret();
 void test_fire_bone_pole();
 void test_object_weapon_cone();
 void test_unit_weapon_targeting_and_muzzles();
+void test_deploy_pose_weapon_bones();
+void test_deploy_pose_checkpoint();
 void test_rocket_launch_axis();
 void test_lead();
 void test_history_checkpoint();

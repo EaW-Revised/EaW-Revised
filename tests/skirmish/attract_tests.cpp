@@ -172,6 +172,60 @@ void start_timeout_pause() {
         "MAT-05: input clears the pause, and the expired map then advances");
 }
 
+void hold_while_covered() {
+    AttractSettings settings;
+    settings.menu_attract = true;
+    settings.maps = {"A.ted"};
+    settings.cycle_delays = {10};
+    settings.start_timeout_seconds = 100;
+    AttractManager manager(settings);
+    manager.hold(5);
+    expect(!manager.held(), "MAT-22: an uninitialised manager is not held");
+    manager.init(0);
+    static_cast<void>(manager.advance(0));
+    manager.hold(5000);
+    manager.hold(9000); // keeps the first time
+    expect(manager.held(), "MAT-22: hold marks the manager held");
+    const auto covered = manager.service(frame(500000, true, true));
+    expect(covered.paused && covered.action == AttractAction::none,
+        "MAT-22: while held nothing advances, however much time passes");
+    manager.release(200000);
+    expect(!manager.held(), "MAT-22: release clears the hold");
+    const auto back = manager.service(frame(200001, true, true));
+    expect(!back.paused && back.action == AttractAction::none,
+        "MAT-22: the held time does not count against the map or idle clocks");
+    expect(manager.map_since_ms() == 195000 && manager.idle_since_ms() == 195000,
+        "MAT-22: both clocks move forward by exactly the held span (195 s)");
+    manager.release(300000);
+    expect(manager.map_since_ms() == 195000, "MAT-22: releasing an unheld manager changes nothing");
+    manager.hold(300000);
+    manager.shutdown();
+    expect(!manager.held(), "MAT-13: shutdown drops the hold");
+}
+
+void hold_with_input() {
+    AttractSettings settings;
+    settings.menu_attract = true;
+    settings.maps = {"A.ted"};
+    settings.cycle_delays = {1000};
+    settings.start_timeout_seconds = 100;
+    AttractManager manager(settings);
+    manager.init(0);
+    static_cast<void>(manager.advance(0));
+    manager.hold(50000);
+    manager.pointer_moved(299000, false); // the Cancel click, just before the screen changes
+    static_cast<void>(manager.key(AttractKey::other, frame(299500, true, false)));
+    manager.release(300000);
+    expect(manager.idle_since_ms() <= 300000, "MAT-22: an input during the hold never leaves the idle clock in the future");
+    const auto after = manager.service(frame(300001, true, true));
+    expect(!after.paused && after.action == AttractAction::none,
+        "MAT-22: the battle runs right after a release that follows an input during the hold");
+    manager.hold(310000);
+    manager.window_activated(399000);
+    manager.release(400000);
+    expect(!manager.service(frame(400001, true, true)).paused, "MAT-22: a window activation during the hold is kept too");
+}
+
 void dialogs_and_keys() {
     AttractSettings settings;
     settings.menu_attract = true;
@@ -326,6 +380,8 @@ int main() {
     cycle_and_clocks();
     restart_and_failed_candidates();
     start_timeout_pause();
+    hold_while_covered();
+    hold_with_input();
     dialogs_and_keys();
     wrapping_clocks();
     no_maps();

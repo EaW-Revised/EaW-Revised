@@ -516,6 +516,12 @@ struct EawrLanLobby::Impl final {
         GalacticLobbyBackend::CheckpointCandidate candidate;
     };
     std::future<core::Result<CheckpointRead>> checkpoint_read;
+    // The last restore was refused only because finished-battle records came from another build: the host may load the save
+    // without them. checkpoint_recover is that conversion running, checkpoint_recover_request the request it belongs to.
+    bool checkpoint_recoverable{};
+    std::future<core::Result<checkpoint::RecoveredCheckpoint>> checkpoint_recover;
+    std::uint64_t checkpoint_recover_request{};
+    unsigned checkpoint_recover_fixture{}; // --eawr-lan-do recover_fixture:<battles>: a canned conversion, for the layout check
     viewer::CheckpointRestoreJob<core::Result<GalacticLobbyBackend::PreparedCheckpoint>, net::LobbySnapshot> checkpoint_prepare;
     std::future<std::shared_ptr<viewer::SnapshotSavedGameStore>> checkpoint_listing;
     std::shared_ptr<viewer::SnapshotSavedGameStore> checkpoint_store;
@@ -532,6 +538,7 @@ struct EawrLanLobby::Impl final {
     std::shared_ptr<const std::vector<std::uint8_t>> checkpoint_bytes;
     std::optional<GalacticLobbyBackend::CheckpointCandidate> checkpoint_candidate;
     std::vector<net::SetupSeat> checkpoint_bindings;
+    std::string logged_room_players; // the last per-player state line written to the log (ready, mod check), to log only changes
     std::vector<net::PeerIndex> checkpoint_bound_peers; // the room's peers the bindings were fitted to (#6121)
     std::string checkpoint_description, checkpoint_date, checkpoint_problem;
     // #7858: what the host is busy with (reading the save, waiting for content, a cancelled restore), shown as a plain line: only

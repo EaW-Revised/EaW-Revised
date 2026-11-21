@@ -204,7 +204,7 @@ void PlanetSearchWidget::choose(const int64_t row) {
     // change between drawing this list and the native input event.
     const auto planets = state_->input_planets();
     const auto found = std::find_if(planets.begin(), planets.end(), [id](const auto& planet) { return planet.id == id; });
-    if (found == planets.end() || state_->galaxy_modal_open()
+    if (found == planets.end() || state_->camera_modal_open()
         || state_->tactical || state_->loading || state_->tour || state_->map_input.gates.selection_locked
         || state_->map_input.gates.tutorial_locked || !state_->map_input.gates.world_allowed()) return;
     auto effect = galactic_view::SelectionEffects{};
@@ -282,7 +282,7 @@ void PlanetSearchWidget::refresh() {
 
 void PlanetSearchWidget::service(GalacticMode::State& state) {
     if (!visible()) return; // no list, discovery scans or texture work while closed
-    if (!state.galaxy || state.tactical || state.loading || state.completed || state.tour || state.galaxy_modal_open()
+    if (!state.galaxy || state.tactical || state.loading || state.completed || state.tour || state.camera_modal_open()
         || !state.map_input.gates.world_allowed() || state.map_input.gates.tutorial_locked) { close(); return; }
     state_ = &state;
     if (size_ != state.hud->get_size()) {

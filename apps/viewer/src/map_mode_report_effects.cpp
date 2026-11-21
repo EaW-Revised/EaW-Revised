@@ -3,6 +3,11 @@
 #include "startup_trace.hpp"
 #include "render_profile_viewport.hpp"
 
+#include "eawr/scene/shader_routes.hpp"
+
+#include <godot_cpp/variant/string.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
+
 namespace eawr::presentation::godot_backend {
 
 namespace {
@@ -140,7 +145,14 @@ void MapMode::State::write_report_population(std::ostream& output) const {
             output << (first ? "" : ", ") << json(shader) << ": " << count;
             first = false;
         }
-        output << "}, \"renderer_assets\": " << renderer_assets
+        std::vector<const scene::Placement*> drawn_placements;
+        for (const scene::Placement& placement : scene->placements)
+            if (placement.drawable()) drawn_placements.push_back(&placement);
+        const scene::DroppedLayers dropped = scene::dropped_layers(drawn_placements);
+        godot::UtilityFunctions::print(godot::String("EAWR dropped layers: ")
+            + godot::String::utf8(scene::dropped_layers_summary(dropped).c_str()));
+        output << "}, \"dropped_layers\": " << scene::dropped_layers_json(dropped);
+        output << ", \"renderer_assets\": " << renderer_assets
             << ", \"surfaces_uploaded\": " << surfaces_uploaded
             << ", \"surfaces_unsupported\": " << surfaces_unsupported
             << ", \"surfaces_failed\": " << surfaces_failed

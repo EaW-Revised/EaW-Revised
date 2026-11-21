@@ -159,8 +159,32 @@ struct WeaponProfile {
     // FULL_SALVO is on; 1 when the hardpoint does not author it.
     math::Fixed full_salvo_delay{math::Fixed::from_raw(math::Fixed::scale)};
     bool fire_in_rocket_mode{true}, fire_in_normal_mode{true}; // WRA-02
+    // #7940: the hardpoint's delay multiplier and fire gate for each of the other unit abilities; 1 and yes unless authored.
+    math::Fixed defend_delay{math::Fixed::from_raw(math::Fixed::scale)};
+    math::Fixed turbo_delay{math::Fixed::from_raw(math::Fixed::scale)};
+    math::Fixed power_to_weapons_delay{math::Fixed::from_raw(math::Fixed::scale)};
+    bool fire_in_defend_mode{true}, fire_in_turbo_mode{true}, fire_in_power_to_weapons_mode{true};
     [[nodiscard]] bool fires_in_mode(const bool rocket) const noexcept {
         return rocket ? fire_in_rocket_mode : fire_in_normal_mode;
+    }
+    // #7940: this hardpoint's delay multiplier while the unit ability `kind` is on (1 for a kind with none).
+    [[nodiscard]] math::Fixed mode_delay(const AbilityKind kind) const noexcept {
+        switch (kind) {
+        case AbilityKind::defend: return defend_delay;
+        case AbilityKind::turbo: return turbo_delay;
+        case AbilityKind::power_to_weapons: return power_to_weapons_delay;
+        case AbilityKind::full_salvo: return full_salvo_delay;
+        default: return math::Fixed::from_raw(math::Fixed::scale);
+        }
+    }
+    // #7940: whether this hardpoint may fire while the unit ability `kind` is on (yes for a kind with no flag).
+    [[nodiscard]] bool fires_in_ability(const AbilityKind kind) const noexcept {
+        switch (kind) {
+        case AbilityKind::defend: return fire_in_defend_mode;
+        case AbilityKind::turbo: return fire_in_turbo_mode;
+        case AbilityKind::power_to_weapons: return fire_in_power_to_weapons_mode;
+        default: return true;
+        }
     }
     std::vector<HolderShotProfile> lucky_shots{}; // WLK-02: each holder keeps its authored override.
     friend bool operator==(const WeaponProfile&, const WeaponProfile&) = default;
@@ -334,6 +358,55 @@ struct DestructionSurvivorProfile {
     friend bool operator==(const DestructionSurvivorProfile&, const DestructionSurvivorProfile&) = default;
 };
 
+// WDP-01..06: the places a weapon's bones take while its unit's DEPLOY or UNDEPLOY clip plays. The loader
+// poses the skeleton at every clip frame and keeps only the weapon bones, in the same unit frame as the
+// bind points above, merging consecutive frames that leave every weapon bone where it was.
+struct WeaponBonePose {
+    math::Vec3 fire_a{};
+    math::Vec3 fire_b{};
+    std::vector<math::Vec3> muzzles{};
+    friend bool operator==(const WeaponBonePose&, const WeaponBonePose&) = default;
+};
+
+// From `from_frame` (clip frame, inclusive) until the next segment: one pose per weapon of the profile.
+struct DeployPoseSegment {
+    std::uint32_t from_frame{};
+    std::vector<WeaponBonePose> weapons{};
+    friend bool operator==(const DeployPoseSegment&, const DeployPoseSegment&) = default;
+};
+
+struct DeployPoseClip {
+    std::uint32_t frames{};          // playable frames; the clip holds its last one
+    math::Fixed frames_per_tick{};   // clip frames per logical frame: Deployment_Anim_Rate times the clip rate over 30
+    std::vector<DeployPoseSegment> segments{}; // ascending from_frame, the first at 0
+    friend bool operator==(const DeployPoseClip&, const DeployPoseClip&) = default;
+};
+
+struct DeployPoseTable {
+    DeployPoseClip deploy{};
+    DeployPoseClip undeploy{};
+    friend bool operator==(const DeployPoseTable&, const DeployPoseTable&) = default;
+};
+
+// WDP-02: which clip a unit's SPOILER_LOCK switch is running and from where. `since` is the logical frame of
+// the switch and `start_frame` the frame the clip starts at (the running clip's mirrored remaining frames, WDP-03).
+// Absent until a type with a pose table first switches; absent means the bind pose.
+struct DeployPoseState {
+    bool on{};
+    std::uint64_t since{};
+    std::uint32_t start_frame{};
+    friend constexpr bool operator==(const DeployPoseState&, const DeployPoseState&) noexcept = default;
+};
+
+// WDP-03: the clip frame a state shows at `tick`: the start frame plus the clip frames that have passed, held at
+// the last playable frame. Whole frames: the fractional part is dropped.
+[[nodiscard]] std::uint32_t deploy_pose_frame(const DeployPoseClip& clip, const DeployPoseState& state, std::uint64_t tick) noexcept;
+// WDP-04: the weapon bone poses a unit shows at `tick`; null where the unit stands on its bind pose.
+[[nodiscard]] const DeployPoseSegment* deploy_pose_segment(const DeployPoseTable& table, const DeployPoseState& state, std::uint64_t tick) noexcept;
+// WDP-03: the state after a SPOILER_LOCK switch at `tick`: the other clip starts at the frame that mirrors the
+// running clip's remaining frames (none while the unit stood on its bind pose).
+[[nodiscard]] DeployPoseState deploy_pose_switch(const DeployPoseTable& table, const std::optional<DeployPoseState>& current, bool on, std::uint64_t tick) noexcept;
+
 struct CombatProfile {
     TypeId type_id{};
     std::uint64_t category_bits{};                  // CategoryMask, as a candidate
@@ -384,6 +457,8 @@ struct CombatProfile {
     std::uint64_t attack_category_restrictions{}; // WTA-29: unit-level category refusal
     // WCC-15: Targeting_Stickiness_Time_Threshold in seconds; 0 when not authored (debug build).
     math::Fixed stickiness{};
+    // WDP-01: present only on a type whose SPOILER_LOCK clips move a weapon bone off its bind point.
+    std::optional<DeployPoseTable> deploy_poses{};
     friend bool operator==(const CombatProfile&, const CombatProfile&) = default;
 };
 

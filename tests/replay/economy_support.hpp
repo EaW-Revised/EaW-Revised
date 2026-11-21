@@ -66,6 +66,7 @@ void test_cancel();
 void test_cancel_entry();
 void test_station_lost();
 void test_reinforce_ship();
+void test_script_change_owner_population();
 void test_reinforced_carrier();
 void test_arrival_hits();
 void test_arrival_services();

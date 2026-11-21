@@ -27,9 +27,11 @@ struct CanonicalCounts {
     std::uint64_t modified_count{};
     std::uint64_t hazard_moves{};
     std::uint64_t final_facings{};
+    std::uint64_t deploy_poses{};
     std::uint64_t waypoint_count{};
     std::uint64_t marked_units{};
     std::uint64_t script_invulnerable_units{};
+    std::uint64_t hold_fire_units{};
     std::uint64_t heroes{};
     std::uint64_t history_count{};
     std::uint64_t disabled_garrisons{};
@@ -60,9 +62,11 @@ struct CanonicalCounts {
         modified_count += (unit.upgrade_bonuses != CombatBonuses{} || (unit.durability && (std::any_of(unit.durability->disabled.begin(), unit.durability->disabled.end(), [](bool v) { return v; }) || std::any_of(unit.durability->repairing_players.begin(), unit.durability->repairing_players.end(), [](const auto& v) { return !v.empty(); })))) ? 1U : 0U;
         hazard_moves += (unit.state.order.through_hazards) ? 1U : 0U;
         final_facings += (unit.state.order.final_yaw.has_value()) ? 1U : 0U;
+        deploy_poses += (unit.abilities && unit.abilities->deploy_pose) ? 1U : 0U;
         waypoint_count += (unit.waypoints.has_value()) ? 1U : 0U;
         marked_units += (unit.garrison_unit) ? 1U : 0U;
         script_invulnerable_units += unit.script_invulnerable ? 1U : 0U;
+        hold_fire_units += unit.hold_fire ? 1U : 0U;
         heroes += (unit.state.purchase_type != 0 || !unit.state.contained.empty()) ? 1U : 0U;
         history_count += (unit.position_history.has_value()) ? 1U : 0U;
         disabled_garrisons += !unit.state.garrison_enabled ? 1U : 0U;
@@ -103,9 +107,11 @@ struct CanonicalCounts {
         modified_count += other.modified_count;
         hazard_moves += other.hazard_moves;
         final_facings += other.final_facings;
+        deploy_poses += other.deploy_poses;
         waypoint_count += other.waypoint_count;
         marked_units += other.marked_units;
         script_invulnerable_units += other.script_invulnerable_units;
+        hold_fire_units += other.hold_fire_units;
         heroes += other.heroes;
         history_count += other.history_count;
         disabled_garrisons += other.disabled_garrisons;

@@ -605,6 +605,65 @@ void shared_clock_limit_at_execution() {
     }
 }
 
+// #7973: a pause refused by the per-seat debounce is reported to the issuing seat on every peer at the executing tick, so its
+// presentation releases the pause request in flight (it used to wait for another seat to flip the agreed state). A seat's own
+// resume is never refused, and another seat's pause or resume is never held by the first seat's debounce.
+void pause_refusal_reaches_the_issuing_seat() {
+    Rig::Options options;
+    options.final_tick = 120;
+    options.clock_policy = net::GalacticClockPolicy::limited;
+    Rig rig(versus_setup(), options);
+    const auto send = [&](net::PeerIndex peer, const galactic::CommandPayload& payload) {
+        return require(rig.sessions[peer].submit([&](auto key) { return net::encode_galactic_input(key, payload); }));
+    };
+    std::uint64_t round = 0;
+    const auto run_to = [&](const std::uint64_t executed, const auto& check) {
+        std::array<bool, 2> seen{};
+        for (; round < 20'000 && !(seen[0] && seen[1]); ++round) {
+            rig.network.round = round;
+            for (net::PeerIndex peer = 0; peer < 2; ++peer) {
+                const auto pumped = require(rig.sessions[peer].pump(round));
+                if (!pumped.completed) continue;
+                const auto published = rig.adapters[peer]->take_tick();
+                if (pumped.completed->completed_tick != executed + 1 || seen[peer]) continue;
+                seen[peer] = true;
+                expect(published.has_value(), "the executing tick is published");
+                check(peer);
+            }
+        }
+        expect(seen[0] && seen[1], "both peers completed the tick that executed the clock inputs");
+    };
+    const auto refused_seats = [&](net::PeerIndex peer) {
+        const auto seats = rig.adapters[peer]->clock_refusals();
+        return std::vector<eawr::sim::SeatId>(seats.begin(), seats.end());
+    };
+    // The first seat pauses, resumes and pauses again within the debounce: the third input is refused, the game runs.
+    send(0, galactic::PauseGalaxy{});
+    send(0, galactic::ResumeGalaxy{});
+    const auto repeated = send(0, galactic::PauseGalaxy{});
+    run_to(repeated.tick, [&](net::PeerIndex peer) {
+        expect(rig.games[peer]->galaxy().clock().pause_depth == 0, "the repeated pause is refused by the debounce on every peer");
+        expect(rig.adapters[peer]->refused().size() == 1
+            && rig.adapters[peer]->refused()[0].message.find("Pause repeated too quickly") != std::string::npos,
+            "the debounce refusal is published identically on every peer");
+        expect(refused_seats(peer) == std::vector<eawr::sim::SeatId>{rig.humans[0]},
+            "the refused pause is reported to its issuing seat so the seat releases its request in flight");
+    });
+    // The other seat pauses at once: the first seat's debounce does not hold it, and nobody is reported.
+    const auto other_pause = send(1, galactic::PauseGalaxy{});
+    run_to(other_pause.tick, [&](net::PeerIndex peer) {
+        expect(rig.games[peer]->galaxy().clock().pause_depth == 1, "the other seat pauses");
+        expect(refused_seats(peer).empty(), "the other seat's pause is not refused");
+        expect(rig.adapters[peer]->pause_actor() == rig.humans[1], "the pause belongs to the seat that took it");
+    });
+    // The first seat resumes the other seat's pause right away: resume is never refused, whatever its own debounce says.
+    const auto resume = send(0, galactic::ResumeGalaxy{});
+    run_to(resume.tick, [&](net::PeerIndex peer) {
+        expect(rig.games[peer]->galaxy().clock().pause_depth == 0, "any human may resume a pause another seat took");
+        expect(refused_seats(peer).empty(), "a resume is never refused");
+    });
+}
+
 void pause_progress_and_no_local_ticks() {
     const auto setup = versus_setup();
     Rig::Options options;
@@ -1457,6 +1516,7 @@ int main() {
         loopback("versus-wan", versus_setup(), eawr::testing::wan_profiles[1]);
         loopback("coop-4-seats", coop_setup(), std::nullopt);
         shared_clock_limit_at_execution();
+        pause_refusal_reaches_the_issuing_seat();
         pause_progress_and_no_local_ticks();
         held_and_duplicate_transport();
         racing_inputs_are_canonical();

@@ -406,6 +406,76 @@ void test_hung_prompt_ignores_a_gap_in_the_samples() {
     CHECK(observe_hang(stuck, true, 4000).hung_ms == 0);
 }
 
+// The probe timing a report reads: how long the last probe took and how long since a probe last got an answer.
+void test_probe_timing_separates_a_stall_from_a_false_flag() {
+    ProbeTiming timing;
+    CHECK(!timing.probed && since_answer_ms(timing, 5000) == 0);
+    note_probe(timing, true, 3, 1000);
+    CHECK(timing.probed && timing.last_probe_ms == 3 && since_answer_ms(timing, 1000) == 0);
+    CHECK(since_answer_ms(timing, 1900) == 900);
+    note_probe(timing, false, kProbeTimeoutMs, 3000); // A timeout: latency recorded, answer time kept.
+    CHECK(timing.last_probe_ms == kProbeTimeoutMs && since_answer_ms(timing, 3000) == 2000);
+    note_probe(timing, true, 7, 4000);
+    CHECK(timing.last_probe_ms == 7 && since_answer_ms(timing, 4500) == 500);
+    CHECK(since_answer_ms(timing, 3000) == 0); // A clock earlier than the last answer never underflows.
+}
+
+// A probe over zero windows, or over windows that are gone, is not an answer; only a real answer stamps the time.
+void test_probe_summary_counts_only_real_answers() {
+    const std::vector<int> none;
+    CHECK(!first_unanswered(none, [](int) { return ProbeResult::answered; }).answered);
+    const std::vector<int> windows{1, 2};
+    CHECK(!first_unanswered(windows, [](int) { return ProbeResult::window_gone; }).answered);
+    CHECK(first_unanswered(windows, [](int w) { return w == 1 ? ProbeResult::window_gone : ProbeResult::answered; }).answered);
+    const auto timed_out = first_unanswered(windows, [](int w) { return w == 2 ? ProbeResult::timeout : ProbeResult::answered; });
+    CHECK(timed_out.hung && !timed_out.answered);
+    ProbeTiming timing;
+    note_probe(timing, first_unanswered(none, [](int) { return ProbeResult::answered; }).answered, 1, 5000);
+    CHECK(since_answer_ms(timing, 9000) == 0); // No answer yet: nothing to measure from.
+}
+
+// The hang verdict comes from a real probe of the window, with a fake probe standing in for the OS here. A window
+// that answers is never hung however long it idles; only a timeout is, and a vanished window says nothing.
+void test_hung_prompt_follows_the_probe_not_the_os_flag() {
+    const std::vector<int> none;
+    CHECK(!first_unanswered(none, [](int) { return ProbeResult::timeout; }).hung);
+    const std::vector<int> windows{10, 11, 12};
+    // An idle window that answers every probe: no hang, no prompt, for far longer than the prompt delay.
+    {
+        HangTracker tracker;
+        std::uint64_t now = 100000;
+        for (int second = 0; second < 120; ++second, now += 1000) {
+            const auto summary = first_unanswered(windows, [](int) { return ProbeResult::answered; });
+            const auto verdict = observe_hang(tracker, summary.hung, now);
+            CHECK(!summary.hung && !verdict.hung && !verdict.prompt);
+        }
+    }
+    // A window that is gone, or cannot be probed, is not a hang.
+    CHECK(!first_unanswered(windows, [](int) { return ProbeResult::window_gone; }).hung);
+    // The first window that times out is reported, and probing stops there.
+    int probed = 0;
+    const auto summary = first_unanswered(windows, [&](int handle) {
+        ++probed;
+        return handle == 11 ? ProbeResult::timeout : ProbeResult::answered;
+    });
+    CHECK(summary.hung && summary.hung_index == 1 && probed == 2);
+    // Consecutive timeouts reach the prompt at the product delay; one answered probe resets the count.
+    HangTracker tracker;
+    std::uint64_t now = 200000;
+    const std::uint64_t first_seen = now;
+    bool prompted = false;
+    for (; now < first_seen + kHungPromptAfterMs; now += 1000) {
+        const auto verdict = observe_hang(tracker, first_unanswered(windows, [](int) { return ProbeResult::timeout; }).hung, now);
+        prompted = prompted || verdict.prompt;
+    }
+    CHECK(!prompted);
+    CHECK(observe_hang(tracker, true, now).prompt);
+    now += 1000;
+    CHECK(!observe_hang(tracker, first_unanswered(windows, [](int) { return ProbeResult::answered; }).hung, now).prompt);
+    now += 1000;
+    CHECK(!observe_hang(tracker, true, now).prompt);
+}
+
 void test_state() {
     Scratch scratch;
     const fs::path data = scratch.path() / "user data";
@@ -1639,6 +1709,9 @@ void test_project_name_matches_godot_project(const fs::path& project_godot) {
     CHECK(!text.empty());
     CHECK_CONTAINS(text, std::string("config/name=\"") + kViewerProjectName + "\"");
     CHECK(text.find("use_custom_user_dir") == std::string::npos);   // else user:// is not under app_userdata\<name>
+    // The game window must not be flagged "not responding" while idle (engine accessibility bridge off).
+    CHECK_CONTAINS(text, "[accessibility]");
+    CHECK_CONTAINS(text, "general/accessibility_support=2");
 }
 
 // --- several instances (#5619, P1) --------------------------------------------------------------
@@ -2244,6 +2317,9 @@ int main(int argc, char** argv) {
     test_state();
     test_hung_prompt_waits_for_a_sustained_hang();
     test_hung_prompt_ignores_a_gap_in_the_samples();
+    test_hung_prompt_follows_the_probe_not_the_os_flag();
+    test_probe_timing_separates_a_stall_from_a_false_flag();
+    test_probe_summary_counts_only_real_answers();
     test_launch_plan();
     test_flow_explicit_game_root();
     test_render_thread_precedence();

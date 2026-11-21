@@ -372,6 +372,7 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         else load_body(*object, unit);
         if (unit.kind == UnitKind::squadron && unit.max_squad_size == 0) return; // FL-06: skip the invalid type only
         if (!hero_company) load_abilities(*object, unit);
+        if (!hero_company && unit.kind != UnitKind::squadron) load_deploy_poses(*object, unit);
         if (!unit.destruction_survivors.empty()) unit.survivor_ejection = std::any_of(unit.abilities.begin(), unit.abilities.end(),
             [](const auto& ability) { return iequals(ability.authored_type, "EJECT_VEHICLE_THIEF"); });
         load_production(*object, unit);

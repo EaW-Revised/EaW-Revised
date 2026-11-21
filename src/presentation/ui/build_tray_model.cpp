@@ -152,6 +152,13 @@ std::string derived_caption(const std::string_view name) {
     return words;
 }
 
+std::string handle_label(const std::string_view caption, const std::size_t omitted) {
+    std::string label(caption);
+    if (omitted != 0) return label + std::to_string(omitted);
+    while (!label.empty() && std::isspace(static_cast<unsigned char>(label.back())) != 0) label.pop_back();
+    return label;
+}
+
 std::vector<Group> classify(const std::span<const std::string> choice_types, const TypeIndex& types,
     const CategoryEnum& categories, const GroupDefinition& definition) {
     struct Placed final {

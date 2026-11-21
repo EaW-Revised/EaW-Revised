@@ -287,7 +287,7 @@ class MapParticlesGraphical(unittest.TestCase):
     def test_missing_unsupported_and_capacity_controls(self):
         cases = (("missing_model", "model_not_in_vfs"),
                  ("missing_texture", "did not resolve"),
-                 ("unsupported", "depth sprite"))
+                 ("unsupported", "diffuse"))
         with tempfile.TemporaryDirectory(prefix="eawr-map-particle-controls-") as temporary:
             path = pathlib.Path(temporary)
             for name, cause in cases:
@@ -535,7 +535,7 @@ class MapParticlesGraphical(unittest.TestCase):
                                   blended["map_particles"]["placements"]],
                                  [f"eawr-particle-{name}-v1"] * 2)
 
-            for name, option, cause in (("depth", "unsupported", "depth sprite"),
+            for name, option, cause in (("depth", "unsupported", "diffuse"),
                                         ("heat", "heat", "heat/screen distortion")):
                 bad_root = fixture.write_fixture_root(path / f"{name}-game",
                                                       fog_compatible=True, **{option: True})

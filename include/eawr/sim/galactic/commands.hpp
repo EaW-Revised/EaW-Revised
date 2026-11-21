@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/core/text.hpp"
 #include "eawr/sim/galactic/types.hpp"
 
 #include <compare>
@@ -7,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -306,6 +308,13 @@ inline constexpr std::size_t max_gui_component_name = 96;
 // forms. The command is counted where it executes, so every peer and every replay drops the same clicks. A dropped
 // click is reported as a diagnostic and never ends the match.
 inline constexpr unsigned max_gui_clicks_per_tick = 8;
+// #7826: the galactic play/pause control. A story's FORCE_CLICK_GUI naming it changes the clock inside the session (see
+// GalacticSession::story_toggle_pause), not through a HUD press. It is the engine's own control, not mod data; the viewer's
+// press action uses the same name. A control name matches case-insensitively, like every forced press.
+inline constexpr std::string_view pause_control_name = "b_play_pause";
+[[nodiscard]] inline bool is_pause_control(const std::string_view name) noexcept {
+    return core::iequals(name, pause_control_name);
+}
 // WGCH-121: the viewer reports an actual dialog opening; this never prepares an ability.
 struct CorruptionDialogOpened {
     PlanetId planet{};

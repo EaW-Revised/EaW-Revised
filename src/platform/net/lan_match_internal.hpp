@@ -729,6 +729,9 @@ private:
     std::set<net::PeerIndex> removed_peers_, closing_peers_;
     std::map<net::PeerIndex, std::uint64_t> known_edges_;
     std::map<net::PeerIndex, std::uint64_t> mod_review_edges_;
+    // Host: the last mod-check report each guest was sent (its room edge and the frame): a changed report or a new link sends again.
+    std::map<net::PeerIndex, std::pair<std::uint64_t, std::vector<std::uint8_t>>> mod_review_state_sent_;
+    void send_mod_review_state(net::MessageTransport&, const net::LobbySnapshot&);
     std::optional<net::LobbyNotice> lobby_notice_;
     std::optional<LanLobbyState> last_lobby_state_;
     // GCMP-07: the Galactic Conquest mode of the room (the host's first options; the Start seam once the room froze).

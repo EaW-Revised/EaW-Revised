@@ -1,7 +1,15 @@
-# Galactic replay format v14 (EAWRGCR)
+# Galactic replay format v15 (EAWRGCR)
 
-Current compatibility identities are replay format 14, galactic rules 7 and state
-encoding 21 (hash domain `eawr-galactic-state-v13`); published snapshot encoding is 10.
+Current compatibility identities are replay format 15, galactic rules 7 and state
+encoding 22 (hash domain `eawr-galactic-state-v14`); published snapshot encoding is 10.
+Ability setup encoding 12 removes the campaign-wide tutorial corruption switch. Each live
+corruption planet row now retains two `u8` Boolean flags after its transition: restriction
+and success-hologram allowance (WGCH-200/201). Checkpoint galaxy section 59 stores both;
+corruption lifecycle native operations 2 and 3 write the restricted/hologram flag, respectively
+(`u64` planet, `u8` Boolean). Story removal uses the existing transition operation 0.
+Older project replay and checkpoint formats are refused; corpus fixtures are upgraded by
+the synthetic generators in the same change.
+
 Market item records retain ordered ability names for the campaign-to-tactical purchase gate (WGEP-145).
 Checkpoint galaxy section version 56 retains those names and the arrival landing request, as well as spy enabled/cancelled facts and registered
 spy targets in the ability host. Ability setup/state encoding 9 adds authored ground

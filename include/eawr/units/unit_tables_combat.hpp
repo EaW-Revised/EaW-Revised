@@ -60,6 +60,10 @@ struct Weapon final {
     std::optional<std::uint32_t> appearance_delay_frames; // WAD-37/40, hardpoint only
     std::optional<Fixed> full_salvo_delay_multiplier; // Full_Salvo_Weapon_Delay_Multiplier, hardpoint only (WAB-80)
     bool fire_in_rocket_mode{true}, fire_in_normal_mode{true}; // WRA-02
+    // #7940: the per-ability hardpoint data: Defend/Turbo/Power_To_Weapons_Mode_Weapon_Delay_Multiplier and
+    // Fire_When_In_Defend/Turbo/Power_To_Weapons_Mode (hardpoint only; the flags default to yes).
+    std::optional<Fixed> defend_delay_multiplier, turbo_delay_multiplier, power_to_weapons_delay_multiplier;
+    bool fire_in_defend_mode{true}, fire_in_turbo_mode{true}, fire_in_power_to_weapons_mode{true};
     bool operator==(const Weapon&) const = default;
 };
 

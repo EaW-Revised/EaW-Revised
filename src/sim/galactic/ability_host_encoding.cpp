@@ -119,7 +119,7 @@ std::optional<PreparedAbility> decode_prepared_ability(std::span<const std::uint
     p.absence = math::Fixed::from_raw(absence); p.owned = owned != 0; return p;
 }
 void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilitySetup& setup) {
-    put_u32(out, 11); put_i64(out, setup.default_hero_absence.raw()); // encoding 11 adds authored corruption removal
+    put_u32(out, 13); put_i64(out, setup.default_hero_absence.raw()); // WGCH-200: per-planet policy replaces tutorial admission
     put_u32(out, static_cast<std::uint32_t>(setup.profiles.size()));
     for (const auto& p : setup.profiles) {
         put_u8(out, static_cast<std::uint8_t>(p.ground_activated.size()));
@@ -130,6 +130,13 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
             text_value(out, r.name); text_value(out, r.text_identity); text_value(out, r.activation_sfx);
             put_i64(out, r.cost_multiplier.raw()); put_i64(out, r.seconds.raw());
             put_u8(out, r.initially_enabled ? 1 : 0); put_u8(out, r.causes_despawn ? 1 : 0); put_u8(out, r.hero ? 1 : 0);
+        }
+        put_u8(out, p.siphon ? 1 : 0);
+        if (p.siphon) {
+            const auto& s = *p.siphon;
+            text_value(out, s.name); text_value(out, s.text_identity);
+            put_i64(out, s.minimum.raw()); put_i64(out, s.maximum.raw()); put_u32(out, s.cycles);
+            put_u8(out, s.initially_enabled ? 1 : 0); put_u8(out, s.causes_despawn ? 1 : 0); put_u8(out, s.hero ? 1 : 0);
         }
         put_u8(out, p.spy ? 1 : 0);
         if (p.spy) {
@@ -198,7 +205,7 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
     for (const auto& t : setup.corruption_prerequisites) { put_u64(out, t.type); put_u8(out, t.consumable ? 1 : 0); put_u8(out, t.named ? 1 : 0); }
     put_u32(out, static_cast<std::uint32_t>(setup.initial_corruption.size()));
     for (const auto& r : setup.initial_corruption) { put_u64(out, r.planet); put_u8(out, static_cast<std::uint8_t>(r.type)); put_u32(out, r.recipient); }
-    put_u8(out, setup.multiplayer ? 1 : 0); put_u8(out, setup.fast_corruption ? 1 : 0); put_u8(out, setup.tutorial_corruption_allowed ? 1 : 0);
+    put_u8(out, setup.multiplayer ? 1 : 0); put_u8(out, setup.fast_corruption ? 1 : 0);
     put_u32(out, static_cast<std::uint32_t>(setup.ruined_income.size()));
     for (const auto& r : setup.ruined_income) { put_u64(out, r.planet); put_i64(out, r.credits.raw()); }
     put_u64(out, setup.hack_required_type); put_i64(out, setup.hack_cost.raw());
@@ -208,6 +215,7 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
     for (const auto& name : setup.activated_destruction_abilities) text_value(out, name);
     names(out, setup.activated_spy_abilities);
     names(out, setup.activated_removal_abilities);
+    names(out, setup.activated_siphon_abilities);
     names(out, setup.activated_sabotage_abilities); names(out, setup.activated_neutralize_abilities);
     put_u32(out, static_cast<std::uint32_t>(setup.sabotage_costs.size()));
     for (const auto& c : setup.sabotage_costs) { put_u64(out, c.type); put_i64(out, c.cost.raw()); }
@@ -218,15 +226,15 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
 }
 std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::uint8_t> bytes) {
     sim::detail::Reader in(bytes); GalacticAbilitySetup result; std::uint32_t version{}, count{}; std::int64_t value{};
-    if (!in.read_u32(version) || version != 11 || !in.read_i64(value)
+    if (!in.read_u32(version) || version != 13 || !in.read_i64(value)
         || !in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 32) return {};
     result.default_hero_absence = math::Fixed::from_raw(value); TypeId previous{};
     for (std::uint32_t i = 0; i < count; ++i) {
         GalacticAbilityProfile p; std::uint8_t group_count{};
-        if (!in.read_u8(group_count) || group_count > 9) return {};
+        if (!in.read_u8(group_count) || group_count > 10) return {};
         for (std::uint8_t j = 0; j < group_count; ++j) {
             std::uint8_t value_kind{};
-            if (!in.read_u8(value_kind) || value_kind < 1 || value_kind > 9) return {};
+            if (!in.read_u8(value_kind) || value_kind < 1 || value_kind > 10) return {};
             const auto kind = static_cast<AbilityKind>(value_kind);
             if (std::find(p.ground_activated.begin(), p.ground_activated.end(), kind) != p.ground_activated.end()) return {};
             p.ground_activated.push_back(kind);
@@ -241,6 +249,17 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
                 || !in.read_u8(consumes) || consumes > 1 || !in.read_u8(hero) || hero > 1) return {};
             r.cost_multiplier = math::Fixed::from_raw(multiplier); r.seconds = math::Fixed::from_raw(seconds);
             r.initially_enabled = enabled != 0; r.causes_despawn = consumes != 0; r.hero = hero != 0;
+        }
+        std::uint8_t has_siphon{};
+        if (!in.read_u8(has_siphon) || has_siphon > 1) return {};
+        if (has_siphon) {
+            auto& s = p.siphon.emplace(); std::int64_t low{}, high{}; std::uint8_t enabled{}, consumes{}, hero{};
+            if (!text_value(in, s.name) || s.name.empty() || !text_value(in, s.text_identity) || s.text_identity.size() > 1024
+                || !in.read_i64(low) || low < 0 || !in.read_i64(high) || high > math::Fixed::scale || low > high
+                || !in.read_u32(s.cycles) || !in.read_u8(enabled) || enabled > 1
+                || !in.read_u8(consumes) || consumes > 1 || !in.read_u8(hero) || hero > 1) return {};
+            s.minimum = math::Fixed::from_raw(low); s.maximum = math::Fixed::from_raw(high);
+            s.initially_enabled = enabled != 0; s.causes_despawn = consumes != 0; s.hero = hero != 0;
         }
         std::uint8_t has_spy{};
         if (!in.read_u8(has_spy) || has_spy > 1) return {};
@@ -317,7 +336,7 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
             s.initially_enabled = flag != 0; s.cost_factor = math::Fixed::from_raw(factor);
         }
         if (!in.read_u8(has_neutralize) || has_neutralize > 1
-            || (!market && !has_theft && !corruption && !lifecycle && !has_hack && !has_destruction && !has_sabotage && !has_neutralize && !has_spy && !has_removal && p.auto_spies.empty())) return {};
+            || (!market && !has_theft && !corruption && !lifecycle && !has_hack && !has_destruction && !has_sabotage && !has_neutralize && !has_spy && !has_removal && !has_siphon && p.auto_spies.empty())) return {};
         if (has_neutralize) {
             auto& n = p.neutralize.emplace(); std::uint8_t flag{}, minor{}, major{};
             std::int64_t minor_mod{}, major_mod{}, a_lo{}, a_hi{}, t_lo{}, t_hi{};
@@ -379,9 +398,9 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
         if (!in.read_u64(r.planet) || !r.planet || !in.read_u8(type) || type > 8 || !in.read_u32(r.recipient) || !r.recipient) return {};
         r.type = static_cast<corruption_fixture::Type>(type); result.initial_corruption.push_back(r);
     }
-    std::uint8_t multiplayer{}, fast{}, tutorial{};
-    if (!in.read_u8(multiplayer) || multiplayer > 1 || !in.read_u8(fast) || fast > 1 || !in.read_u8(tutorial) || tutorial > 1) return {};
-    result.multiplayer = multiplayer != 0; result.fast_corruption = fast != 0; result.tutorial_corruption_allowed = tutorial != 0;
+    std::uint8_t multiplayer{}, fast{};
+    if (!in.read_u8(multiplayer) || multiplayer > 1 || !in.read_u8(fast) || fast > 1) return {};
+    result.multiplayer = multiplayer != 0; result.fast_corruption = fast != 0;
     if (!in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 16) return {};
     for (std::uint32_t i = 0; i < count; ++i) {
         RuinedPlanetIncome r; std::int64_t credits{};
@@ -397,7 +416,7 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
     if (!in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 4) return {};
     for (std::uint32_t i = 0; i < count; ++i) { std::string name; if (!text_value(in, name) || name.empty()) return {}; result.activated_destruction_abilities.push_back(std::move(name)); }
     if (!names(in, result.activated_spy_abilities) || !names(in, result.activated_removal_abilities)
-        || !names(in, result.activated_sabotage_abilities) || !names(in, result.activated_neutralize_abilities)) return {};
+        || !names(in, result.activated_siphon_abilities) || !names(in, result.activated_sabotage_abilities) || !names(in, result.activated_neutralize_abilities)) return {};
     if (!in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 16) return {};
     for (std::uint32_t i = 0; i < count; ++i) {
         SabotageStructureCost c; std::int64_t cost{};
@@ -416,7 +435,7 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
     return in.remaining() ? std::nullopt : std::optional(std::move(result));
 }
 void encode_ability_state(std::vector<std::uint8_t>& out, const GalacticAbilityState& s) {
-    put_u32(out, 10); put_u64(out, s.next_request); // encoding 10 adds removal service flags
+    put_u32(out, 11); put_u64(out, s.next_request); // encoding 11 adds siphon service flags
     put_u32(out, static_cast<std::uint32_t>(s.actors.size()));
     for (const auto& a : s.actors) {
         put_u64(out, a.actor); put_u64(out, a.type); put_u8(out, a.enabled ? 1 : 0); put_u8(out, a.cancelled ? 1 : 0);
@@ -431,6 +450,7 @@ void encode_ability_state(std::vector<std::uint8_t>& out, const GalacticAbilityS
         for (const auto planet : a.spy_targets) put_u64(out, planet);
         put_u8(out, a.contested_check_disabled ? 1 : 0);
         put_u8(out, a.removal_enabled ? 1 : 0); put_u8(out, a.removal_cancelled ? 1 : 0);
+        put_u8(out, a.siphon_enabled ? 1 : 0); put_u8(out, a.siphon_cancelled ? 1 : 0);
     }
     put_u32(out, static_cast<std::uint32_t>(s.preparations.size()));
     for (const auto& p : s.preparations) {
@@ -456,6 +476,7 @@ void encode_ability_state(std::vector<std::uint8_t>& out, const GalacticAbilityS
         put_u8(out, static_cast<std::uint8_t>(t.current)); put_u8(out, static_cast<std::uint8_t>(t.target));
         put_u8(out, t.increasing ? 1 : 0); put_u8(out, t.decreasing ? 1 : 0);
         put_u64(out, t.start); put_u64(out, t.end); put_u64(out, t.last_change);
+        put_u8(out, r.restricted ? 1 : 0); put_u8(out, r.hologram_enabled ? 1 : 0);
     }
     put_u32(out, static_cast<std::uint32_t>(s.missions.size()));
     for (const auto& m : s.missions) {

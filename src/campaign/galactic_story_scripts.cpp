@@ -93,6 +93,21 @@ std::optional<std::uint64_t> number_text(const auth::Value& value) {
     return out;
 }
 
+// #7102/#7964: Player.Is_Human for a registered player (its seat is human-controlled in the setup, fixed for the session);
+// anything else is a named fault. One rule for the story host and the object-script host.
+core::Result<void> register_player_is_human(auth::ScriptScheduler& scheduler, const GalacticStoryPlayers& players) {
+    std::map<std::uint64_t, bool> humans;
+    for (const auto& player : players.players) humans.emplace(player.id, player.human);
+    return scheduler.register_method(script::foc::handle_player, "Is_Human",
+        [humans = std::move(humans)](auth::BindingContext&, const auth::ValueList& arguments) {
+            using HumanResult = core::Result<auth::ValueList>;
+            const auto* self = arguments.empty() ? nullptr : std::get_if<auth::Handle>(&arguments.front().data);
+            if (!self || self->kind != script::foc::handle_player || arguments.size() != 1 || !humans.contains(self->id))
+                return HumanResult::failure(problem("Is_Human requires a registered player"));
+            return HumanResult::success({auth::Value{humans.at(self->id)}});
+        });
+}
+
 } // namespace
 
 struct GalacticStoryLink::Impl {
@@ -599,6 +614,16 @@ core::Result<void> register_galactic_object_bindings(auth::ScriptScheduler& sche
     if (auto added = scheduler.register_binding("Get_Game_Mode", [](auth::BindingContext&, const auth::ValueList&) {
         return Values::success({auth::Value::text("Galactic")});
     }); !added) return added;
+    // #7964: the planet-upgrade structure scripts ask the owner's seat before they message it.
+    if (auto added = register_player_is_human(scheduler, players); !added) return added;
+    // Game_Message: one text key, shown to the local player as urgent advisor text. The advisor/text presentation consumer is
+    // not hosted (the same seam as Enable_Advisor_Hints), so the call validates its argument, reports and continues.
+    if (auto added = scheduler.register_binding("Game_Message", [](auth::BindingContext& context, const auth::ValueList& args) -> Values {
+        if (args.size() != 1 || !std::get_if<std::string>(&args[0].data))
+            return Values::failure(problem("Game_Message requires exactly one text key"));
+        context.report(auth::codes::unsupported_api, "Game_Message presentation is unavailable; object script continues");
+        return Values::success({});
+    }); !added) return added;
     if (auto added = scheduler.register_binding("Find_Object_Type", [names = std::move(names)](
             auth::BindingContext&, const auth::ValueList& args) -> Values {
         const auto* name = args.empty() ? nullptr : std::get_if<std::string>(&args[0].data);
@@ -708,7 +733,7 @@ core::Result<void> register_galactic_object_bindings(auth::ScriptScheduler& sche
                 return Values::success({}); }); !added) return added;
     if (auto added = scheduler.register_binding("Script.Debug_Should_Issue_Event_Alert",
             [](auth::BindingContext&, const auth::ValueList&) { return Values::success({auth::Value{false}}); }); !added) return added;
-    std::vector<std::string_view> implemented{"Get_Game_Mode", "Find_Object_Type", "Find_All_Objects_Of_Type", "Spawn_Unit", "EvaluatePerception",
+    std::vector<std::string_view> implemented{"Get_Game_Mode", "Find_Object_Type", "Find_All_Objects_Of_Type", "Spawn_Unit", "EvaluatePerception", "Game_Message",
         "_OuputDebug", "_ScriptMessage", "_CustomScriptMessage", "_MessagePopup", "DumpCallStack",
         "Script.Debug_Should_Issue_Event_Alert"};
     if (story_link) {
@@ -980,6 +1005,8 @@ core::Result<std::shared_ptr<const GalacticStoryScripts>> GalacticStoryScripts::
     };
     for (const auto& [path, text] : out->modules_)
         if (names_symbol(text, "Spawn_Unit") || names_symbol(text, "Prevent_AI_Usage")) { out->uses_immediate_effects_ = true; break; }
+    for (const auto& [path, text] : out->modules_)
+        if (names_symbol(text, "EvaluatePerception")) { out->uses_perception_ = true; break; } // GA-13
     // #7073: the scoring module is pinned here; its definitions run once, first, in an instance of their own when the scheduler is made.
     if (auto pinned = pin_scoring_module(files, *out); !pinned) return Result::failure(pinned.error());
     std::uint64_t ordinal = 0;
@@ -1023,6 +1050,112 @@ std::string GalacticStoryScripts::fingerprint() const {
         }
     }
     return core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+}
+
+// GA-08..13: the reads a story script needs to walk the galaxy (a mod's scripted starting forces read every planet, its
+// owner and the owner's faction, ask perception equations about it and spawn by combat rating). They read the completed
+// world through the story's snapshot reader and the campaign facts, like Find_First_Object; nothing is staged, so a
+// campaign whose scripts only read keeps the partitioned story service and its hashes.
+static core::Result<void> register_story_world_reads(auth::ScriptScheduler& scheduler, const GalacticStoryPlayers& players,
+    const auth::GalacticSnapshotReader& reader) {
+    using Values = core::Result<auth::ValueList>;
+    const auto handle_at = [](const auth::ValueList& args, std::size_t index, std::uint32_t kind) -> const auth::Handle* {
+        const auto* value = args.size() > index ? std::get_if<auth::Handle>(&args[index].data) : nullptr;
+        return value && value->kind == kind ? value : nullptr;
+    };
+    // GA-08: every planet of the galaxy, destroyed ones included, as planet objects in ascending identity.
+    if (auto added = scheduler.register_binding("FindPlanet.Get_All_Planets", [reader](auth::BindingContext&, const auth::ValueList&) -> Values {
+        const auto snapshot = reader ? reader() : nullptr;
+        if (!snapshot) return Values::failure(problem("FindPlanet.Get_All_Planets: the galaxy is not available"));
+        std::vector<auth::Value> planets;
+        for (const auto& row : snapshot->planets()) planets.push_back(auth::Value{auth::Handle{script::foc::handle_game_object, row.id}});
+        std::sort(planets.begin(), planets.end(), [](const auto& a, const auto& b) {
+            return std::get<auth::Handle>(a.data).id < std::get<auth::Handle>(b.data).id;
+        });
+        return Values::success({auth::Value{std::move(planets)}});
+    }); !added) return added;
+    // GA-09: a planet's owner is its political owner; any other live object answers its own owner; nothing otherwise.
+    if (auto added = scheduler.register_method(script::foc::handle_game_object, "Get_Owner",
+            [reader, handle_at](auth::BindingContext&, const auth::ValueList& args) -> Values {
+        const auto* object = args.size() == 1 ? handle_at(args, 0, script::foc::handle_game_object) : nullptr;
+        if (!object) return Values::failure(problem("Get_Owner requires an object"));
+        const auto snapshot = reader ? reader() : nullptr;
+        if (!snapshot) return Values::success({});
+        const auto owner = [](sim::galactic::PlayerId id) {
+            // GA-09: no owner (a null player) answers nothing, as for any unknown object.
+            return id ? Values::success({auth::Value{auth::Handle{script::foc::handle_player, id}}}) : Values::success({});
+        };
+        for (const auto& row : snapshot->planets()) if (row.id == object->id) return owner(row.owner);
+        for (const auto& actor : snapshot->actor_records())
+            if (actor.id == object->id) return actor.dead || actor.delete_pending ? Values::success({}) : owner(actor.owner);
+        return Values::success({});
+    }); !added) return added;
+    // GA-11: whether the planet is destroyed (the control owner's ruin state).
+    if (auto added = scheduler.register_method(script::foc::handle_game_object, "Is_Planet_Destroyed",
+            [reader, handle_at](auth::BindingContext&, const auth::ValueList& args) -> Values {
+        const auto* planet = args.size() == 1 ? handle_at(args, 0, script::foc::handle_game_object) : nullptr;
+        const auto snapshot = reader ? reader() : nullptr;
+        const auto* control = snapshot ? snapshot->control() : nullptr;
+        if (!planet || !control) return Values::failure(problem("Is_Planet_Destroyed requires a planet of the galaxy"));
+        for (const auto& row : control->planets) if (row.planet == planet->id) return Values::success({auth::Value{row.destroyed}});
+        return Values::failure(problem("Is_Planet_Destroyed requires a planet of the galaxy"));
+    }); !added) return added;
+    // GA-10: the faction identifier in upper case (the data compares Get_Faction_Name() against "EMPIRE", "REBEL", ...),
+    // and the faction's Is_Neutral flag.
+    std::map<std::uint64_t, std::pair<std::string, bool>> factions;
+    for (const auto& player : players.players) factions.emplace(player.id, std::pair{upper_text(player.faction), player.neutral});
+    for (const auto neutral : {false, true}) {
+        if (auto added = scheduler.register_method(script::foc::handle_player, neutral ? "Is_Neutral" : "Get_Faction_Name",
+                [factions, neutral, handle_at](auth::BindingContext&, const auth::ValueList& args) -> Values {
+            const auto* player = args.size() == 1 ? handle_at(args, 0, script::foc::handle_player) : nullptr;
+            const auto found = player ? factions.find(player->id) : factions.end();
+            if (found == factions.end()) return Values::failure(problem(std::string(neutral ? "Is_Neutral" : "Get_Faction_Name")
+                + " requires a registered player"));
+            return Values::success({neutral ? auth::Value{found->second.second} : auth::Value::text(found->second.first)});
+        }); !added) return added;
+    }
+    // GA-12: the type's combat power metric.
+    if (auto added = scheduler.register_method(script::foc::handle_type, "Get_Combat_Rating",
+            [ratings = players.type_combat_ratings, handle_at](auth::BindingContext&, const auth::ValueList& args) -> Values {
+        const auto* type = args.size() == 1 ? handle_at(args, 0, script::foc::handle_type) : nullptr;
+        const auto found = type ? ratings.find(type->id) : ratings.end();
+        if (found == ratings.end()) return Values::failure(problem("Get_Combat_Rating requires a type with a combat power metric"));
+        return Values::success({auth::Value::number(found->second)});
+    }); !added) return added;
+    // GA-13: EvaluatePerception(name, player[, object]) as for object scripts (GOL-17), over the completed world. A planet
+    // is itself; another object stands for the planet it is on. An equation or lookup it cannot answer is a script error.
+    return scheduler.register_binding("EvaluatePerception", [reader, handle_at, perception = players.perception,
+            incomes = players.planet_base_income, seed = players.seed](auth::BindingContext&, const auth::ValueList& args) -> Values {
+        const auto* name = args.empty() ? nullptr : std::get_if<std::string>(&args[0].data);
+        const auto* player = handle_at(args, 1, script::foc::handle_player);
+        if (!name || !player) return Values::failure(problem("EvaluatePerception expects a name and a player"));
+        const auto snapshot = reader ? reader() : nullptr;
+        if (!perception || !snapshot) {
+            auto error = problem("EvaluatePerception is not available to story scripts: no perception equations are mounted");
+            error.code = std::string(auth::codes::missing_api);
+            return Values::failure(std::move(error));
+        }
+        std::optional<sim::galactic::PlanetId> target;
+        if (args.size() > 2) {
+            const auto* object = handle_at(args, 2, script::foc::handle_game_object);
+            if (!object) return Values::failure(problem("EvaluatePerception: parameter 3 is not a game object"));
+            const auto planets = snapshot->planets();
+            if (std::any_of(planets.begin(), planets.end(), [&](const auto& row) { return row.id == object->id; })) target = object->id;
+            else for (const auto& actor : snapshot->actor_records())
+                if (actor.id == object->id) { target = actor.planet; break; }
+            if (!target) return Values::failure(problem("EvaluatePerception: parameter 3 is not an object of the galaxy"));
+        }
+        std::string why;
+        std::uint64_t visited = 0;
+        const auto value = perception->evaluate(*name, static_cast<sim::galactic::PlayerId>(player->id), target, *snapshot,
+            seed, why, visited, &incomes);
+        if (!value) {
+            auto error = problem("EvaluatePerception(" + *name + "): " + why);
+            error.code = std::string(auth::codes::unsupported_api);
+            return Values::failure(std::move(error));
+        }
+        return Values::success({auth::Value::number(*value)});
+    });
 }
 
 core::Result<auth::ScriptScheduler> create_galactic_story_scheduler(const GalacticStoryScripts& content, auth::SessionConfig base,
@@ -1108,17 +1241,7 @@ static core::Result<auth::ScriptScheduler> build_story_scheduler(const GalacticS
     if (auto added = scheduler.value().register_binding("Get_Game_Mode", [](auth::BindingContext&, const auth::ValueList&) {
         return core::Result<auth::ValueList>::success({auth::Value::text("Galactic")});
     }); !added) return Result::failure(added.error());
-    // #7102: Player.Is_Human for a registered player (its seat is human-controlled); anything else is a named fault, like Get_Difficulty.
-    std::map<std::uint64_t, bool> humans;
-    for (const auto& player : players.players) humans.emplace(player.id, player.human);
-    if (auto added = scheduler.value().register_method(script::foc::handle_player, "Is_Human",
-        [humans = std::move(humans)](auth::BindingContext&, const auth::ValueList& arguments) {
-            using HumanResult = core::Result<auth::ValueList>;
-            const auto* self = arguments.empty() ? nullptr : std::get_if<auth::Handle>(&arguments.front().data);
-            if (!self || self->kind != script::foc::handle_player || arguments.size() != 1 || !humans.contains(self->id))
-                return HumanResult::failure(problem("Is_Human requires a registered player"));
-            return HumanResult::success({auth::Value{humans.at(self->id)}});
-        }); !added) return Result::failure(added.error());
+    if (auto added = register_player_is_human(scheduler.value(), players); !added) return Result::failure(added.error());
     if (auto added = scheduler.value().register_method(script::foc::handle_player, "Get_Difficulty",
         [difficulties = std::move(difficulties)](auth::BindingContext&, const auth::ValueList& arguments) {
             using DifficultyResult = core::Result<auth::ValueList>;
@@ -1127,6 +1250,7 @@ static core::Result<auth::ScriptScheduler> build_story_scheduler(const GalacticS
                 return DifficultyResult::failure(problem("Get_Difficulty requires a registered player"));
             return DifficultyResult::success({auth::Value::text(difficulties.at(self->id))});
         }); !added) return Result::failure(added.error());
+    if (auto added = register_story_world_reads(scheduler.value(), players, reader); !added) return Result::failure(added.error());
     if (auto added = auth::register_galactic_first_object(scheduler.value(), players.types, players.planets,
         std::move(reader)); !added) return Result::failure(added.error());
     std::set<std::uint64_t> advisor_players;
@@ -1315,7 +1439,7 @@ static core::Result<auth::ScriptScheduler> build_story_scheduler(const GalacticS
     for (const std::string_view sink : {"_OuputDebug", "_ScriptMessage", "_CustomScriptMessage", "_MessagePopup", "DumpCallStack"})
         if (auto added = scheduler.value().register_binding(sink, [](auth::BindingContext&, const auth::ValueList&) {
                 return core::Result<auth::ValueList>::success(auth::ValueList{}); }); !added) return Result::failure(added.error());
-    std::vector<std::string_view> implemented{"GlobalValue.Get", "GlobalValue.Set", "Get_Game_Mode", "Find_First_Object", "Find_Object_Type", "Spawn_Unit", "FindPlanet", "Find_Player", "DiscreteDistribution.Create", "GameRandom", "_OuputDebug", "_ScriptMessage",
+    std::vector<std::string_view> implemented{"GlobalValue.Get", "GlobalValue.Set", "Get_Game_Mode", "Find_First_Object", "Find_Object_Type", "Spawn_Unit", "FindPlanet", "FindPlanet.Get_All_Planets", "EvaluatePerception", "Find_Player", "DiscreteDistribution.Create", "GameRandom", "_OuputDebug", "_ScriptMessage",
         "_CustomScriptMessage", "_MessagePopup", "DumpCallStack", "Get_Story_Plot", "Story_Event", "Check_Story_Flag", "Letter_Box_In", "Letter_Box_Out"};
     // `Object`, `Target`, `Budget`, `FreeStore` and `PlayerObject` are variables of the scripts (Common_Base_Definitions
     // clears them), and the inventory's "Object.x" names are methods of the wrappers they hold; bound as global tables they

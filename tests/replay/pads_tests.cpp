@@ -422,6 +422,74 @@ void test_capture() {
             [](const auto& event) { return event.kind == t::EventKind::pad_captured; }),
         "U-BP-1 live-pad policy: lethal damage prevents same-frame capture");
 }
+// WBR-02: the capture-time player ledger scales the transition of the player the point moves toward.
+// A bonus row on type 11 binds to a standing player-1 body far from the point (unit 5); `remove_at` retires it
+// when that many frames have completed (0 keeps it), so the ledger loses its contribution mid-capture.
+std::uint64_t capture_tick(const std::vector<t::CommandBonusProfile>& bonuses, const unsigned workers,
+    const bool remote_source = false, const std::uint64_t remove_at = 0) {
+    auto content = rules();
+    content.command_bonuses = bonuses;
+    auto start = setup();
+    if (remote_source) start.units.push_back({5, 11, 1, at(5000), m::identity_quat(), {}});
+    auto value = session(start, content);
+    const eawr::platform::ThreadWorkerAdapter executor(workers);
+    while (value.completed_tick() < 400) {
+        if (remote_source && remove_at != 0 && value.completed_tick() == remove_at)
+            expect(static_cast<bool>(value.stage_remove(5)), "WBR-02 the capture-time source stages for removal");
+        const auto result = value.step(executor);
+        expect(static_cast<bool>(result), "WBR-02 capture-time step succeeds");
+        if (!result) return 0;
+        for (const auto& event : result.value().snapshot->events())
+            if (event.kind == t::EventKind::pad_captured) return value.completed_tick();
+    }
+    return 0;
+}
+void test_capture_time_ledger() {
+    auto content = rules();
+    const auto& profile = content.pads.capture.front();
+    const auto start = setup();
+    const std::vector<t::CaptureCandidate> candidates{{{1, 1, at(100)}, 10}};
+    const auto progress_after = [&](const std::vector<std::pair<t::PlayerId, Fixed>>& adjustments) {
+        t::PadState state{4};
+        const auto owner = t::service_capture(profile, state, 4, 4, start.players, candidates, content.pads, 3, at(0), adjustments);
+        expect(owner == 4 && state.target == 1, "WBR-02 the point moves toward the claimant");
+        return state.progress.raw();
+    };
+    const auto plain = progress_after({});
+    const auto near = [](const std::int64_t a, const std::int64_t b) { return a - b <= 2 && b - a <= 2; }; // fixed-point step rounding
+    expect(near(progress_after({{1, Fixed::from_raw(one)}}), plain / 2), "WBR-02 +1.0 doubles the duration of the claimant's capture");
+    expect(near(progress_after({{1, Fixed::from_raw(-one / 2)}}), plain * 2), "WBR-02 a negative total shortens it");
+    expect(progress_after({{2, Fixed::from_raw(one)}, {3, Fixed::from_raw(one)}}) == plain,
+        "WBR-02 another player's ledger does not affect the claimant");
+    expect(progress_after({{1, Fixed::from_raw(-one)}}) == plain, "WBR-02 a modifier that is not positive falls back to one");
+    // A live source: type 10 doubles its owner's capture times; the same row locked to the enemy changes nothing here.
+    const auto source = [&](const std::vector<t::PlayerId>& owners, const Fixed delta) {
+        t::CommandBonusProfile row;
+        row.type = 10; row.bonus.applicable = {10}; row.battlefield = true; row.apply_to_self = true;
+        row.capture_delta = delta; row.enabled_players = owners;
+        return row;
+    };
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        expect(capture_tick({}, workers) == 32, "WBR-02 baseline capture completes at the eighth service");
+        expect(capture_tick({source({1, 2}, Fixed::from_raw(one))}, workers) == 60,
+            "WBR-02 an owner source doubles the transition: fifteen services");
+        expect(capture_tick({source({2}, Fixed::from_raw(one))}, workers) == 32,
+            "WBR-02 a source of the other player leaves the claimant's capture unchanged");
+        expect(capture_tick({source({1}, Fixed::from_raw(-3 * one / 2))}, workers) <= 8,
+            "WBR-02 the ledger floors a very negative total at -0.99");
+        // Removal: the doubled duration holds while the source stands and ends with it.
+        auto remote = source({1}, Fixed::from_raw(one));
+        remote.type = 11; remote.bonus.applicable = {11};
+        const auto standing = capture_tick({remote}, workers, true, 0);
+        const auto removed_early = capture_tick({remote}, workers, true, 1);
+        const auto removed_midway = capture_tick({remote}, workers, true, 12);
+        expect(standing == 60, "WBR-02 a remote owner source doubles the transition while it stands");
+        expect(removed_early == 32, "WBR-02 removing the source before the capture starts restores the plain duration");
+        expect(removed_midway > 32 && removed_midway < 60,
+            "WBR-02 removing the source mid-capture ends its effect from that frame on");
+    }
+}
+
 void test_captured_pad_reveals_for_build() {
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         const eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -1500,6 +1568,45 @@ void test_occupied_respawn() {
         expect(value.state_sha256() == baseline, "occupied respawn state is worker-count independent");
     }
 }
+void test_script_despawn_pad_child() {
+    // #7886: a script despawn of a pad's under-construction or finished child detaches it: the station keeps its owner and
+    // hull whatever its destroy-when-child-dies setting says, nothing is destroyed, no replacement is scheduled and no
+    // credits are refunded or scored.
+    eawr::sim::InlineExecutor executor;
+    for (const bool destroys : {true, false}) {
+        for (const bool completed : {false, true}) {
+            auto content = rules();
+            content.pads.capture.front().destroy_when_child_dies = destroys;
+            content.pads.respawn = {{20, 38U * 30}};
+            auto start = setup(); start.units.back().owner = 1;
+            start.units.back().rotation = {Fixed{}, Fixed{}, q(1), Fixed{}};
+            auto value = session(start, content);
+            expect(value.submit({{0, 1, 0}, {3}, t::PadBuildPayload{30}}).has_value(), "#7886: pad child fixture builds");
+            steps(value, completed ? 31 : 1, executor);
+            const auto child = completed ? value.pads().at(3).constructed : value.pads().at(3).under_construction;
+            expect(child != 0, "#7886: the pad has a child to remove");
+            const auto credits = value.ledgers()[0].credits;
+            expect(value.submit({{value.completed_tick(), 1, 1}, {child}, t::ScriptDespawnPayload{}}).has_value(),
+                "#7886: the child despawn submits");
+            bool destroyed = false;
+            for (unsigned frame = 0; frame < 3; ++frame) {
+                const auto step = value.step(executor);
+                expect(step.has_value(), "#7886: the despawn step succeeds");
+                if (!step) break;
+                for (const auto& event : step.value().snapshot->events())
+                    destroyed = destroyed || event.kind == t::EventKind::unit_destroyed || event.kind == t::EventKind::pad_captured;
+            }
+            expect(!value.durability_state(child), "#7886: the child is gone");
+            expect(value.durability_state(3) && value.units().back().owner == 1,
+                "#7886: the station survives and keeps its owner after its child is despawned");
+            expect(!destroyed, "#7886: removing the child destroys or captures nothing");
+            expect(value.pads().count(3) == 1 && value.pads().at(3).constructed == 0 && value.pads().at(3).under_construction == 0,
+                "#7886: the pad is detached from the removed child");
+            expect(value.ledgers()[0].credits == credits, "#7886: the removal refunds nothing");
+        }
+    }
+}
+
 void test_respawn() {
     eawr::sim::InlineExecutor executor;
     for (const auto seconds : {38U, 45U, 80U}) {
@@ -1710,6 +1817,7 @@ int main() {
     test_transfer_boundary();
     test_transfer_state();
     test_capture();
+    test_capture_time_ledger();
     test_ship_class_capture();
     test_capture_allocations();
     test_legacy_queue();
@@ -1727,6 +1835,7 @@ int main() {
     test_ai_sale_credits();
     test_sale_victory();
     test_respawn();
+    test_script_despawn_pad_child();
     test_occupied_respawn();
     test_bulk_child_death_work();
     test_respawn_rollback();

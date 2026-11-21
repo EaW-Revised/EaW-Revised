@@ -88,6 +88,9 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         };
         for (const auto& hardpoint : unit.hardpoints) {
             type.hardpoint_projectiles.push_back(hardpoint.weapon ? projectile_id(*hardpoint.weapon) : sim::tactical::TypeId{});
+            type.hardpoint_ids.push_back(upper(hardpoint.id));
+            type.hardpoint_meshes.push_back(upper(hardpoint.collision_mesh));
+            type.hardpoint_destroyable.push_back(hardpoint.destroyable);
         }
         if (unit.weapon) type.object_projectile = projectile_id(*unit.weapon);
         type.point_defence_script = upper(unit.lua_script) == "OBJECTSCRIPT_POINTDEFENSE";
@@ -104,6 +107,7 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         type.community_property = unit.ai_community_property;
         if (!unit.constructed_type.empty()) type.constructed_type = type_id(unit.constructed_type);
         type.capture_point = unit.capture_point;
+        type.spawns_squadrons = unit.spawner.has_value();
         type.build_pad = unit.build_pad;
         type.tactical_cost = unit.production.build_cost_multiplayer.value_or(sim::math::Fixed{});
         // #449 goal system and perception inputs.

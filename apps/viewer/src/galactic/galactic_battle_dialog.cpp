@@ -143,9 +143,12 @@ void GalacticMode::State::service_battle_dialog(double delta) {
     if (battle_dialog->visible()) {
         cancel_fleet_drag();
         // WGUI-171: the pending HUD shell leaves keyboard camera input live.
+        // #7798: and the middle-mouse / right-button drag, which this per-frame clear used to end.
         // Progress and summary retain their modal input barrier.
-        if (battle_dialog->view().phase != galactic_view::BattleDialogPhase::choice) held.clear();
-        orbiting = false; scrolling = false;
+        if (battle_dialog->view().phase != galactic_view::BattleDialogPhase::choice) {
+            held.clear();
+            orbiting = false; scrolling = false;
+        }
     }
 }
 void GalacticMode::State::service_battle_advisor() {

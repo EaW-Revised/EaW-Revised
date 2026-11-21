@@ -282,6 +282,12 @@ struct WeaponProfileBuilder final {
         entry.pulse_count = std::max<std::uint32_t>(1, weapon.pulse_count.value_or(1));
         entry.pulse_delay_frames = delay.value();
         if (weapon.full_salvo_delay_multiplier) entry.full_salvo_delay = *weapon.full_salvo_delay_multiplier;
+        if (weapon.defend_delay_multiplier) entry.defend_delay = *weapon.defend_delay_multiplier;
+        if (weapon.turbo_delay_multiplier) entry.turbo_delay = *weapon.turbo_delay_multiplier;
+        if (weapon.power_to_weapons_delay_multiplier) entry.power_to_weapons_delay = *weapon.power_to_weapons_delay_multiplier;
+        entry.fire_in_defend_mode = weapon.fire_in_defend_mode;
+        entry.fire_in_turbo_mode = weapon.fire_in_turbo_mode;
+        entry.fire_in_power_to_weapons_mode = weapon.fire_in_power_to_weapons_mode;
         entry.category_restrictions = restrictions;
         entry.opportunity_when_idle = weapon.opportunity_fire_when_idle;
         entry.opportunity_when_targeting = weapon.opportunity_fire_when_targeting;
@@ -570,6 +576,63 @@ std::optional<core::Diagnostic> append_object_combat_weapon(const UnitType& unit
         }
         profile.weapons.push_back(entry.value());
     }
+    return std::nullopt;
+}
+
+// WDP-01: the weapon bone places of a type's DEPLOY/UNDEPLOY clips in the unit's frame, one pose per weapon of the
+// profile; a bone the clips do not name keeps the weapon's bind point.
+std::optional<core::Diagnostic> append_deploy_pose_table(const UnitType& unit, tactical::CombatProfile& profile,
+    const PointPlacement& place) {
+    if (!unit.deploy_poses) return std::nullopt;
+    const auto& data = *unit.deploy_poses;
+    const auto slot_of = [&](const BonePoint& bone) -> std::optional<std::size_t> {
+        if (!bone.position || bone.from_attached_model || !bone.owner_bone_index) return std::nullopt;
+        const auto found = std::lower_bound(data.bones.begin(), data.bones.end(), *bone.owner_bone_index);
+        if (found == data.bones.end() || *found != *bone.owner_bone_index) return std::nullopt;
+        return static_cast<std::size_t>(found - data.bones.begin());
+    };
+    tactical::DeployPoseTable table;
+    const std::array<std::pair<const DeployPoseData::Clip*, tactical::DeployPoseClip*>, 2> clips{{{&data.deploy, &table.deploy}, {&data.undeploy, &table.undeploy}}};
+    for (const auto& [from, to] : clips) {
+        to->frames = from->frames;
+        to->frames_per_tick = from->frames_per_tick;
+        for (const auto& segment : from->segments) {
+            tactical::DeployPoseSegment posed;
+            posed.from_frame = segment.from_frame;
+            for (const auto& weapon : profile.weapons) {
+                tactical::WeaponBonePose pose{weapon.fire_a, weapon.fire_b, weapon.muzzles};
+                const auto put = [&](const BonePoint& bone, Vec3& target) -> std::optional<core::Diagnostic> {
+                    const auto slot = slot_of(bone);
+                    if (!slot) return std::nullopt;
+                    auto placed = place(segment.points[*slot]);
+                    if (!placed) return placed.error();
+                    target = placed.value();
+                    return std::nullopt;
+                };
+                if (weapon.hardpoint == tactical::object_weapon) {
+                    std::size_t muzzle = 0;
+                    for (const auto& bone : unit.muzzle_bones) {
+                        if (!bone.position) continue;
+                        if (muzzle < pose.muzzles.size()) {
+                            if (auto error = put(bone, pose.muzzles[muzzle])) return error;
+                        }
+                        ++muzzle;
+                    }
+                } else if (weapon.hardpoint < unit.hardpoints.size()) {
+                    const auto& hardpoint = unit.hardpoints[weapon.hardpoint];
+                    if (auto error = put(hardpoint.fire_a.position ? hardpoint.fire_a : hardpoint.attachment, pose.fire_a)) return error;
+                    if (weapon.has_fire_b) {
+                        if (auto error = put(hardpoint.fire_b, pose.fire_b)) return error;
+                    } else {
+                        pose.fire_b = pose.fire_a;
+                    }
+                }
+                posed.weapons.push_back(std::move(pose));
+            }
+            to->segments.push_back(std::move(posed));
+        }
+    }
+    profile.deploy_poses = std::move(table);
     return std::nullopt;
 }
 
@@ -967,6 +1030,7 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const
             return phase_error;
         if (auto phase_error = append_object_combat_weapon(unit, profile, place, weapon_profile, shot_profile, barrage_projectile))
             return phase_error;
+        if (auto phase_error = append_deploy_pose_table(unit, profile, place)) return phase_error;
         if (const auto lucky = lucky_override.find(unit_index); lucky != lucky_override.end()
             && !unit.abilities.empty() && same_name(unit.abilities.front().type, "LUCKY_SHOT")) {
             for (auto& weapon : profile.weapons) {

@@ -237,8 +237,17 @@ core::Result<void> parse_extension_campaign(
     std::uint32_t version{}, count_players{}, count_reserves{}, count_upgrades{};
     std::int64_t price_multiplier{};
     std::uint32_t corrupted{};
-    if (!body.read_u32(version) || (version != 7 && version != 8)
-        || !body.read_u32(corrupted) || corrupted > 1
+    if (!body.read_u32(version))
+        return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign setup header", logical_path);
+    // Versions 5 and 6 were written before the corrupted-planet flag existed. This build does not read them (no
+    // pre-1.0 save compatibility); its own code lets a loader say exactly this and nothing else.
+    if (version == 5 || version == 6)
+        return fail<Parsed>(diagnostic_codes::older_campaign_setup,
+            "campaign setup version " + std::to_string(version) + " was written by an older build (this build reads 7 and 8)",
+            logical_path);
+    if (version != 7 && version != 8)
+        return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign setup header", logical_path);
+    if (!body.read_u32(corrupted) || corrupted > 1
         || !body.read_i64(price_multiplier) || !body.read_u32(count_players)
         || count_players == 0 || count_players > max_players)
         return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign setup header", logical_path);

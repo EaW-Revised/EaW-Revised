@@ -105,6 +105,19 @@ void encode(Encoder& out, const Weapon& weapon) {
         out.text("FULL-SALVO-DELAY-v1");
         out.fixed(*weapon.full_salvo_delay_multiplier);
     }
+    // #7940: written only when authored, so a hardpoint without them keeps its identity.
+    if (weapon.defend_delay_multiplier || weapon.turbo_delay_multiplier || weapon.power_to_weapons_delay_multiplier
+        || !weapon.fire_in_defend_mode || !weapon.fire_in_turbo_mode || !weapon.fire_in_power_to_weapons_mode) {
+        out.text("ABILITY-MODE-WEAPON-v1");
+        for (const auto* value : {&weapon.defend_delay_multiplier, &weapon.turbo_delay_multiplier,
+                &weapon.power_to_weapons_delay_multiplier}) {
+            out.flag(value->has_value());
+            if (*value) out.fixed(**value);
+        }
+        out.flag(weapon.fire_in_defend_mode);
+        out.flag(weapon.fire_in_turbo_mode);
+        out.flag(weapon.fire_in_power_to_weapons_mode);
+    }
     if (!weapon.charged_projectile.empty()) {
         out.text("CHARGED-PROJECTILE-v1");
         out.text(weapon.charged_projectile);
@@ -323,6 +336,19 @@ void encode(Encoder& out, const UnitType& unit) {
     if (!unit.muzzle_bones.empty()) {
         out.text("muzzle-bones-v1");
         out.each(unit.muzzle_bones, [&](const BonePoint& point) { encode(out, point); });
+    }
+    if (unit.deploy_poses) {
+        // WDP-01: derived from the DEPLOY/UNDEPLOY clips, so a different clip is a different content identity.
+        out.text("deploy-poses-v1");
+        out.each(unit.deploy_poses->bones, [&](const std::uint32_t bone) { out.u32(bone); });
+        for (const auto* clip : {&unit.deploy_poses->deploy, &unit.deploy_poses->undeploy}) {
+            out.u32(clip->frames);
+            out.fixed(clip->frames_per_tick);
+            out.each(clip->segments, [&](const DeployPoseData::Segment& segment) {
+                out.u32(segment.from_frame);
+                out.each(segment.points, [&](const Vec3& point) { out.vec3(point); });
+            });
+        }
     }
     out.each(unit.abilities, [&](const Ability& ability) {
         out.text(ability.type);
@@ -1077,6 +1103,22 @@ void encode_production_campaign_extensions(Encoder& out, const UnitTables& table
             out.each(unit.production.battlefield_bonuses, [&](const BattlefieldBonus& bonus) {
                 out.text(bonus.name); out.u32(bonus.category); out.fixed(bonus.reveal_delta);
                 out.flag(bonus.all_allies); out.flag(bonus.enabled);
+            });
+        });
+    }
+    if (!tables.campaign_scene && std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return std::any_of(unit.production.battlefield_bonuses.begin(), unit.production.battlefield_bonuses.end(),
+                [](const BattlefieldBonus& bonus) {
+                    return bonus.stealth_delta != Fixed{} || bonus.capture_delta != Fixed{} || bonus.special_weapons || bonus.reverse;
+                });
+        })) {
+        // WBR-02..04: the other source-owned player ledgers bind as an extension of the reveal rows above.
+        out.text("space-player-effects-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.each(unit.production.battlefield_bonuses, [&](const BattlefieldBonus& bonus) {
+                out.text(bonus.name); out.fixed(bonus.stealth_delta); out.fixed(bonus.capture_delta);
+                out.flag(bonus.special_weapons); out.flag(bonus.reverse);
             });
         });
     }

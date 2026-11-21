@@ -38,6 +38,8 @@ namespace eawr::campaign { class CampaignRoot; }
 namespace eawr::vfs { class Vfs; }
 
 // ADR-019: presentation consumes values and immutable snapshots, never the owning session.
+namespace eawr::checkpoint { struct RecoveredCheckpoint; }
+
 namespace eawr::platform {
 
 struct CampaignServiceConfiguration;
@@ -154,7 +156,10 @@ public:
         bool install_native_ai = true,
         std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1}, bool observe_native_ai = false,
         std::span<const std::uint8_t> exact_checkpoint = {},
-        std::array<std::uint8_t, 32> checkpoint_mod_list = {}, CampaignPrepareObserver* observer = nullptr);
+        std::array<std::uint8_t, 32> checkpoint_mod_list = {}, CampaignPrepareObserver* observer = nullptr,
+        // With an exact checkpoint: convert it first (checkpoint::recover_checkpoint_history), store the converted file
+        // here and restore from the converted bytes, as every peer will.
+        checkpoint::RecoveredCheckpoint* recovered = nullptr);
     [[nodiscard]] std::shared_ptr<const CampaignServiceConfiguration> services() const noexcept;
     ~PreparedLiveCampaign();
     [[nodiscard]] const campaign::CampaignSetupPlan& plan() const noexcept;
@@ -235,6 +240,14 @@ struct LiveBattleChoiceResponse {
     std::string refusal;
 };
 
+// A seat that watches the active battle read-only: its whole side took the spectate role, so it has no battle player of its
+// own and sees the battle through `observer`, the agreed filtered perspective. Presentation data only: the battle's seat
+// bindings, controllers and hashes are unchanged.
+struct LiveBattleSpectator {
+    sim::galactic::SeatId seat{};
+    sim::tactical::PlayerId observer{};
+};
+
 struct LiveGameFrame {
     std::shared_ptr<const sim::galactic::GalacticSnapshot> previous;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> latest;
@@ -266,6 +279,8 @@ struct LiveGameFrame {
     // LOAD_CAMPAIGN (WST-95): the switch a plot asked for, as authored, from the tick that recorded it until the host settles
     // it. The host resolves it and starts the named campaign, or refuses it and calls settle_campaign_switch().
     std::shared_ptr<const campaign::CampaignSwitchRequest> campaign_switch{};
+    // Last member: some publication sites build a frame by position. Seats watching `conflict` read-only.
+    std::vector<LiveBattleSpectator> battle_spectators{};
 };
 [[nodiscard]] std::optional<CampaignTacticalView> campaign_tactical_view_for_observer(
     const LiveGameFrame&, sim::galactic::SeatId);

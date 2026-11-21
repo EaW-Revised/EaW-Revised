@@ -28,7 +28,7 @@ template <> struct Fields<::eawr::sim::SeatId> {
 
 template <> struct Fields<::eawr::sim::galactic::AbilityActorState> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.actor, v.type, v.enabled, v.cancelled, v.theft_enabled, v.theft_cancelled, v.corruption_enabled, v.corruption_cancelled, v.hack_enabled, v.hack_cancelled, v.destruction_enabled, v.destruction_cancelled, v.sabotage_enabled, v.sabotage_cancelled, v.neutralize_enabled, v.neutralize_cancelled, v.spy_enabled, v.spy_cancelled, v.spy_targets, v.contested_check_disabled, v.removal_enabled, v.removal_cancelled);
+        a(v.actor, v.type, v.enabled, v.cancelled, v.theft_enabled, v.theft_cancelled, v.corruption_enabled, v.corruption_cancelled, v.hack_enabled, v.hack_cancelled, v.destruction_enabled, v.destruction_cancelled, v.sabotage_enabled, v.sabotage_cancelled, v.neutralize_enabled, v.neutralize_cancelled, v.spy_enabled, v.spy_cancelled, v.spy_targets, v.contested_check_disabled, v.removal_enabled, v.removal_cancelled, v.siphon_enabled, v.siphon_cancelled);
     }
 };
 
@@ -382,7 +382,7 @@ template <> struct Fields<::eawr::sim::galactic::LiveCorruptionMission> {
 
 template <> struct Fields<::eawr::sim::galactic::LiveCorruptionTransition> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.planet, v.transition);
+        a(v.planet, v.transition, v.restricted, v.hologram_enabled);
     }
 };
 

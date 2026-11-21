@@ -1,5 +1,6 @@
 #include "galactic_build_tray.hpp"
 #include "galactic_mode_internal.hpp"
+#include "command_bar_scale.hpp"
 #include "../settings_store.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/presentation/ui/build_tray_geometry.hpp"
@@ -221,10 +222,11 @@ void GalacticBuildTray::style_handle(GalacticMode::State& state, const data::ui:
         handle_->set_texture_pressed(texture(definition.pressed));
         handle_->set_texture_disabled(texture(definition.disabled));
     }
-    // GBT-02: the caption is the text before the omitted count; a caption key the text database lacks reads as "+".
+    // GBT-02: the caption is the text before the omitted count (the caption alone when the bar omits nothing); a caption
+    // key the text database lacks reads as "+".
     std::string caption = state.battle_text ? state.battle_text(definition.caption) : std::string{};
     if (caption.empty() || caption == definition.caption) caption = "+";
-    set_text_if_changed(*handle_text_, String::utf8((caption + std::to_string(omitted_)).c_str()));
+    set_text_if_changed(*handle_text_, String::utf8(tray::handle_label(caption, omitted_).c_str()));
     state.configure_command_bar_text(placement, *handle_text_, component, anchor);
     handle_text_->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
     handle_text_->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
@@ -281,12 +283,21 @@ void GalacticBuildTray::style_entry(GalacticMode::State& state, Entry& entry,
     const auto disabled_pad = viewer::galactic::build_card_pad(dark, state.selected_hud.space_tab);
     entry.button->set_texture_normal(pad.empty() ? Ref<Texture2D>() : state.command_texture(pad));
     entry.button->set_texture_disabled(disabled_pad.empty() ? Ref<Texture2D>() : state.command_texture(disabled_pad));
-    entry.button->set_icon_texture(state.command_texture(choice.icon));
+    const auto icon = state.command_texture(choice.icon);
+    entry.button->set_icon_texture(icon);
     entry.button->set_disabled(!choice.enabled);
     entry.button->set_tooltip_text(String{}); // the shared timed encyclopedia owns object hover
     // GBT-06: the entry is the bar's card at the bar's size, scaled whole by Entry_Scale: icon, price, badges and the
     // hit area shrink together, so the price never crowds a smaller icon.
     const Vector2 card = rect.size / std::max(entry_scale, 1e-3F);
+    // GHUD-S74 (#7956): inside the card the icon is drawn as on the bar, at its own size times the template's Scale,
+    // centred, aspect kept; Entry_Scale then shrinks the whole card.
+    if (icon.is_valid()) {
+        const auto box = viewer::galactic::command_layer_rect(card.x, card.y, static_cast<float>(icon->get_width()),
+            static_cast<float>(icon->get_height()),
+            viewer::galactic::command_bar_component_scale(*component, static_cast<float>(placement.scale)));
+        entry.button->set_cell_portrait_box(Rect2(box.x, box.y, box.width, box.height));
+    }
     entry.button->set_position(rect.position);
     entry.button->set_size(card);
     entry.button->set_scale(Vector2(entry_scale, entry_scale));
@@ -307,24 +318,28 @@ void GalacticBuildTray::style_entry(GalacticMode::State& state, Entry& entry,
     entry.price->set_offset(SIDE_RIGHT, offset.x * unit);
 }
 
-float GalacticBuildTray::panel_width(GalacticMode::State& state, const Rect2& bar, const std::vector<tray::Group>& groups,
-    const tray::Metrics& full, const tray::PackOptions& options, const float free_height) const {
+float GalacticBuildTray::panel_width(GalacticMode::State& state, const Rect2& bar) const {
     const auto& layout = *layout_;
     const float ui = static_cast<float>(state.command_bar->placement().scale);
+    // GBT-06: never wider than Max_Width_Share of the view, never past the view's right edge, and never into the planet
+    // info card (#7952), in every width mode.
+    const float view = state.hud->get_size().x;
+    const float widest = tray::widest_panel(view, bar.position.x, static_cast<float>(layout.max_width_share),
+        state.planet_info_card_left());
     switch (layout.width_mode) {
-    case tray::WidthMode::fixed: return static_cast<float>(layout.width) * ui;
-    case tray::WidthMode::bar: return bar.size.x;
+    case tray::WidthMode::fixed: return std::min(static_cast<float>(layout.width) * ui, widest);
+    case tray::WidthMode::bar: return std::min(bar.size.x, widest);
     case tray::WidthMode::automatic: break;
     }
-    // GBT-06: from the bar box's width up to Max_Width_Share of the view, and never past the view's right edge; the rows
-    // fill to the budget and the free height first, and the panel widens only when they cannot hold every group.
-    const float view = state.hud->get_size().x;
-    const float widest = std::min(view * static_cast<float>(layout.max_width_share), view - bar.position.x);
-    return tray::automatic_width(groups, full, options, bar.size.x, widest, free_height);
+    // Auto (owner decision of 2026-11-19, #7952): the whole span from the tray's left edge to the planet info card, at most
+    // Max_Width_Share of the view; never the bar's width, which follows how many slots the bar shows. The rows and groups
+    // fold inside it (GBT-06).
+    return widest;
 }
 
 void GalacticBuildTray::draw_backdrop(GalacticMode::State& state, const Rect2& bar) {
     clear_backdrop();
+    back_sample_ = Vector2();
     const auto& layout = *layout_;
     const auto shell = state.command_bar->placement();
     if (layout.back_source == tray::BackSource::bar && shell.scale > 0.0) {
@@ -334,9 +349,12 @@ void GalacticBuildTray::draw_backdrop(GalacticMode::State& state, const Rect2& b
         };
         const auto& meshes = state.command_bar->meshes();
         const auto alternate = state.command_bar->alternate();
-        // One canvas item per shell mesh that holds the centre of `source` (screen pixels): that mesh's art, with the
-        // texture coordinates it gives `source`'s corners, drawn over each of `targets` (panel pixels). The bar's own
-        // shell data decides the art and the colour, so a mod that recolours its bar recolours the tray with it.
+        // One canvas item per shell mesh that holds the centre of `source` (screen pixels): that mesh's art drawn over each
+        // of `targets` (panel pixels). The bar's own shell data decides the art and the colour, so a mod that recolours its
+        // bar recolours the tray with it. The texture map is the one triangle's under the centre, which holds only over
+        // that triangle: the sample is cut to the triangle's box in x and y, repeated across the target and stretched
+        // vertically, so no art from elsewhere on the texture sheet shows (#7952).
+        Vector2 sample; // the last sampled span (screen x from, to), for the report
         const auto layers = [&](const Rect2& source, std::initializer_list<Rect2> targets) {
             std::size_t count{};
             const auto [cx, cy] = to_shell(source.get_center());
@@ -349,20 +367,32 @@ void GalacticBuildTray::draw_backdrop(GalacticMode::State& state, const Rect2& b
                     const auto [u, v] = map->at(sx, sy);
                     return Vector2(static_cast<float>(u), static_cast<float>(v));
                 };
-                const Vector2 end = source.get_end();
-                const std::array corners{uv(source.position.x, source.position.y), uv(end.x, source.position.y),
-                    uv(end.x, end.y), uv(source.position.x, end.y)};
+                const float left = std::max(source.position.x, static_cast<float>(shell.left + map->x_min * shell.scale));
+                const float right = std::min(source.get_end().x, static_cast<float>(shell.left + map->x_max * shell.scale));
+                // Shell y grows upward: the triangle's top is its y_max.
+                const float top = std::max(source.position.y, static_cast<float>(shell.bottom - map->y_max * shell.scale));
+                const float bottom = std::min(source.get_end().y, static_cast<float>(shell.bottom - map->y_min * shell.scale));
+                if (!(right > left) || !(bottom > top)) continue;
+                sample = Vector2(left, right);
                 PackedVector2Array points, uvs;
                 PackedColorArray colours;
                 PackedInt32Array indices;
                 for (const Rect2& target : targets) {
                     if (target.size.x <= 0.0F || target.size.y <= 0.0F) continue;
-                    const auto first = static_cast<int32_t>(points.size());
-                    const Vector2 corner = target.get_end(); // not `far`: a Windows SDK macro
-                    for (const Vector2 point : {target.position, Vector2(corner.x, target.position.y), corner, Vector2(target.position.x, corner.y)})
-                        points.push_back(point);
-                    for (const Vector2& corner : corners) { uvs.push_back(corner); colours.push_back(Color(1, 1, 1, 1)); }
-                    for (const int32_t index : {0, 1, 2, 0, 2, 3}) indices.push_back(first + index);
+                    const float target_bottom = target.get_end().y;
+                    for (const auto& piece : tray::band_pieces(target.position.x, target.size.x, right - left)) {
+                        const auto first = static_cast<int32_t>(points.size());
+                        const float piece_right = piece.x + piece.width;
+                        for (const Vector2 point : {Vector2(piece.x, target.position.y), Vector2(piece_right, target.position.y),
+                                 Vector2(piece_right, target_bottom), Vector2(piece.x, target_bottom)})
+                            points.push_back(point);
+                        const float sample_right = left + piece.width;
+                        for (const Vector2 corner : {uv(left, top), uv(sample_right, top), uv(sample_right, bottom), uv(left, bottom)}) {
+                            uvs.push_back(corner);
+                            colours.push_back(Color(1, 1, 1, 1));
+                        }
+                        for (const int32_t index : {0, 1, 2, 0, 2, 3}) indices.push_back(first + index);
+                    }
                 }
                 if (points.is_empty()) continue;
                 const RID item = rendering->canvas_item_create();
@@ -387,6 +417,7 @@ void GalacticBuildTray::draw_backdrop(GalacticMode::State& state, const Rect2& b
         const Vector2 size = panel_rect_.size;
         // The back: the bar's art behind its slots, over the whole panel.
         back_layers_ = layers(bar, {Rect2(Vector2(), size)});
+        back_sample_ = sample;
         // The frame: the bar's art in the band just above its slots (its top edge), around the panel.
         const float frame = std::min({static_cast<float>(layout.frame_width * shell.scale), size.x * 0.5F, size.y * 0.5F});
         if (back_layers_ != 0 && frame > 0.0F) {
@@ -568,7 +599,7 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
         top = static_cast<float>(*layout.galaxy_top_y) * ui;
     }
     const float free_height = std::max(0.0F, bottom - top);
-    full.panel_width = compact.panel_width = panel_width(state, bar, groups, full, options, free_height);
+    full.panel_width = compact.panel_width = panel_width(state, bar);
     const auto fit = tray::fit_to_height(groups, full, compact, options, free_height);
     compact_ = fit.compact;
     const auto& metrics = fit.compact ? compact : full;
@@ -744,8 +775,8 @@ void GalacticBuildTray::update(GalacticMode::State& state) {
         handle_choices_ = choices;
         const auto slots = viewer::galactic::production_choice_slots(choices, state.choice_buttons.size());
         omitted_ = tray::omitted_by_bar(choices.size(), slots);
-        // GBT-01, GBT-02: when everything fits there is no handle, no tray and the bar is exactly the original's.
-        if (omitted_ == 0) return;
+        // GBT-02 (owner, 2026-11-19): the handle is there for every planet with build choices, whether or not the bar
+        // omits some; the tray (and Tab) then shows the grouped list of all of them. The handle counts the omitted ones.
         ensure_controls(state);
         // The box around the bar's slots, hidden or not (the width of the bar).
         for (const auto& name : state.choice_buttons) {
@@ -760,7 +791,7 @@ void GalacticBuildTray::update(GalacticMode::State& state) {
         style_handle(state, *component, *anchor);
         place_handle(state, *bar_);
     }
-    if (omitted_ == 0 || !bar_) return;
+    if (!bar_) return;
     if (!handle_docked_ || !open_) {
         if (shown_key_) {
             panel_->hide();
@@ -777,8 +808,14 @@ void GalacticBuildTray::update(GalacticMode::State& state) {
 
 std::string GalacticBuildTray::report_json() const {
     std::ostringstream out;
+    const auto escaped = [](const std::string& text) {
+        std::string result;
+        for (const char c : text) { if (c == '"' || c == '\\') result += '\\'; result += c; }
+        return result;
+    };
     out << "{\"enabled\":" << (layout_ && enabled() ? "true" : "false")
         << ",\"handle\":" << (handle_visible() ? "true" : "false")
+        << ",\"handle_text\":\"" << escaped(handle_visible() && handle_text_ ? std::string(handle_text_->get_text().utf8().get_data()) : std::string{}) << '"'
         << ",\"open\":" << (open_ ? "true" : "false")
         << ",\"omitted\":" << omitted_
         << ",\"groups\":" << groups_shown_
@@ -804,7 +841,8 @@ std::string GalacticBuildTray::report_json() const {
     out << ",\"width_mode\":\"" << width_mode << "\",\"entry_scale\":"
         << (!layout_ ? 0.0 : compact_ ? layout_->compact_entry_scale : layout_->entry_scale)
         << ",\"backdrop\":{\"source\":\"" << (panel_shown ? backdrop_source_ : std::string{}) << "\",\"back_layers\":" << back_layers_
-        << ",\"frame_layers\":" << frame_layers_ << '}'
+        << ",\"frame_layers\":" << frame_layers_ << ",\"back_sample\":[" << back_sample_.x << ',' << back_sample_.y << "]}"
+        << ",\"planet_info_left\":" << (state_ ? state_->planet_info_card_left().value_or(-1.0F) : -1.0F)
         << ",\"close\":{\"art\":\"" << (close_art_.empty() ? std::string("bar_button") : close_art_) << "\",\"visible\":" << (close_ && close_->is_visible_in_tree() ? "true" : "false")
         << ",\"presses\":" << close_presses_ << ",\"tooltip\":\"";
     const std::string tip = close_ ? std::string(close_->get_tooltip_text().utf8().get_data()) : std::string{};
@@ -824,6 +862,7 @@ std::string GalacticBuildTray::report_json() const {
         std::string type;
         for (const char c : entry.choice.type) { if (c == '"' || c == '\\') type += '\\'; type += c; }
         out << (written++ ? "," : "") << "{\"type\":\"" << type << "\",\"type_id\":" << entry.choice.type_id
+            << ",\"price\":" << (entry.choice.price ? std::to_string(entry.choice.price->trunc_to_integer()) : std::string("null"))
             << ",\"enabled\":" << (entry.choice.enabled ? "true" : "false") << ",\"rect\":";
         rect_json(entry.button->get_global_rect());
         out << '}';

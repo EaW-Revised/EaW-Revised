@@ -156,6 +156,11 @@ public:
     [[nodiscard]] static std::string describe_checkpoint_room_change(const net::LobbySnapshot& before, const net::LobbySnapshot& after);
     // No file access or owner mutation; returns the saved faction/seat facts for assignment.
     [[nodiscard]] core::Result<CheckpointCandidate> inspect_checkpoint(std::span<const std::uint8_t>) const;
+    // The host's "load without old battle history": converts a save whose finished-battle records came from another build
+    // into an ordinary save (checkpoint::recover_checkpoint_history). Slow (two restores): run it off the UI thread. The
+    // converted bytes are selected like any other file, so every guest receives and restores exactly them.
+    [[nodiscard]] core::Result<checkpoint::RecoveredCheckpoint> recover_checkpoint_history(std::uint64_t seed,
+        sim::galactic::MpRoster roster, std::shared_ptr<const std::vector<std::uint8_t>> bytes) const;
     // PR3 seam: host supplies original saved campaign roster and an explicit logical-seat
     // assignment in snapshot order. Selection never changes the saved owner/AI/controller roster.
     [[nodiscard]] core::Result<void> select_checkpoint(const net::LobbySnapshot&,
@@ -171,6 +176,8 @@ public:
     [[nodiscard]] std::optional<CheckpointView> checkpoint_view() const;
     void clear_checkpoint();
     [[nodiscard]] net::SaveTransferView checkpoint_progress() const { return transfer_->view(); }
+    // Host: the guests that have not reported their own restore of the selected save yet.
+    [[nodiscard]] std::vector<net::PeerIndex> checkpoint_unrestored_peers() const { return transfer_->view().unrestored; }
     // #7858: how long this peer's own restore of a received save has been running (empty when none runs): the lobby shows it as a
     // busy state with its elapsed time, not as a refusal.
     [[nodiscard]] std::optional<std::chrono::steady_clock::duration> restore_elapsed() const;

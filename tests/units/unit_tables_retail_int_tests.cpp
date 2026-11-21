@@ -1,6 +1,7 @@
 // PR-C1/C2/C4, LSL-P2: exercise integer coercion at each SK F1 reader, before consumer validation.
 #include "unit_tables_support.hpp"
 #include "../../src/units/unit_internal.hpp"
+#include "eawr/assets/assets.hpp"
 #include "eawr/data/retail_values.hpp"
 
 #include <algorithm>
@@ -232,9 +233,25 @@ void lure_runtime_counts() {
     }
 }
 
+// F7 (#7840): every clip-rate caller (deploy pose loader, super-laser attack clip, land start clip) goes through this helper.
+// A rate that does not convert must come back empty so the caller takes its note-and-keep path instead of throwing.
+void clip_rate_not_representable() {
+    eawr::assets::Animation clip;
+    clip.frames_per_second = 30.0F;
+    const auto ok = eawr::units::detail::clip_frames_per_second(clip);
+    expect(ok && ok->raw() == 30 * eawr::units::Fixed::scale, "F7: a 30 fps clip converts");
+    for (const float rate : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+             -std::numeric_limits<float>::infinity(), 3.0e38F}) {
+        clip.frames_per_second = rate;
+        expect(!eawr::units::detail::clip_frames_per_second(clip).has_value(),
+            "F7: a NaN, infinite or out-of-range clip rate is reported, not thrown (deploy, attack and start clips)");
+    }
+}
+
 }
 
 int main() {
+    clip_rate_not_representable();
     for (const auto& test : cases) {
         std::cerr << "F1 input: [" << test.text << "]\n";
         boundary(test);

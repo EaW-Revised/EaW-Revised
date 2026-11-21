@@ -7,6 +7,14 @@ run/main_scene="res://main.tscn"
 boot_splash/show_image=false
 boot_splash/bg_color=Color(0, 0, 0, 1)
 
+[accessibility]
+; Disabled (2) on purpose. With the engine's accessibility bridge active, Windows flags the idle game window
+; "not responding" after about 30 s although it answers messages (the launcher's watchdog found this).
+; Trade-off: the in-game UI has no screen-reader support today, so nothing is lost. Auto (0) would still turn the
+; bridge on whenever any UI Automation client is present (that is how the false flag was hit), so Auto is not
+; an option until the UI supports it. The launcher project is unaffected.
+general/accessibility_support=2
+
 [debug]
 file_logging/max_log_files=30
 

@@ -63,12 +63,6 @@ core::Result<void> prepare_corruption_host(const data::Catalog& catalog, const C
     const std::function<gc::TypeId(std::string_view)>& identity, core::LoadNoteBuffer* notes) {
     if (!setup.control || !setup.census || !setup.economy_corruption) return invalid("corruption authoring requires live control/census/economy");
     host.multiplayer = setup.economy_corruption->multiplayer;
-    const auto campaign = layers(catalog, plan.campaign_name(), data::Category::campaign);
-    if (const auto* tutorial = data::retail::single(campaign, "Tutorial")) {
-        data::tag_trace::used(tutorial); const auto flag = data::retail::boolean(tutorial->raw_text);
-        if (!flag) campaign_load_note(notes, "EAWR-LOAD-1220", tutorial, plan.campaign_name(), "Tutorial", "false");
-        if (flag && *flag) host.tutorial_corruption_allowed = false; // named scripted destination-admission seam
-    }
     const auto ids = [&](const data::XmlNode* node, std::vector<gc::TypeId>& out) {
         if (!node || data::retail::is_placeholder(node->raw_text)) return true;
         data::tag_trace::used(node);
@@ -173,7 +167,8 @@ core::Result<void> prepare_corruption_host(const data::Catalog& catalog, const C
         if (player != setup.economy_corruption->players.end() && player->benefits)
             host.initial_corruption.push_back({planet.id, gc::corruption_fixture::Type::racketeering, planet.owner}); // WGCH-165/168
     }
-    for (const auto* node : data::retail::list(campaign, "Corruption_Level_Override", data::retail::ListRule::replace_in_variant)) {
+    const auto campaign_layers = layers(catalog, plan.campaign_name(), data::Category::campaign);
+    for (const auto* node : data::retail::list(campaign_layers, "Corruption_Level_Override", data::retail::ListRule::replace_in_variant)) {
         data::tag_trace::used(node); const auto pair = words(node->raw_text);
         if (pair.size() != 2) { campaign_load_note(notes, "EAWR-LOAD-1225", node, plan.campaign_name(), node->name, "skip override"); continue; }
         const auto type = identity(pair[0]); const auto level = Fixed::from_decimal(pair[1]);

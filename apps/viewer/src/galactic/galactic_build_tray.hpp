@@ -27,10 +27,10 @@ namespace eawr::presentation::godot_backend {
 class EawrHudButton;
 class EawrHudText;
 
-// The galactic build tray (docs/ui/galactic-build-tray.md, GBT-01 to GBT-03, GBT-06, GBT-10). When the bar
-// omits choices, a `+N` handle appears above it; the handle opens a panel that grows upward and lists the
-// whole choice list grouped by the model of build_tray_model.hpp. The bar, its slot mapping and the choice
-// list are never touched: this only draws on top, and only for a planet whose choices overflow the bar.
+// The galactic build tray (docs/ui/galactic-build-tray.md, GBT-01 to GBT-03, GBT-06, GBT-10). For a planet
+// with build choices a handle appears above the bar (`+N` when the bar omits N choices, the caption alone when it
+// omits none); the handle opens a panel that grows upward and lists the whole choice list grouped by the model of
+// build_tray_model.hpp. The bar, its slot mapping and the choice list are never touched: this only draws on top.
 // Entries are copies of the bar's own production button, so they take on the mod's look; the panel wears the bar's
 // own shell art and colour, and its close button is the mod's own close button (GBT-07, GBT-10).
 class GalacticBuildTray final {
@@ -102,9 +102,8 @@ private:
     // Back_Component.
     void draw_backdrop(GalacticMode::State& state, const godot::Rect2& bar);
     void clear_backdrop();
-    [[nodiscard]] float panel_width(GalacticMode::State& state, const godot::Rect2& bar,
-        const std::vector<presentation::ui::build_tray::Group>& groups, const presentation::ui::build_tray::Metrics& full,
-        const presentation::ui::build_tray::PackOptions& options, float free_height) const;
+    // GBT-06: the panel's width; Auto is the whole span from the bar box's left edge to the planet info card.
+    [[nodiscard]] float panel_width(GalacticMode::State& state, const godot::Rect2& bar) const;
     [[nodiscard]] bool enabled() const;
 
     GalacticMode::State* state_{};
@@ -145,6 +144,7 @@ private:
     godot::Ref<godot::CanvasItemMaterial> additive_;
     std::string backdrop_source_;        // bar, component or none, for the report
     std::size_t back_layers_{}, frame_layers_{};
+    godot::Vector2 back_sample_; // the back's sampled span of the bar, screen x (from, to), for the report (#7952)
     std::vector<Entry> entries_;
     std::vector<EawrHudText*> headers_;
     std::vector<godot::TextureRect*> dividers_;

@@ -33,6 +33,12 @@ enum class FrontEndScreen : std::uint8_t {
 
 [[nodiscard]] std::string_view to_string(FrontEndScreen screen) noexcept;
 
+// MAT-22: the screen is drawn with an opaque backing, so the demo battle behind it cannot be seen and
+// is held (not simulated, not drawn). The settings, load and staging screens let it show through.
+// The single-player staging screen is opaque only while its LAN connection is selected, which the
+// shell adds itself.
+[[nodiscard]] bool covers_backdrop(FrontEndScreen screen) noexcept;
+
 // The catalogue dialog a screen is built from, or empty for a screen drawn elsewhere (FES-01).
 [[nodiscard]] std::string_view dialog_name(FrontEndScreen screen) noexcept;
 

@@ -1,0 +1,3 @@
+eawr_add_python_contract(python_presentation_renderer_galactic_build_tray_lan_runtime
+    tests.presentation.renderer.test_viewer_galactic_build_tray_lan_runtime)
+set_tests_properties(python_presentation_renderer_galactic_build_tray_lan_runtime PROPERTIES LABELS gpu)

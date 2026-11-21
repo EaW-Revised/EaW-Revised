@@ -52,6 +52,40 @@ void GalacticMode::State::clear_planet_info_card() {
     planet_info_card_shown.reset();
 }
 
+std::optional<galactic_view::PlanetInfoCardStyle> GalacticMode::State::planet_info_card_style() const {
+    namespace ui = data::ui;
+    const auto* back = command_catalog.find("zoomed_back");
+    const auto* anchor = fleet_anchors.find("planet_info");
+    const auto* header_style = command_catalog.find("zoomed_header_text");
+    if (!back || !anchor || !header_style) return std::nullopt;
+    // GPI-03..06: the backdrop's authored values; the anchor is the button's resolved shell position.
+    galactic_view::PlanetInfoCardStyle style;
+    const auto origin = anchor->origin.value_or(assets::Vec2f{anchor->rect.x + anchor->rect.width * 0.5F,
+        anchor->rect.y + anchor->rect.height * 0.5F});
+    style.anchor_x = origin.x; style.anchor_y = origin.y;
+    const auto size = back->vec2(ui::Field::size).value_or(ui::Vec2{});
+    const auto default_offset = back->vec2(ui::Field::default_offset).value_or(ui::Vec2{});
+    const auto inset = back->vec2(ui::Field::offset).value_or(ui::Vec2{});
+    style.back_width = size.x; style.back_row_minimum = size.y;
+    style.default_offset_x = default_offset.x; style.default_offset_y = default_offset.y;
+    style.offset_x = inset.x; style.offset_y = inset.y;
+    style.header_row_minimum = header_style->vec2(ui::Field::size).value_or(ui::Vec2{}).y;
+    // GPI-06: the frame and glow grow over the backdrop by twice and sixteen times the display conversion ratio,
+    // which is one shell unit per unit at this layer (unverified for non-square display ratios).
+    style.frame_grow = 2.0F; style.glow_grow = 16.0F;
+    if (style.back_width <= 0.0F) return std::nullopt;
+    return style;
+}
+
+std::optional<float> GalacticMode::State::planet_info_card_left() const {
+    if (!fleet_organize) return std::nullopt;
+    const auto style = planet_info_card_style();
+    if (!style) return std::nullopt;
+    // The left edge does not depend on the rows: the layout of no rows gives the same frame left as the drawn card.
+    const auto card = galactic_view::planet_info_card_layout(*style, {});
+    return screen_rect(card.frame, fleet_organize->placement()).position.x;
+}
+
 void GalacticMode::State::update_planet_info_card(const presentation::ui::ShellPlacement& placement) {
     namespace ui = data::ui;
     const auto* back = command_catalog.find("zoomed_back");
@@ -109,22 +143,9 @@ void GalacticMode::State::update_planet_info_card(const presentation::ui::ShellP
     const CardText centre = centre_style ? text_of(centre_style) : header;
     if (!header.valid() || !body.valid()) return;
 
-    // GPI-03..06: the backdrop's authored values; the anchor is the button's resolved shell position.
-    galactic_view::PlanetInfoCardStyle style;
-    const auto origin = anchor->origin.value_or(assets::Vec2f{anchor->rect.x + anchor->rect.width * 0.5F,
-        anchor->rect.y + anchor->rect.height * 0.5F});
-    style.anchor_x = origin.x; style.anchor_y = origin.y;
-    const auto size = back->vec2(ui::Field::size).value_or(ui::Vec2{});
-    const auto default_offset = back->vec2(ui::Field::default_offset).value_or(ui::Vec2{});
-    const auto inset = back->vec2(ui::Field::offset).value_or(ui::Vec2{});
-    style.back_width = size.x; style.back_row_minimum = size.y;
-    style.default_offset_x = default_offset.x; style.default_offset_y = default_offset.y;
-    style.offset_x = inset.x; style.offset_y = inset.y;
-    style.header_row_minimum = header_style->vec2(ui::Field::size).value_or(ui::Vec2{}).y;
-    // GPI-06: the frame and glow grow over the backdrop by twice and sixteen times the display conversion ratio,
-    // which is one shell unit per unit at this layer (unverified for non-square display ratios).
-    style.frame_grow = 2.0F; style.glow_grow = 16.0F;
-    if (style.back_width <= 0.0F) return;
+    const auto styled = planet_info_card_style();
+    if (!styled) return;
+    const galactic_view::PlanetInfoCardStyle& style = *styled;
 
     const auto texture_of = [&](const std::string& name) { return name.empty() ? Ref<Texture2D>{} : command_texture(name); };
     const auto texture_size = [](const Ref<Texture2D>& art) { return art.is_valid() ? art->get_size() : Vector2(); };

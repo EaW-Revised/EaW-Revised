@@ -1,4 +1,5 @@
 #include "eawr/core/json_text.hpp"
+#include "eawr/scene/shader_routes.hpp"
 #include "space_populate.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/presentation/space/space.hpp"
@@ -16,6 +17,9 @@
 #include "eawr/presentation/ui/pads.hpp"
 #include "eawr/presentation/particles/map_attachment_owner.hpp"
 #include "eawr/sim/math/geometry.hpp"
+
+#include <godot_cpp/variant/string.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
 #include <array>
@@ -280,7 +284,17 @@ void SpacePopulation::write_report(std::ostream& output) const {
                << ", \"reason\": " << json(key.second) << "}";
         first = false;
     }
-    output << (groups.empty() ? "" : "\n    ") << "],\n    \"placements\": [";
+    {
+        // What the populate actually dropped: unsupported surfaces of the drawn placements, by shader and route.
+        std::vector<const scene::Placement*> drawn;
+        for (const auto& decision : decisions_)
+            if (decision.role == scene::SpaceRole::drawn) drawn.push_back(&scene_->placements[decision.scene_ordinal]);
+        const scene::DroppedLayers dropped = scene::dropped_layers(drawn);
+        godot::UtilityFunctions::print(godot::String("EAWR dropped layers: ")
+            + godot::String::utf8(scene::dropped_layers_summary(dropped).c_str()));
+        output << (groups.empty() ? "" : "\n    ") << "],\n    \"dropped_layers\": " << scene::dropped_layers_json(dropped)
+               << ",\n    \"placements\": [";
+    }
     for (std::size_t index = 0; index < decisions_.size(); ++index) {
         const auto& decision = decisions_[index];
         const scene::Placement& placement = scene_->placements[decision.scene_ordinal];

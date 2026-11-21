@@ -58,6 +58,8 @@ public:
         std::filesystem::path report_path;
         std::filesystem::path capture_path;
         bool forced_off{};
+        // `--eawr-attract-hold off`: never hold the battle (the #7870 A/B baseline; a test flag, not a setting).
+        bool hold_disabled{};
         std::uint32_t frames{};
         std::vector<std::string> steps;
     };
@@ -81,6 +83,12 @@ public:
     [[nodiscard]] bool visible() const noexcept;
     [[nodiscard]] float reveal_fraction() const noexcept;
     [[nodiscard]] const std::string& failure() const noexcept;
+
+    // MAT-22: an opaque screen covers the battle. Held, the battle is not simulated (its clock is
+    // paused), not processed and not drawn (its host is hidden and its nodes stop processing), and the
+    // manager's clocks do not run; released, it continues where it was. Safe to call every frame.
+    void set_held(bool held);
+    [[nodiscard]] bool held() const noexcept;
 
     // MAT-04, MAT-05: one frame. `dialog_active` and `main_menu_active` say what the front end
     // shows; `foreground` whether the window is in front.

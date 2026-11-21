@@ -119,7 +119,8 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
         auto* parent = pad_survivor(state.parent);
         const auto pad = pads.find(state.parent);
         if (child == nullptr || parent == nullptr || pad == pads.end()) {
-            if (child == nullptr && parent != nullptr && pad != pads.end()) child_died(state.parent, pad->second);
+            // #7886: a script despawn detaches the child; it is not a death (no respawn, no station destruction or capture).
+            if (child == nullptr && parent != nullptr && pad != pads.end() && !despawned_.contains(id)) child_died(state.parent, pad->second);
             impl_->construction_stage.touch(id);
             if (pad != pads.end()) impl_->pad_stage.touch(state.parent);
             if (pad != pads.end()) pad->second.under_construction = invalid_entity_id;
@@ -189,6 +190,12 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
             iterator = pads.erase(iterator);
         } else {
             if (iterator->second.constructed != invalid_entity_id && pad_survivor(iterator->second.constructed) == nullptr) {
+                if (despawned_.contains(iterator->second.constructed)) {
+                    impl_->pad_stage.touch(iterator->first);
+                    iterator->second.constructed = invalid_entity_id;
+                    ++iterator;
+                    continue;
+                }
                 if (child_died(iterator->first, iterator->second)) {
                     iterator = pads.erase(iterator);
                     continue;

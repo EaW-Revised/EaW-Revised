@@ -56,6 +56,7 @@ std::vector<std::string> authored_kinds(const gc::GalacticAbilityProfile& profil
     if (profile.neutralize) kinds.emplace_back("neutralize");
     if (profile.spy) kinds.emplace_back("spy");
     if (profile.removal) kinds.emplace_back("removal");
+    if (profile.siphon) kinds.emplace_back("siphon");
     return kinds;
 }
 
@@ -70,6 +71,7 @@ std::string kind_name(gc::AbilityKind kind) {
     case gc::AbilityKind::hero_neutralization: return "neutralize";
     case gc::AbilityKind::system_spy: return "spy";
     case gc::AbilityKind::remove_corruption: return "removal";
+    case gc::AbilityKind::credit_siphon: return "siphon";
     }
     return "?";
 }

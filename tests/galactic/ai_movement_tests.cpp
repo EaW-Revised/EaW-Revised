@@ -780,6 +780,42 @@ void summary_hold_survives_undefended_resume() {
         else expect(game.state_sha256() == baseline, "overlapping hold release equality on 1/2/4/8 workers");
     }
 }
+// #7826: a story's FORCE_CLICK_GUI on the pause control never unfreezes a galaxy held by an open battle summary (single player):
+// a human resume is refused there until the acknowledgement, and the story toggle is refused the same way.
+void summary_hold_refuses_a_story_pause_toggle() {
+    eawr::platform::ThreadWorkerAdapter executor(1);
+    auto setup = fixture(); setup.interactive_seat = {1};
+    setup.seats.front().kind = gc::SeatKind::human; setup.seats.front().human_side_id = 1;
+    setup.fleet_control->pause = gc::PausePolicy::admit_all();
+    auto game = take(cp::GameSession::create(setup)); gc::GalacticSession* world{};
+    done(game.configure_native_replay_owners([&](auto& owner) { world = &owner; return eawr::core::Result<void>::success(); }));
+    eawr::sim::galactic::story::EventDef click;
+    click.name = "PAUSE_TOGGLE"; click.type = "STORY_CLICK_GUI"; click.params[0] = {"b_go"}; click.perpetual = true;
+    click.reward_type = "FORCE_CLICK_GUI"; click.reward_params[0] = {"b_play_pause"};
+    eawr::sim::galactic::story::SubPlotDef plot; plot.name = "P.xml"; plot.owner = 1; plot.active = true; plot.events = {click};
+    done(game.install_story({}, {{1, "p.xml"}}, {plot}));
+    cp::AutoResolveOutcomeApplication outcome; outcome.planet_type = "Fixture_Planet";
+    outcome.planet = 1; outcome.invader = 1; outcome.defender = 2;
+    outcome.result.conflict = 90; outcome.result.winner = 1;
+    done(game.stage_auto_resolve_outcome(outcome)); (void)take(game.step(executor));
+    expect(game.battle_summary_hold() == 90 && world->clock().pause_depth == 1, "the open summary owns one pause level");
+    std::uint64_t sequence = 0;
+    const auto press = [&] {
+        done(game.submit({{game.completed_tick(), {1}, ++sequence}, gc::GuiClick{"b_go"}}));
+        return take(game.step(executor));
+    };
+    for (int round = 0; round < 2; ++round) {
+        const auto tick = press();
+        expect(tick.story_triggers.size() == 1 && tick.story_triggers.front().outcome.rfind("refused: an open battle summary", 0) == 0
+            && world->clock().pause_depth == 1 && game.battle_summary_hold() == 90,
+            "a story toggle is refused at the summary's own pause level, like a human resume");
+    }
+    done(game.submit({{game.completed_tick(), {1}, ++sequence}, gc::BattleSummaryAcknowledge{90}})); (void)take(game.step(executor));
+    expect(!game.battle_summary_hold() && world->clock().pause_depth == 0, "the acknowledgement releases the summary's level");
+    const auto after = press();
+    expect(after.story_triggers.size() == 1 && after.story_triggers.front().outcome == "applied" && world->clock().pause_depth == 1,
+        "with no summary the story toggle pauses as usual");
+}
 void raid_native_disk() {
     std::string baseline;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -1222,7 +1258,7 @@ int case_galactic_ai_movement_tests(int argc, char** argv) {
     try {
         window_reads();
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
-        else { raid_script_and_movement(); raid_native_disk(); shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); summary_hold_survives_undefended_resume(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); population_memo_equality(); }
+        else { raid_script_and_movement(); raid_native_disk(); shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); summary_hold_survives_undefended_resume(); summary_hold_refuses_a_story_pause_toggle(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); population_memo_equality(); }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

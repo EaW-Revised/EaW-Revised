@@ -453,7 +453,7 @@ void test_authored_effect_admission() {
         mixed->emitters.push_back(drawable_emitter());
         auto parent = drawable_emitter();
         parent.lifetime = 0.1F;
-        if (unsupported_kind == 0) parent.blend_mode = 5;
+        if (unsupported_kind == 0) parent.blend_mode = 7;
         else if (unsupported_kind == 1) { parent.renderer_id = 52; parent.primitive_mode = 0; }
         else parent.renderer_id = 999;
         mixed->emitters.push_back(parent);

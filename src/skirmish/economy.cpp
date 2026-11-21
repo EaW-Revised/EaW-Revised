@@ -585,11 +585,15 @@ core::Result<tactical::EconomyRules> economy_rules(
             if (!campaign && tables.domain == tactical::BattleDomain::space) {
                 auto slot = static_cast<std::uint32_t>(production.combat_bonuses.size());
                 for (const auto& authored : production.battlefield_bonuses) {
-                    if (!authored.enabled || authored.reveal_delta == Fixed{}) continue;
+                    // WBR-04: a reversed handler has its effect once the source is removed, never while it stands.
+                    if (!authored.enabled || authored.reverse || (authored.reveal_delta == Fixed{} && authored.stealth_delta == Fixed{}
+                        && authored.capture_delta == Fixed{} && !authored.special_weapons)) continue;
                     tactical::CommandBonusProfile profile;
                     profile.type = type_id(type.id); profile.slot = slot++;
                     profile.battlefield = true; profile.apply_to_self = true;
                     profile.all_allies = authored.all_allies; profile.reveal_delta = authored.reveal_delta;
+                    profile.stealth_delta = authored.stealth_delta; profile.capture_delta = authored.capture_delta;
+                    profile.special_weapons = authored.special_weapons;
                     profile.bonus.stacking_category = authored.category;
                     profile.bonus.applicable.push_back(profile.type);
                     for (const auto& player : start.setup.players) profile.enabled_players.push_back(player.player_id);

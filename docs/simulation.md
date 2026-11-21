@@ -133,6 +133,7 @@ later tickets that add systems to the per-unit phases and events to the stream.
 | `EAWR-SIM-0311` | land tactical provider unavailable: land setup/replay parses, but session creation requires the land terrain field (L1) |
 | `EAWR-SIM-0312` | invalid land terrain content, movement-mask profile, bounds or occupancy input |
 | `EAWR-SIM-0313` | invalid land path checkpoint (a saved search that does not fit the grid it is restored against) |
+| `EAWR-SIM-0314` | a campaign setup record of payload version 5 or 6 (written by an older build, not read); no other failure uses this code |
 
 ## Workers and the phase map
 

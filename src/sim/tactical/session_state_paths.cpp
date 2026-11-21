@@ -110,6 +110,26 @@ void TacticalSession::Impl::append_canonical_final_facing_state(std::vector<std:
         }
 }
 
+void TacticalSession::Impl::append_canonical_deploy_pose_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
+        // WDP-02: the deploy clip of each live unit whose type has a pose table and has switched SPOILER_LOCK, ascending ID;
+        // absent while none has, so battles without such a unit keep their bytes.
+        const auto poses = (counts ? counts->deploy_poses : static_cast<std::uint64_t>(std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
+            return unit.abilities && unit.abilities->deploy_pose.has_value();
+        })));
+        if (poses != 0) {
+            bytes.insert(bytes.end(), deploy_pose_tag.begin(), deploy_pose_tag.end());
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(poses));
+            for (const auto& unit : units) {
+                if (!unit.abilities || !unit.abilities->deploy_pose) continue;
+                const auto& pose = *unit.abilities->deploy_pose;
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                bytes.push_back(pose.on ? 1U : 0U);
+                sim::detail::append_u64(bytes, pose.since);
+                sim::detail::append_u32(bytes, pose.start_frame);
+            }
+        }
+}
+
 void TacticalSession::Impl::append_canonical_waypoints_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
         const auto waypoint_count = (counts ? counts->waypoint_count : static_cast<std::uint64_t>(std::count_if(units.begin(), units.end(), [](const auto& unit) {
             return unit.waypoints.has_value();

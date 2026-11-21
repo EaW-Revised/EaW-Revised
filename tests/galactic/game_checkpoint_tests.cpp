@@ -2370,6 +2370,286 @@ void live_mod_description_contracts() {
     expect(prepared->completed_tick() == 1, "a modded live save round-trips");
     live->stop(); check(live->delete_save(request.name)); std::filesystem::remove(directory);
 }
+
+// A finished battle record whose saved setup was written by another build: the strict load names it, and the host-side
+// recovery keeps the galaxy and replaces only the battle setups. The two fixtures are real saved setups from older
+// builds (campaign setup versions 5 and 6), reduced to the embedded tactical replay.
+Bytes read_fixture(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return Bytes(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+void put_u64(Bytes& out, std::uint64_t value) { for (int shift = 0; shift < 64; shift += 8) out.push_back(static_cast<std::uint8_t>(value >> shift)); }
+std::uint64_t get_u64(const Bytes& in, std::size_t at) {
+    std::uint64_t value = 0; for (int i = 7; i >= 0; --i) value = (value << 8U) | in[at + static_cast<std::size_t>(i)];
+    return value;
+}
+// encode_conflict ends with the embedded tactical replay: u64 length, then bytes that start with the replay magic.
+Bytes swap_embedded_replay(const Bytes& record, const Bytes& replacement) {
+    static constexpr std::array<std::uint8_t, 8> magic{'E', 'A', 'W', 'R', 'P', 'L', 'Y', 0};
+    const auto at = std::search(record.begin(), record.end(), magic.begin(), magic.end());
+    expect(at != record.end() && std::search(at + 1, record.end(), magic.begin(), magic.end()) == record.end() && at - record.begin() >= 8,
+        "a conflict record embeds exactly one tactical replay");
+    const auto start = static_cast<std::size_t>(at - record.begin());
+    expect(get_u64(record, start - 8) == record.size() - start, "the embedded replay is the record's tail");
+    Bytes out(record.begin(), record.begin() + static_cast<std::ptrdiff_t>(start - 8));
+    put_u64(out, replacement.size()); out.insert(out.end(), replacement.begin(), replacement.end());
+    return out;
+}
+// Which records of the conflicts section a rewrite touches: the history entries, the admission tail, or both.
+enum class Records { all, history, admissions };
+Bytes swap_conflicts_section(const Bytes& section, eawr::sim::EntityId id, const Bytes& replacement, std::size_t& swapped,
+    Records which = Records::all) {
+    Bytes out; std::size_t at = 0;
+    const auto count = static_cast<std::uint32_t>(get_u64(section, at) & 0xffffffffU); at += 4;
+    for (int i = 0; i < 4; ++i) out.push_back(section[i]);
+    const auto copy_record = [&](std::size_t trailing, bool admission) {
+        for (std::size_t i = 0; i < 8; ++i) out.push_back(section[at + i]); // entry tick
+        at += 8;
+        const auto length = static_cast<std::size_t>(get_u64(section, at)); at += 8;
+        const Bytes record(section.begin() + static_cast<std::ptrdiff_t>(at), section.begin() + static_cast<std::ptrdiff_t>(at + length)); at += length;
+        const bool region = which == Records::all || (which == Records::admissions) == admission;
+        const bool mine = region && get_u64(record, 0) == id;
+        const auto next = mine ? swap_embedded_replay(record, replacement) : record;
+        swapped += mine ? 1U : 0U;
+        put_u64(out, next.size()); out.insert(out.end(), next.begin(), next.end());
+        for (std::size_t i = 0; i < trailing; ++i) out.push_back(section[at + i]);
+        at += trailing;
+    };
+    for (std::uint32_t i = 0; i < count; ++i) copy_record(0, false);
+    if (at < section.size()) {
+        for (int i = 0; i < 4; ++i) out.push_back(section[at + static_cast<std::size_t>(i)]);
+        const auto admissions = static_cast<std::uint32_t>(section[at]) | (static_cast<std::uint32_t>(section[at + 1]) << 8U)
+            | (static_cast<std::uint32_t>(section[at + 2]) << 16U) | (static_cast<std::uint32_t>(section[at + 3]) << 24U);
+        at += 4;
+        for (std::uint32_t i = 0; i < admissions; ++i) copy_record(3, true);
+    }
+    expect(at == section.size(), "the whole conflicts section was rewritten");
+    return out;
+}
+Bytes swap_return_section(const Bytes& section, eawr::sim::EntityId id, const Bytes& replacement, std::size_t& swapped) {
+    std::size_t at = 0;
+    const auto state_length = static_cast<std::size_t>(get_u64(section, at)); at += 8 + state_length;
+    const bool has = section[at] == 1;
+    Bytes out(section.begin(), section.begin() + static_cast<std::ptrdiff_t>(at + 1)); at += 1;
+    if (!has) { expect(at == section.size(), "return section without a result ends here"); return section; }
+    const auto length = static_cast<std::size_t>(get_u64(section, at)); at += 8;
+    const Bytes record(section.begin() + static_cast<std::ptrdiff_t>(at), section.begin() + static_cast<std::ptrdiff_t>(at + length)); at += length;
+    const bool mine = get_u64(record, 0) == id;
+    const auto next = mine ? swap_embedded_replay(record, replacement) : record;
+    swapped += mine ? 1U : 0U;
+    put_u64(out, next.size()); out.insert(out.end(), next.begin(), next.end());
+    out.insert(out.end(), section.begin() + static_cast<std::ptrdiff_t>(at), section.end());
+    return out;
+}
+// The older build wrote a resume commitment over its own sections; stand in for that after any rewrite.
+Bytes resealed(cp::Checkpoint checkpoint) {
+    const auto commitment = cp::game_capture_commitment(checkpoint);
+    for (auto& section : checkpoint.sections)
+        if (section.id == static_cast<std::uint16_t>(cp::SectionId::multiplayer_resume))
+            std::copy(commitment.begin(), commitment.end(), section.bytes.begin() + 32);
+    return take(cp::write_checkpoint(checkpoint));
+}
+// `summary`: also rewrite the latest battle summary's record (the return section).
+Bytes with_other_build_battle(const Bytes& saved, eawr::sim::EntityId id, const Bytes& replacement, std::size_t& swapped,
+    Records which = Records::all, bool summary = true) {
+    auto checkpoint = take(cp::parse_checkpoint(saved));
+    for (auto& section : checkpoint.sections) {
+        if (section.id == static_cast<std::uint16_t>(cp::SectionId::conflicts)) section.bytes = swap_conflicts_section(section.bytes, id, replacement, swapped, which);
+        if (summary && section.id == static_cast<std::uint16_t>(cp::SectionId::tactical_return)) section.bytes = swap_return_section(section.bytes, id, replacement, swapped);
+    }
+    return resealed(std::move(checkpoint));
+}
+// One byte of one section flipped, the commitment recomputed: a save that differs from what a recovery may change.
+Bytes with_flipped_byte(const Bytes& saved, cp::SectionId id, std::size_t offset_from_end) {
+    auto checkpoint = take(cp::parse_checkpoint(saved));
+    for (auto& section : checkpoint.sections)
+        if (section.id == static_cast<std::uint16_t>(id)) section.bytes[section.bytes.size() - 1 - offset_from_end] ^= 1U;
+    return resealed(std::move(checkpoint));
+}
+void other_build_battle_records(const std::filesystem::path& fixtures) {
+    const auto old_v6 = read_fixture(fixtures / "older-build-campaign-setup-v6.replay");
+    const auto old_v5 = read_fixture(fixtures / "older-build-campaign-setup-v5.replay");
+    expect(old_v6.size() > 100 && old_v5.size() > 100, "both older-build battle setups were read");
+    // The parser names the older campaign setup versions and gives them a code of their own.
+    for (const auto& [bytes, version] : {std::pair{&old_v5, "5"}, std::pair{&old_v6, "6"}}) {
+        const auto parsed = tactical::parse_replay(*bytes, "fixture");
+        expect(!parsed && parsed.error().code == tactical::diagnostic_codes::older_campaign_setup
+            && parsed.error().message.find(std::string("campaign setup version ") + version + " was written by an older build") != std::string::npos,
+            "an older campaign setup version is refused with its own code and its number");
+    }
+    // Other version-class failures keep the shared version code, so a loader cannot mistake them for an older build's record.
+    Bytes other_format = old_v6; other_format[8] = 99;                 // replay container version
+    Bytes other_rules = old_v6; other_rules[12] = 2;                   // tactical rules version
+    Bytes other_tick = old_v6; other_tick[28] = 60;                    // tick rate denominator (1/60)
+    Bytes setup_nine = old_v6; setup_nine[124] = 9;                    // campaign setup payload version 9
+    for (const auto* bytes : {&other_format, &other_rules, &other_tick}) {
+        const auto parsed = tactical::parse_replay(*bytes, "fixture");
+        expect(!parsed && parsed.error().code == tactical::diagnostic_codes::version,
+            "other contract-version failures keep the shared version code");
+    }
+    const auto nine = tactical::parse_replay(setup_nine, "fixture");
+    expect(!nine && nine.error().code == tactical::diagnostic_codes::malformed, "an unknown campaign setup version is malformed, not an older one");
+
+    const auto config = setup(true); auto conflict = child(config);
+    conflict.forces.clear(); conflict.tactical.units.clear();
+    for (const auto& fleet : config.fleets) for (const auto& member : fleet.members) {
+        conflict.forces.push_back({member.id, member.type, fleet.owner, fleet.id});
+        tactical::UnitState unit; unit.entity_id = member.id; unit.type_id = member.type; unit.owner = fleet.owner;
+        conflict.tactical.units.push_back(unit);
+    }
+    const auto content = fight_content(conflict); const auto identities = cp::game_identities(config);
+    const auto victim = conflict.forces[2].id; const auto last_enemy = conflict.forces[3].id;
+    const auto kill = [&](eawr::sim::EntityId id) { return input(conflict,
+        {{0, 1, 1}, {id}, tactical::DamagePayload{eawr::sim::math::Fixed::from_integer(1000).value()}}); };
+    const eawr::sim::InlineExecutor serial;
+    auto game = take(campaign::GameSession::create(config)); check(game.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none));
+    (void)take(game.step(serial));
+    check(game.submit({{2, {1}, 1}, kill(victim)})); check(game.submit({{12, {1}, 2}, kill(last_enemy)}));
+    while (game.completed_tick() < 3) (void)take(game.step(serial));
+    const auto during = take(cp::save_game_checkpoint(game, identities));
+    while (game.completed_tick() < 24) (void)take(game.step(serial));
+    expect(!game.battle() && game.latest_tactical_result(), "the fixture battle finishes and leaves a latest summary");
+    const auto finished = take(cp::save_game_checkpoint(game, identities));
+    cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
+    options.content = [content](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success(content); };
+    auto baseline = take(cp::load_game_checkpoint(finished, identities, options, serial));
+    expect(baseline.session.state_sha256() == game.state_sha256(), "the unmodified finished-battle save loads to the same state");
+
+    const auto refusal = [&](const Bytes& bytes) { auto loaded = cp::load_game_checkpoint(bytes, identities, options, serial); return loaded ? std::optional<eawr::core::Diagnostic>{} : std::optional(loaded.error()); };
+    for (const auto& [replacement, version] : {std::pair{&old_v6, "6"}, std::pair{&old_v5, "5"}}) {
+        std::size_t swapped = 0;
+        const auto old = with_other_build_battle(finished, conflict.id, *replacement, swapped);
+        expect(swapped >= 2, "the history record and the latest summary both carry the older setup");
+        const auto error = refusal(old);
+        expect(error && error->code == cp::diagnostic_codes::other_build_battle_record
+            && error->message.find("battle record " + std::to_string(conflict.id)) != std::string::npos
+            && error->message.find("written by another build") != std::string::npos
+            && error->message.find(std::string("campaign setup version ") + version) != std::string::npos
+            && error->message.find("invalid tactical entry") == std::string::npos,
+            "the strict load names the record and says the setup came from an older build");
+
+        auto recovered = take(cp::recover_checkpoint_history(old, identities, options, serial));
+        expect(recovered.battles == std::vector<eawr::sim::EntityId>{conflict.id} && recovered.latest_summary_dropped,
+            "the recovery reports the replaced battle and the dropped latest summary");
+        auto reloaded = take(cp::load_game_checkpoint(recovered.bytes, identities, options, serial));
+        expect(reloaded.session.state_sha256() == game.state_sha256() && reloaded.session.completed_tick() == game.completed_tick(),
+            "the recovered save keeps the exact galaxy state and clock");
+        expect(!reloaded.session.latest_tactical_result(), "the unreadable latest summary is not carried");
+        expect(take(cp::save_game_checkpoint(reloaded.session, identities)) == recovered.bytes, "the recovered save is canonical");
+        // Recovery is deterministic from the file, so every peer that reads the recovered bytes continues alike.
+        for (const auto workers : eawr::platform::determinism_worker_counts()) {
+            const eawr::platform::ThreadWorkerAdapter pool(workers);
+            auto left = take(cp::load_game_checkpoint(recovered.bytes, identities, options, pool));
+            auto right = take(cp::recover_checkpoint_history(old, identities, options, pool));
+            expect(right.bytes == recovered.bytes, "two recoveries of one file write the same bytes on every worker count");
+            auto original = take(cp::load_game_checkpoint(finished, identities, options, pool));
+            for (int tick = 0; tick < 5; ++tick)
+                expect(take(left.session.step(pool)).state_hash.get() == take(original.session.step(pool)).state_hash.get(),
+                    "a recovered campaign continues exactly like the original");
+        }
+    }
+    // The latest summary is kept when only an older history record is replaced: its record is readable and stays as saved.
+    {
+        std::size_t swapped = 0;
+        const auto history_only = with_other_build_battle(finished, conflict.id, old_v6, swapped, Records::history, false);
+        expect(swapped == 1, "only the history record carries the older setup");
+        auto recovered = take(cp::recover_checkpoint_history(history_only, identities, options, serial));
+        expect(recovered.battles == std::vector<eawr::sim::EntityId>{conflict.id} && !recovered.latest_summary_dropped,
+            "a readable latest summary is not dropped with an older history record");
+        auto reloaded = take(cp::load_game_checkpoint(recovered.bytes, identities, options, serial));
+        expect(reloaded.session.state_sha256() == game.state_sha256() && reloaded.session.latest_tactical_result()
+            && reloaded.session.latest_tactical_result()->conflict == conflict.id,
+            "the kept summary is still the latest battle result of the recovered game");
+        expect(take(cp::save_game_checkpoint(reloaded.session, identities)) == recovered.bytes, "the recovered save is canonical");
+    }
+    // Nothing to recover, and a battle in progress, are refused in plain words.
+    const auto nothing = cp::recover_checkpoint_history(finished, identities, options, serial);
+    expect(!nothing && nothing.error().message.find("no battle record from another build") != std::string::npos,
+        "recovery refuses a save that needs none");
+    std::size_t swapped = 0;
+    const auto mid = with_other_build_battle(during, conflict.id, old_v6, swapped);
+    const auto in_battle = cp::recover_checkpoint_history(mid, identities, options, serial);
+    expect(!in_battle && in_battle.error().message.find("made during a battle") != std::string::npos,
+        "recovery refuses a save made during a battle");
+    // A damaged tactical entry keeps its own refusal, with the reason, and offers no recovery.
+    Bytes garbage(old_v6.begin(), old_v6.begin() + 40);
+    for (const auto* bad : {&garbage, &other_format, &other_rules, &other_tick, &setup_nine}) {
+        swapped = 0;
+        const auto broken = with_other_build_battle(finished, conflict.id, *bad, swapped);
+        const auto strict = refusal(broken);
+        expect(strict && strict->code != cp::diagnostic_codes::other_build_battle_record
+            && strict->message.find("invalid tactical entry:") != std::string::npos,
+            "an entry that is not an older campaign setup is an invalid entry, with its reason");
+        const auto attempt = cp::recover_checkpoint_history(broken, identities, options, serial);
+        expect(!attempt && attempt.error().message.find("invalid tactical entry:") != std::string::npos,
+            "the recovery does not drop an entry that is not an older campaign setup");
+    }
+    // Anything else that differs from the saved bytes refuses the recovery: one flipped byte in a section the recovery does
+    // not rewrite, in the return state the summary leaves in place, and in the resume roster (commitment recomputed).
+    {
+        swapped = 0;
+        const auto old = with_other_build_battle(finished, conflict.id, old_v6, swapped);
+        expect(static_cast<bool>(cp::recover_checkpoint_history(old, identities, options, serial)), "the unflipped older save recovers");
+        for (const auto& [section, offset] : {std::pair{cp::SectionId::planets, std::size_t{9}}, std::pair{cp::SectionId::fleets, std::size_t{9}},
+                std::pair{cp::SectionId::victory, std::size_t{3}}, std::pair{cp::SectionId::multiplayer_resume, std::size_t{0}},
+                std::pair{cp::SectionId::multiplayer_resume, std::size_t{12}}}) {
+            const auto flipped = with_flipped_byte(old, section, offset);
+            expect(!cp::recover_checkpoint_history(flipped, identities, options, serial),
+                "a save that also differs in another section is refused by the recovery");
+        }
+        // The return state before the summary: byte 8 is the first byte after its length.
+        auto tampered = take(cp::parse_checkpoint(old));
+        for (auto& section : tampered.sections)
+            if (section.id == static_cast<std::uint16_t>(cp::SectionId::tactical_return)) section.bytes[8] ^= 1U;
+        expect(!cp::recover_checkpoint_history(resealed(std::move(tampered)), identities, options, serial),
+            "a changed return state is refused by the recovery");
+    }
+}
+// Only an admission (the pending battle prompt) holds the older setup: no history entry, no latest summary.
+void other_build_pending_record(const std::filesystem::path& fixtures) {
+    const auto old_v6 = read_fixture(fixtures / "older-build-campaign-setup-v6.replay");
+    const eawr::sim::InlineExecutor executor;
+    const auto no_content = [](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success({}); };
+    const auto configure = [&](campaign::GameSession& session) {
+        session.set_conflict_service([](const auto&, const auto&, auto) {
+            return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
+        }, no_content, {}, eawr::campaign::ScriptRequirement::none);
+        return eawr::core::Result<void>::success();
+    };
+    const auto config = multiplayer_setup(false, false); const auto identities = cp::game_identities(config);
+    campaign::ConflictRecord conflict; conflict.id = 9000; conflict.planet = config.planets.front().id;
+    conflict.invader = 1; conflict.defender = 2; conflict.tactical.first_free_entity_id = 9001;
+    conflict.tactical.content_identity = config.content_identity;
+    conflict.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}}; conflict.seats = {{{1}, 1}, {{2}, 2}};
+    auto game = take(campaign::GameSession::create(config)); check(configure(game));
+    check(game.queue_conflict(conflict, {campaign::ConflictRoute::pending_tactical, false, false}));
+    for (int i = 0; i < 8 && !(game.pending_conflict_view() && game.pending_conflict_view()->choice_ready); ++i)
+        (void)take(game.step(executor));
+    expect(game.pending_conflict_view() && game.pending_conflict_view()->choice_ready, "fixture reaches the paused pending prompt");
+    const auto saved = take(cp::save_game_checkpoint(game, identities));
+    cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
+    options.content = no_content; options.configure_session = configure;
+    options.conflict_service = [](const auto&, const auto&, auto) {
+        return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
+    };
+    std::size_t swapped = 0;
+    const auto old = with_other_build_battle(saved, conflict.id, old_v6, swapped, Records::admissions);
+    expect(swapped == 1, "the pending prompt's admission is the only record that carries the older setup");
+    const auto strict = cp::load_game_checkpoint(old, identities, options, executor);
+    expect(!strict && strict.error().code == cp::diagnostic_codes::other_build_battle_record
+        && strict.error().message.find("battle record 9000") != std::string::npos,
+        "the strict load names the pending prompt's record");
+    auto recovered = take(cp::recover_checkpoint_history(old, identities, options, executor));
+    expect(recovered.battles == std::vector<eawr::sim::EntityId>{conflict.id} && !recovered.latest_summary_dropped,
+        "the recovery replaces the admission's setup and keeps everything else");
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto reloaded = take(cp::load_game_checkpoint(recovered.bytes, identities, options, pool));
+        expect(reloaded.session.state_sha256() == game.state_sha256() && reloaded.session.pending_conflict(),
+            "the recovered game keeps its state and its pending battle prompt on every worker count");
+        expect(take(cp::save_game_checkpoint(reloaded.session, identities)) == recovered.bytes, "the recovered save is canonical");
+    }
+}
 } // namespace
 int case_galactic_game_checkpoint_tests(int argc, char** argv) {
     try {
@@ -2394,6 +2674,9 @@ int case_galactic_game_checkpoint_tests(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--pending-conflict") {
             pending_conflict_resave(); return failures == 0 ? 0 : 1;
+        }
+        if (argc == 3 && std::string_view(argv[1]) == "--other-build-battle-records") {
+            other_build_battle_records(argv[2]); other_build_pending_record(argv[2]); return failures == 0 ? 0 : 1;
         }
         pending_actor_checkpoint_roundtrip(); mod_description_contracts(); resume_metadata_contracts(); nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); owner_journal_after_rebase(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); object_script_checkpoint(); attached_object_script_checkpoint(); object_script_load_errors_are_published(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
         admission_and_fixups(); prebattle_autosave_admission(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();

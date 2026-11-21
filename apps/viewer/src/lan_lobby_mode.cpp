@@ -112,7 +112,10 @@ constexpr double default_wait_seconds = 60.0;
                << ", \"colour\": " << json(row.colour) << ", \"accepted\": " << (row.accepted ? "true" : "false")
                << ", \"enabled\": " << (row.enabled ? "true" : "false") << ", \"visible\": "
                << (row.visible ? "true" : "false") << ", \"name_width\": " << row.name_width
-               << ", \"name_authored_width\": " << row.name_authored_width << "}";
+               << ", \"name_authored_width\": " << row.name_authored_width << ", \"cells\": " << row.cells
+               << ", \"top\": " << row.top << ", \"lines\": " << strings_json(row.lines) << ", \"items\": " << strings_json(row.items) << ", \"cell_texts\": " << strings_json(row.cell_texts) << ", \"line_fits\": [";
+        for (std::size_t fit = 0; fit < row.line_fits.size(); ++fit) output << (fit ? ", " : "") << (row.line_fits[fit] ? "true" : "false");
+        output << "]}";
     }
     output << "], \"options_error\": " << json(shot.options_error) << ", \"lobby_layer\": " << shot.lobby_layer
            << ", \"list_layer\": " << shot.list_layer << ", \"list_visible\": " << (shot.list_visible ? "true" : "false")

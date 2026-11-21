@@ -45,6 +45,8 @@ std::optional<DriverResult> TcpLanMatch::drive_submit(platform::LiveStepContext&
                 }
                 return DriverResult::failure(submitted.error());
             }
+            diagnostics_->emit("pause-submitted", "request", diagnostics_->seat,
+                std::string("target=") + (pause ? "pause" : "resume") + " input_tick=" + std::to_string(submitted.value().tick));
         }
         std::vector<net::MatchOptions> speed_requests;
         { const std::lock_guard lock(mutex_); speed_requests.swap(speed_requests_); }

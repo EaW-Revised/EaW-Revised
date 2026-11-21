@@ -1,6 +1,9 @@
 #include "unit_tables_support.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/skirmish/ai.hpp"
+#include "eawr/skirmish/start.hpp"
+#include "eawr/platform/sim_workers.hpp"
+#include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/sim/tactical/damage.hpp"
 #include "eawr/sim/tactical/pathfind.hpp"
@@ -319,6 +322,87 @@ void class_agnostic_reveal_targeting_weapon_tables() {
             "S-26: reveal range, targeting reach and priority set decode like the reference class");
     }
 }
+
+// WRB-01 (debug build: the redirect apply effect tests no object class): SpaceUnit and UniqueUnit carriers keep the
+// nested handler; the land hero and structure classes that author it in the stock data stay out of the space content.
+void redirect_carrier_class_tables() {
+    const std::array<std::pair<std::string_view, bool>, 4> carriers{{
+        {"SpaceUnit", true}, {"UniqueUnit", true}, {"HeroUnit", false}, {"SpecialStructure", false}}};
+    for (const auto& [xml_class, admitted] : carriers) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string opening = "<SpaceUnit Name=\"Test_Frigate\">";
+        const auto start = xml.find(opening);
+        const std::string class_name{xml_class};
+        if (xml_class != "SpaceUnit") {
+            xml.replace(xml.find("</SpaceUnit>", start), std::string_view{"</SpaceUnit>"}.size(), "</" + class_name + ">");
+            xml.replace(start, opening.size(), "<" + class_name + " Name=\"Test_Frigate\">");
+        }
+        const std::string class_opening = "<" + class_name + " Name=\"Test_Frigate\">";
+        xml.insert(xml.find(class_opening) + class_opening.size(),
+            "<Abilities SubObjectList=\"Yes\"><Redirect_Blaster_Ability Name=\"Test_Redirect\">"
+            "<Initially_Enabled>No</Initially_Enabled><Activation_Style>Take_Damage</Activation_Style>"
+            "<Redirect_Chance>0.2</Redirect_Chance><Block_Chance>0.3</Block_Chance>"
+            "<Reaction_Arc_In_Degrees>360</Reaction_Arc_In_Degrees>"
+            "<Max_Projectile_Redirection_Angle_In_Degrees>30</Max_Projectile_Redirection_Angle_In_Degrees>"
+            "</Redirect_Blaster_Ability></Abilities>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(static_cast<bool>(loaded.tables), "WRB-01: carrier class fixture loads");
+        if (!loaded.tables) continue;
+        const auto abilities = eawr::units::ability_table(*loaded.tables);
+        const auto* profile = abilities ? abilities.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+        const bool has_handler = profile != nullptr && std::any_of(profile->special.begin(), profile->special.end(),
+            [](const auto& special) { return special.kind == eawr::sim::tactical::SpecialAbilityKind::redirect_blaster; });
+        expect(has_handler == admitted, std::string("WRB-01: a ") + class_name + " carrier "
+            + (admitted ? "keeps" : "does not keep") + " its redirect handler");
+    }
+}
+
+// WRB-01: a UniqueUnit that inherits the nested handler from its parent type keeps it, and one that authors its own
+// handler under the same name replaces the inherited one (the class check runs on the final type).
+void redirect_carrier_inheritance_tables() {
+    const auto handler_xml = [](const std::string_view chance) {
+        return "<Abilities SubObjectList=\"Yes\"><Redirect_Blaster_Ability Name=\"Test_Redirect\">"
+               "<Initially_Enabled>No</Initially_Enabled><Activation_Style>Take_Damage</Activation_Style>"
+               "<Redirect_Chance>" + std::string{chance} + "</Redirect_Chance><Block_Chance>0.3</Block_Chance>"
+               "<Reaction_Arc_In_Degrees>360</Reaction_Arc_In_Degrees>"
+               "<Max_Projectile_Redirection_Angle_In_Degrees>30</Max_Projectile_Redirection_Angle_In_Degrees>"
+               "</Redirect_Blaster_Ability></Abilities>";
+    };
+    TempTree tree;
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    const std::string opening = "<SpaceUnit Name=\"Test_Frigate\">";
+    xml.insert(xml.find(opening) + opening.size(), handler_xml("0.2"));
+    xml.insert(xml.rfind("</Objects>"),
+        "<UniqueUnit Name=\"Redirect_Inherits\"><Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>"
+        "</UniqueUnit>"
+        "<UniqueUnit Name=\"Redirect_Overrides\"><Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>"
+        + handler_xml("0.7") + "</UniqueUnit>");
+    write_fixture(tree.root, xml);
+    const auto loaded = load(tree.root, models(-40.0F), "Normal_Default", eawr::sim::tactical::BattleDomain::space,
+        {"Redirect_Inherits", "Redirect_Overrides"});
+    expect(static_cast<bool>(loaded.tables), "WRB-01: inheritance fixture loads");
+    if (!loaded.tables) return;
+    const auto abilities = eawr::units::ability_table(*loaded.tables);
+    const auto handlers = [&](const char* name) {
+        std::vector<const eawr::sim::tactical::SpecialAbilityProfile*> found;
+        const auto* profile = abilities ? abilities.value().find(eawr::assets::object_type_crc(name)) : nullptr;
+        if (profile != nullptr)
+            for (const auto& special : profile->special)
+                if (special.kind == eawr::sim::tactical::SpecialAbilityKind::redirect_blaster) found.push_back(&special);
+        return found;
+    };
+    const auto parent = handlers("Test_Frigate");
+    const auto inherited = handlers("Redirect_Inherits");
+    const auto overridden = handlers("Redirect_Overrides");
+    expect(parent.size() == 1, "WRB-01: the SpaceUnit parent keeps its handler");
+    expect(inherited.size() == 1 && parent.size() == 1 && inherited.front()->redirect_chance == parent.front()->redirect_chance,
+        "WRB-01: a UniqueUnit inheriting the handler from its parent keeps it unchanged");
+    expect(overridden.size() == 1 && parent.size() == 1
+            && overridden.front()->redirect_chance != parent.front()->redirect_chance,
+        "WRB-01: a UniqueUnit authoring its own handler replaces the inherited one");
+}
 } // namespace
 
 // TCFA-16: effective data reaches the shared space AI and purchase consumers across class spellings.
@@ -453,7 +537,44 @@ static void space_bribe_and_sale_class_consumers() {
     }
 }
 
+// WSU-12 / AV-05: the pick sphere and the hard-extent offsets are fields of the shared object type, read by the
+// space body loader whatever the element is called. Element names that are not FoC classes settle to the nearest
+// class on the variant chain (SG-CLS-01), so the loaded class equals the authored name only for known classes.
+void space_body_collision_bound_tables() {
+    for (const std::string_view xml_class : {"SpaceUnit", "TransportUnit", "SpaceBuildable", "StarBase",
+            "SpecialStructure", "UniqueUnit", "HeroUnit", "GenericHeroUnit", "SpaceFauna", "DummyStructure",
+            "Template", "SpaceProp_Obstacle", "UnderConstructionShip"}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        std::string carrier = "<" + std::string(xml_class) + " Name=\"Bound_Carrier\">"
+            "<Variant_Of_Existing_Type>Test_Base</Variant_Of_Existing_Type>";
+        // WHE-SQ-02: a hero without its own space locomotor is a carried identity with no body.
+        if (xml_class == "HeroUnit" || xml_class == "GenericHeroUnit") {
+            carrier += "<SpaceBehavior>SIMPLE_SPACE_LOCOMOTOR, SPAWN_SQUADRON</SpaceBehavior>";
+        }
+        carrier += "<Mouse_Collide_Override_Sphere_Radius>37</Mouse_Collide_Override_Sphere_Radius>"
+            "<Custom_Hard_XExtent_Offset>3</Custom_Hard_XExtent_Offset>"
+            "<Custom_Hard_YExtent_Offset>-4</Custom_Hard_YExtent_Offset></" + std::string(xml_class) + ">";
+        xml.insert(xml.rfind("</Objects>"), carrier);
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F), "Normal_Default",
+            eawr::sim::tactical::BattleDomain::space, {"Bound_Carrier"});
+        const auto* unit = loaded.tables ? loaded.tables->find("Bound_Carrier") : nullptr;
+        const bool known_class = eawr::data::is_foc_object_class(xml_class);
+        const std::string detail = " [" + std::string(xml_class) + " type="
+            + (unit ? unit->xml_type : std::string("none")) + "]";
+        expect(unit && (!known_class || unit->xml_type == xml_class),
+            "WSU-12: the bound carrier loads as a space body of its class" + detail);
+        if (!unit) continue;
+        expect(unit->mouse_collide_sphere_radius && *unit->mouse_collide_sphere_radius == Fixed::from_raw(raw(37)),
+            "WSU-12: the authored pick sphere reaches the space body type" + detail);
+        expect(unit->fog_box_offset.x == Fixed::from_raw(raw(3)) && unit->fog_box_offset.y == Fixed::from_raw(raw(-4)),
+            "AV-05: the authored hard-extent offsets reach the space body fog box" + detail);
+    }
+}
+
 void synthetic_tables() {
+    space_body_collision_bound_tables();
     space_ai_class_consumers();
     space_bribe_and_sale_class_consumers();
     template_durability_tables();
@@ -523,9 +644,94 @@ void synthetic_tables() {
             expect(body && body->production.battlefield_bonuses.empty(), "WBR-01: unadmitted source interfaces remain separate");
         }
     }
+    // WBR-02..04: a live skirmish source runs under every style that is automatic in a multiplayer tactical game
+    // (Space, Skirmish, Global, Combat); an absent style is invalid and a ground or manual style never runs. The
+    // stealth, capture-time and special-weapon fields ride the same row; a reversed handler is kept but flagged.
+    {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        std::vector<std::string> names;
+        const auto append = [&](const std::string& name, const std::string& style, const std::string& effects) {
+            names.push_back(name);
+            xml.insert(xml.rfind("</Objects>"), "<SpaceUnit Name=\"" + name + "\"><Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>"
+                "<Abilities SubObjectList=\"Yes\"><Battlefield_Modifier_Ability Name=\"Mod_Effect\">"
+                + (style.empty() ? std::string() : "<Activation_Style>" + style + "</Activation_Style>") + effects
+                + "</Battlefield_Modifier_Ability></Abilities></SpaceUnit>");
+        };
+        const std::string effects = "<Stealth_Duration_Multiplier>1.5</Stealth_Duration_Multiplier>"
+            "<Capture_Point_Time_Multiplier>0.5</Capture_Point_Time_Multiplier><Enable_Special_Weapons>Yes</Enable_Special_Weapons>"
+            "<Stacking_Category>2</Stacking_Category>";
+        const std::array<std::pair<const char*, bool>, 7> styles{{{"Space_Automatic", true}, {"Skirmish_Automatic", true},
+            {"Global_Automatic", true}, {"Combat_Automatic", true}, {"Ground_Automatic", false}, {"User_Input", false}, {"", false}}};
+        for (std::size_t index = 0; index < styles.size(); ++index) append("Mod_Style_" + std::to_string(index), styles[index].first, effects);
+        append("Mod_Style_Reverse", "Space_Automatic", effects + "<Reverse_Application_Logic>Yes</Reverse_Application_Logic>");
+        append("Mod_Style_Neutral", "Space_Automatic", "<Stealth_Duration_Multiplier>1</Stealth_Duration_Multiplier>"
+            "<Capture_Point_Time_Multiplier>-1</Capture_Point_Time_Multiplier>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F), "Normal_Default", eawr::sim::tactical::BattleDomain::space, names);
+        expect(loaded.tables.has_value(), "WBR-02: ledger-effect XML loads");
+        if (loaded.tables) {
+            for (std::size_t index = 0; index < styles.size(); ++index) {
+                const auto* body = loaded.tables->find("Mod_Style_" + std::to_string(index));
+                expect(body && body->production.battlefield_bonuses.size() == (styles[index].second ? 1U : 0U),
+                    "WBR-02: the activation style gate follows the game mode");
+                if (body && styles[index].second) {
+                    const auto& bonus = body->production.battlefield_bonuses.front();
+                    expect(bonus.reveal_delta == Fixed{} && bonus.stealth_delta == Fixed::from_raw(raw(1) / 2)
+                        && bonus.capture_delta == Fixed::from_raw(-raw(1) / 2) && bonus.special_weapons && !bonus.reverse
+                        && bonus.category == 2, "WBR-02/03: stealth and capture deltas are multiplier minus one; special weapons flag");
+                }
+            }
+            const auto* reversed = loaded.tables->find("Mod_Style_Reverse");
+            expect(reversed && reversed->production.battlefield_bonuses.size() == 1 && reversed->production.battlefield_bonuses.front().reverse,
+                "WBR-04: a reversed handler keeps its flag");
+            const auto* neutral = loaded.tables->find("Mod_Style_Neutral");
+            expect(neutral && neutral->production.battlefield_bonuses.empty(),
+                "WBR-02: a neutral or nonpositive multiplier writes no entry");
+            // WBR-02..04 sim path: each admitted style (Space, Skirmish, Global, Combat) reaches the live player
+            // ledger of a standalone space battle through the real binding; a reversed handler adds nothing while
+            // its source stands and nothing when the source is removed; the owner alone gains the permission.
+            namespace tactical = eawr::sim::tactical;
+            for (const std::string name : {"Mod_Style_0", "Mod_Style_1", "Mod_Style_2", "Mod_Style_3", "Mod_Style_Reverse"}) {
+                const bool reversed = name == "Mod_Style_Reverse";
+                eawr::skirmish::SkirmishStart start;
+                start.setup.seed = 7696;
+                start.setup.players = {{1, 0, 1, 1}, {2, 1, 2, 1}};
+                const auto type = eawr::skirmish::type_id(name);
+                start.setup.units = {{1, type, 1, {}, eawr::sim::math::identity_quat(), {}}};
+                auto compiled = eawr::skirmish::economy_rules(start, {}, *loaded.tables);
+                auto abilities = eawr::units::ability_table(*loaded.tables);
+                expect(compiled && abilities, "WBR-02..04: ledger-effect content compiles");
+                if (!compiled || !abilities) continue;
+                const auto ledger_rows = static_cast<std::size_t>(std::count_if(compiled.value().command_bonuses.begin(),
+                    compiled.value().command_bonuses.end(), [&](const auto& row) { return row.battlefield && row.type == type; }));
+                expect(ledger_rows == (reversed ? 0U : 1U), "WBR-04: a reversed handler binds no ledger row");
+                for (const auto& row : compiled.value().command_bonuses) {
+                    if (!row.battlefield || row.type != type) continue;
+                    expect(row.stealth_delta == Fixed::from_raw(raw(1) / 2) && row.capture_delta == Fixed::from_raw(-raw(1) / 2)
+                        && row.special_weapons && row.apply_to_self && !row.all_allies && row.bonus.stacking_category == 2,
+                        "WBR-02/03: the bound row carries the authored deltas");
+                }
+                compiled.value().players = {{1, {}, 100, false, {}}, {2, {}, 100, false, {}}};
+                auto created = tactical::TacticalSession::create(start.setup, {}, {}, {}, {}, {}, {}, abilities.value(), compiled.value());
+                expect(static_cast<bool>(created), "WBR-02..04: ledger-effect session creates");
+                if (!created) continue;
+                auto& world = created.value();
+                const auto permission = [&](const std::size_t index) { return world.snapshot()->economy()[index].special_weapons_enabled; };
+                expect(permission(0) == !reversed && !permission(1),
+                    "WBR-03: a live source gives its owner the permission, a reversed one nothing, and never the enemy");
+                const eawr::platform::ThreadWorkerAdapter executor(1);
+                expect(static_cast<bool>(world.stage_remove(1)) && static_cast<bool>(world.step(executor)),
+                    "WBR-03: source removal commits");
+                expect(!permission(0) && !permission(1), "WBR-03/04: removal leaves no permission, reversed or not");
+            }
+        }
+    }
     subobject_list_tables();
     structure_soft_radius_tables();
     signed_weaken_reduction_tables();
+    redirect_carrier_class_tables();
+    redirect_carrier_inheritance_tables();
     class_agnostic_reveal_targeting_weapon_tables();
     // AV-05: XML overrides must reach the collision query, independently on each axis. The hard extents are
     // fields of the shared object type, so every class that can stand in a space battle takes the same path.

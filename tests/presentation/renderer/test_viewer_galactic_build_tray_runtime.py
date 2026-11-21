@@ -1,8 +1,9 @@
 """GBT-01 to GBT-03, GBT-13: the galactic build tray in the galaxy view (docs/ui/galactic-build-tray.md).
 
 A stock Empire sandbox staged at tech 5 with a level 5 star base offers more space choices than the bar has slots, so
-the handle appears; the stock start fits the bar, so it does not. A tray entry buys through the bar's own path. With
-the Tweaks switch off nothing is built and nothing about the tray is reported, even with a broken grouping file.
+the handle reads +N; the stock start fits the bar, and its handle is there all the same, with no count, and the tray
+and Tab open on it (owner, 2026-11-19). A tray entry buys through the bar's own path. With the Tweaks switch off
+nothing is built and nothing about the tray is reported, even with a broken grouping file.
 """
 import json
 import os
@@ -145,6 +146,13 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
                 if len(fields) == 3 and fields[:2] == ["Empire", "Coruscant"] and "Star_Base" in fields[2]:
                     node.text = "Empire, Coruscant, Empire_Star_Base_5"
         (xml / "campaigns_underworld_gc.xml").write_bytes(ET.tostring(tree, encoding="utf-8"))
+        # Since the bar binds every numbered slot (GHUD-S91, 26 in stock FoC), Coruscant's choices fit the bar; the mod
+        # authors the slot limit (GHUD-S92) at 16, 8 per row, so the space list overflows and the tray has work to do.
+        constants = ET.fromstring(Corpus(pathlib.Path(GAME_ROOT)).read_effective("foc", "data/xml/gameconstants.xml").data)
+        for old in constants.findall("Strategic_Command_Bar_Buildable_Row_Count"):
+            constants.remove(old)
+        ET.SubElement(constants, "Strategic_Command_Bar_Buildable_Row_Count").text = "16"
+        (xml / "GameConstants.xml").write_bytes(ET.tostring(constants, encoding="utf-8"))
         # GBT-14: a copy whose Coruscant also has the stock ground factories, so the GROUND tab overflows too.
         cls.ground_mod = cls.directory / "mod-ground"
         shutil.copytree(cls.mod, cls.ground_mod)
@@ -167,7 +175,7 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         return self.tab_point("b_space_tab")
 
     def run_viewer(self, name, *, overflow, space, open_tray=False, clicks=(), switch=None, layer=None, tray_key=None,
-                   mod=None):
+                   mod=None, size="1280x720"):
         settings = self.directory / (name + ".cfg")
         lines = ["eawr-settings 1", "revised_layer_enabled=1", "revised_layer_path=" + (layer or self.layer).as_posix()]
         if switch is not None:
@@ -186,7 +194,7 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
                      "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on"]
         if overflow:
             arguments += ["--eawr-mod-root", str(mod or self.mod)]
-        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", size,
                                  "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--", *arguments],
                                 cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
         log = result.stdout + result.stderr
@@ -197,16 +205,53 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         self.assertTrue(capture.is_file(), log)
         return data, log
 
-    def test_a_fitting_planet_has_no_handle_and_the_bar_is_unchanged(self):
+    def test_the_bar_keeps_a_right_margin_at_every_window_size(self):
+        # GHUD-S99 (#8022): the bar was clipped at the screen's right edge below a width and flush above it. Every drawn
+        # control ends at least as far from the right edge as the first control starts from the left one, at the sizes
+        # the owner plays (4:3 to ultrawide); the stock bar and the 16-slot bar of the overflow mod.
+        sizes = ("1024x768", "1280x720", "1366x768", "1600x900", "1920x1080", "3440x1440")
+        for overflow in (False, True):
+            for size in sizes:
+                width = int(size.split("x")[0])
+                data, _ = self.run_viewer("margin-%s-%d" % (size, overflow), overflow=overflow, space=False, size=size)
+                shown = [c["rect"] for c in data["command_bar"]["controls"] if c["visible"] and c["rect"][2] > 0]
+                self.assertTrue(shown, (size, "the bar draws controls"))
+                left_gap = min(rect[0] for rect in shown)
+                right_gap = width - max(rect[0] + rect[2] for rect in shown)
+                self.assertGreaterEqual(right_gap, left_gap - 0.5, (size, overflow, "right margin vs left", left_gap, right_gap))
+                self.assertGreater(right_gap, 0.0, (size, overflow, "the bar ends inside the screen"))
+                self.assertGreater(left_gap, 0.0, (size, overflow, "and starts inside it: the same margin on the left"))
+
+    def test_a_fitting_planet_has_the_handle_without_a_count_and_the_bar_is_unchanged(self):
         data, _ = self.run_viewer("fitting", overflow=False, space=False)
         tray = data["build_tray"]
         self.assertTrue(tray["enabled"], tray)
         self.assertEqual(tray["omitted"], 0, "the stock start fits the bar")
-        self.assertFalse(tray["handle"], tray)
-        self.assertEqual(tray["entries"], 0, tray)
+        self.assertTrue(tray["handle"], "the handle is always there for a planet with choices")
+        self.assertEqual(tray["handle_text"], "+", "no count when the bar omits nothing")
+        self.assertFalse(tray["open"], tray)
+        self.assertEqual(tray["entries"], 0, "closed: no entry is drawn")
         off, _ = self.run_viewer("fitting-off", overflow=False, space=False, switch=False)
+        self.assertFalse(off["build_tray"]["handle"], off["build_tray"])
         self.assertEqual(data["command_bar"]["production_choices"], off["command_bar"]["production_choices"],
                          "the bar's cards are the same with the tray on and off")
+
+    def test_a_fitting_planet_opens_the_tray_from_the_handle_and_the_key_with_the_bars_choices(self):
+        data, _ = self.run_viewer("fits-open", overflow=False, space=False, open_tray=True,
+                                  clicks=[{"key": "Tab"}, {"key": "Tab"}])
+        steps = json.loads((self.directory / "fits-open-steps.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(steps), 2, steps)
+        self.assertEqual(steps[0], {"handle": True, "panel": False}, "Tab closes the tray the handle opened")
+        self.assertEqual(steps[1], {"handle": True, "panel": True}, "Tab opens it again with nothing omitted")
+        tray = data["build_tray"]
+        self.assertEqual(tray["omitted"], 0, tray)
+        self.assertEqual(tray["handle_text"], "+", tray)
+        self.assertTrue(tray["open"], tray)
+        self.assertEqual((tray["handle_presses"], tray["key_presses"]), (1, 2), tray)
+        bar = {card["type_id"] for card in data["command_bar"]["production_choices"]}
+        self.assertTrue(bar, "the stock start has choices on the bar")
+        self.assertEqual({entry["type_id"] for entry in tray["shown_entries"]}, bar,
+                         "the tray lists the very choices the bar shows, grouped")
 
     def test_switch_off_builds_and_reports_nothing(self):
         data, log = self.run_viewer("off", overflow=True, space=True, switch=False, layer=self.broken_layer)
@@ -224,6 +269,7 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         self.assertTrue(opened["command_bar"]["space_tab"], opened["command_bar"])
         self.assertGreater(tray["omitted"], 0, "tech 5 with a level 5 star base offers more space choices than the bar holds")
         self.assertTrue(tray["handle"] and tray["open"], tray)
+        self.assertEqual(tray["handle_text"], "+%d" % tray["omitted"], "the handle counts what the bar omits")
         self.assertEqual(tray["handle_presses"], 1, tray)
         entries = tray["shown_entries"]
         self.assertEqual(len(entries), tray["entries"], tray)
@@ -246,8 +292,8 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         self.assertEqual(same[0], same[1], "the tray entry queues exactly what the bar card queues")
 
     def test_the_open_state_lasts_and_the_tray_key_acts_like_the_handle(self):
-        """GBT-07: Tab closes and opens the tray like the handle; a planet tab whose choices fit hides handle and tray
-        but keeps the open state, so the tray is back on the overflowing tab; a focused text field keeps the key."""
+        """GBT-07: Tab closes and opens the tray like the handle; a planet tab whose choices fit the bar keeps the handle
+        and the open tray (nothing omitted is no reason to hide them); a focused text field keeps the key."""
         ground, space = self.tab_point("b_planet_tab"), self.space_point()
         data, _ = self.run_viewer("open-state", overflow=True, space=True, open_tray=True, clicks=[
             {"key": "Tab"}, {"key": "Tab"}, ground, space, {"move": [640, 160]}, {"key": "F", "ctrl": True}, {"key": "Tab"}])
@@ -255,16 +301,16 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         self.assertEqual(len(steps), 7, steps)
         self.assertEqual(steps[0], {"handle": True, "panel": False}, "Tab closes the open tray")
         self.assertEqual(steps[1], {"handle": True, "panel": True}, "Tab opens it again")
-        self.assertEqual(steps[2], {"handle": False, "panel": False}, "the ground tab fits: no handle and no tray")
+        self.assertEqual(steps[2], {"handle": True, "panel": True}, "the ground tab fits the bar: the handle and the open tray stay")
         self.assertEqual(steps[3], {"handle": True, "panel": True}, "back on the space tab the tray is still open")
         self.assertTrue(steps[5]["panel"] and steps[6]["panel"], "the planet search's text field keeps Tab")
         self.assertGreaterEqual(data["planet_search"]["opens"], 1, "Ctrl+F opened the planet search")
         tray = data["build_tray"]
         self.assertEqual((tray["handle_presses"], tray["key_presses"], tray["open"]), (1, 2, True), tray)
 
-    def test_a_rebound_key_fires_and_is_ignored_with_modifiers_without_a_handle_and_under_a_modal(self):
-        """GBT-07: with the key rebound to B, Tab and Ctrl+B do nothing and B toggles; on a tab whose choices fit (no
-        handle) B does nothing; with the menu open (a modal) B does nothing."""
+    def test_a_rebound_key_fires_and_is_ignored_with_modifiers_and_under_a_modal(self):
+        """GBT-07: with the key rebound to B, Tab and Ctrl+B do nothing and B toggles, also on a tab whose choices fit
+        the bar (the handle is there all the same); with the menu open (a modal) B does nothing."""
         ground, space = self.tab_point("b_planet_tab"), self.space_point()
         data, _ = self.run_viewer("rebound", overflow=True, space=True, open_tray=True, tray_key="B", clicks=[
             {"key": "Tab"}, {"key": "B", "ctrl": True}, {"key": "B"}, {"key": "B"}, ground, {"key": "B"}, space,
@@ -274,10 +320,11 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         self.assertTrue(steps[0]["panel"] and steps[1]["panel"], "Tab and Ctrl+B leave the tray as it is")
         self.assertEqual(steps[2], {"handle": True, "panel": False}, "the rebound key closes the tray")
         self.assertEqual(steps[3], {"handle": True, "panel": True}, "and opens it")
-        self.assertEqual(steps[5], {"handle": False, "panel": False}, "no handle: the key does nothing")
-        self.assertTrue(steps[6]["panel"], "the open state is kept for the overflowing tab")
+        self.assertEqual(steps[4], {"handle": True, "panel": True}, "the ground tab fits the bar: handle and tray stay")
+        self.assertEqual(steps[5], {"handle": True, "panel": False}, "the key closes the tray there too")
+        self.assertEqual(steps[6], {"handle": True, "panel": False}, "and the closed state is kept on the space tab")
         tray = data["build_tray"]
-        self.assertEqual(tray["key_presses"], 2, "only the two bare B presses with a handle and no modal count")
+        self.assertEqual(tray["key_presses"], 3, "the three bare B presses with a handle and no modal count")
 
     def test_queued_items_are_never_covered_by_the_tray_and_never_cover_the_handle(self):
         """GBT-14 (owner pick B): with items queued, the queue strip the open tray would cover moves up above the tray,
@@ -317,6 +364,25 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
             self.assertTrue(handle[1] - 12 <= bottom <= handle[1] + 0.01,  # 0.01: the report's six-digit rounding
                             f"closed, the strip is lifted just clear of the handle (bottom {bottom}, handle top {handle[1]})")
 
+    def test_a_queued_strip_clears_the_always_shown_handle_on_a_fitting_planet(self):
+        """GBT-02, GBT-14 (owner, 2026-11-19): on a planet whose choices all fit the bar the handle is shown all the same;
+        a queue strip that would sit under it moves up to clear it, closed and open. The capture
+        (fits-queued.png beside the report) is the eye check of that case."""
+        opened, _ = self.run_viewer("fits-queue-open", overflow=False, space=False)
+        cards = {control["name"]: control["hit_rect"] for control in opened["command_bar"]["controls"]}
+        data, _ = self.run_viewer("fits-queued", overflow=False, space=False, open_tray=True, clicks=[
+            centre(cards["b_Create_00"]), centre(cards["b_Create_01"]), {"key": "Tab"}])
+        tray = data["build_tray"]
+        self.assertEqual(tray["omitted"], 0, tray)
+        self.assertTrue(tray["handle"] and not tray["open"], tray)
+        queue = [control for control in data["command_bar"]["controls"]
+                 if control["name"].startswith("queue") and control["visible"]]
+        self.assertGreaterEqual(len(queue), 1, "something is queued and shown")
+        for control in queue:
+            a, b = control["rect"], tray["handle_rect"]
+            self.assertFalse(a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3],
+                             f"{control} covers the handle")
+
     def test_the_land_strip_is_never_covered_on_the_ground_tab(self):
         """GBT-14 on the GROUND tab: with the stock ground factories at Coruscant the ground list overflows; land units
         queued with the tray open: no visible land-strip slot meets the tray or the handle."""
@@ -354,9 +420,32 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         self.assertLessEqual(tray["rows"], 7, "the 7-row budget")
         self.assertEqual(tray["lost"], 0, "every choice has a place: the rows fill, then the panel widens")
         panel, bar = tray["panel_rect"], tray["bar_rect"]
-        self.assertGreaterEqual(panel[2] + 0.5, bar[2], "the automatic width starts at the bar's width")
+        # #7952: the panel ends at the planet info card, whose left edge the stock layout gives.
+        card_left = tray["planet_info_left"]
+        self.assertGreater(card_left, bar[0], "the stock bar has a planet info card right of the bar's start")
+        self.assertLessEqual(panel[0] + panel[2], card_left + 0.5, "the tray never reaches into the planet info card")
+        # Auto is the whole span to the card (at most 60 percent of the 1280 px view), whatever the bar's own width.
+        span = min(card_left, bar[0] + 0.6 * 1280, 1280) - bar[0]
+        self.assertAlmostEqual(panel[2], span, delta=0.5, msg=f"the tray fills the span to the planet info card: {panel} vs {span}")
         self.assertLessEqual(panel[0] + panel[2], 1280 + 0.5, "and never leaves the view")
+        sample = tray["backdrop"]["back_sample"]
+        self.assertTrue(bar[0] - 0.5 <= sample[0] < sample[1] <= bar[0] + bar[2] + 0.5,
+                        f"the back samples only bar art inside the bar's own span (#7952): {sample} of {bar}")
         self.assertAlmostEqual(panel[0], bar[0], delta=0.5, msg="the panel starts at the bar's left edge")
+        # GHUD-S74 (#7956): each bar card's icon draws at its own texture size times one factor (the component Scale at
+        # this UI scale), centred on the card, aspect kept; never stretched to the card.
+        factors = set()
+        for choice in data["command_bar"]["production_choices"]:
+            texture, icon = choice["icon_texture_size"], choice["icon_rect"]
+            if not texture[0] or not texture[1]:
+                continue
+            fx, fy = icon[2] / texture[0], icon[3] / texture[1]
+            self.assertAlmostEqual(fx, fy, delta=0.01, msg=f"aspect kept: {choice['icon']} {texture} drawn {icon}")
+            factors.add(round(fx, 2))
+            bar_card = next(control["rect"] for control in data["command_bar"]["controls"] if control["name"] == choice["button"])
+            self.assertAlmostEqual(icon[0] + icon[2] / 2, bar_card[0] + bar_card[2] / 2, delta=0.6, msg=f"centred: {choice}")
+            self.assertAlmostEqual(icon[1] + icon[3] / 2, bar_card[1] + bar_card[3] / 2, delta=0.6, msg=f"centred: {choice}")
+        self.assertEqual(len(factors), 1, f"one size factor for every icon, so none is fitted to the card: {factors}")
         card = next(control["rect"] for control in data["command_bar"]["controls"] if control["name"] == "b_Create_00")
         scale = tray["entry_scale"]
         self.assertIn(scale, (0.75, 0.6), tray)

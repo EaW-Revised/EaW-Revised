@@ -42,7 +42,7 @@ int case_galactic_tour_tests() {
         assert(!tour_may_play({true, true, false}));   // paused: the bands would hide the pause banner and its Resume Game button
         assert(!tour_may_play({true, false, true}));   // a battle prompt (the original refuses while a battle is resolved)
         assert(!tour_may_play({}));
-        // GCT-01: every modal of the one set stops the start, one case per member (GalaxyModals has eleven; its size check
+        // GCT-01: every modal of the one set stops the start, one case per member (GalaxyModals has eleven modal members plus the battle_choice flag; its size check
         // forces this table to grow with it).
         constexpr bool GalaxyModals::*members[] = {&GalaxyModals::retreat_dialog, &GalaxyModals::save_menu, &GalaxyModals::campaign_score,
             &GalaxyModals::battle_prompt, &GalaxyModals::story_summary, &GalaxyModals::reference_pages, &GalaxyModals::hero_menu,
@@ -54,6 +54,21 @@ int case_galactic_tour_tests() {
             modals.*member = true;
             assert(modals.any());
             assert(!tour_may_play({true, false, modals.any()}));
+        }
+        // #7798: only a pending battle CHOICE leaves the camera and the finder free; it still stops the tour; a result phase blocks all.
+        {
+            GalaxyModals pending;
+            pending.battle_prompt = pending.battle_choice = true;
+            assert(pending.any() && !pending.blocks_camera() && !tour_may_play({true, false, pending.any()}));
+            GalaxyModals result;
+            result.battle_prompt = true;
+            assert(result.any() && result.blocks_camera());
+            for (const auto member : members) {
+                GalaxyModals modals;
+                modals.*member = true;
+                modals.battle_choice = true; // the choice flag never frees a different modal
+                assert(modals.blocks_camera() == (member != &GalaxyModals::battle_prompt));
+            }
         }
     }
     {

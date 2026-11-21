@@ -886,6 +886,36 @@ std::optional<ReadLocation> Vfs::read_location(const AssetRecord& candidate) con
     return std::nullopt;
 }
 
+struct RangeReader::State {
+    std::ifstream stream;
+    std::uint64_t base{0};
+    std::uint64_t size{0};
+};
+
+RangeReader::RangeReader(std::unique_ptr<State> state) noexcept : state_(std::move(state)) {}
+RangeReader::RangeReader(RangeReader&&) noexcept = default;
+RangeReader& RangeReader::operator=(RangeReader&&) noexcept = default;
+RangeReader::~RangeReader() = default;
+
+bool RangeReader::read(const std::uint64_t offset, const std::span<std::byte> out) {
+    if (!state_ || offset > state_->size || out.size() > state_->size - offset) return false;
+    state_->stream.clear();
+    state_->stream.seekg(static_cast<std::streamoff>(state_->base + offset));
+    state_->stream.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(state_->stream) && static_cast<std::size_t>(state_->stream.gcount()) == out.size();
+}
+
+std::optional<RangeReader> Vfs::open_range(const AssetRecord& candidate) const {
+    const auto where = read_location(candidate); // the same restriction: a view with a content contract has no native bytes
+    if (!where) return std::nullopt;
+    auto state = std::make_unique<RangeReader::State>();
+    state->stream.open(std::filesystem::path(where->source), std::ios::binary);
+    if (!state->stream) return std::nullopt;
+    state->base = where->offset;
+    state->size = candidate.size;
+    return RangeReader(std::move(state));
+}
+
 std::optional<SourceStamp> Vfs::source_stamp(const AssetRecord& candidate) const {
     if (source_ || !impl_) return std::nullopt;
     const auto found = impl_->by_path.find(candidate.canonical_path);

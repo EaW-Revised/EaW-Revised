@@ -104,6 +104,24 @@ checkout's `out/fonts/`. A packaged viewer has no checkout, so pass the director
 script wrote with `--out`. Without the cache, text falls back by rule UI-F3 to the default
 Unicode face and then to the engine's own font.
 
+## Which Godot to use: our patched engine
+
+The root C++ build never touches Godot. Anything that runs the game viewer does, and EAWR is built and tested on **our
+patched Godot**, not on the official download: the fork [Thom-Ernst/godot](https://github.com/Thom-Ernst/godot), branch
+`eawr/4.7.2-stable` (4.7.2-stable plus our patches: Separate-render-thread fixes and a memory fix; patch list and licence notes in
+[third_party/godot/README.md](../third_party/godot/README.md)). The Windows x64 exe is on the fork's releases
+(`eawr-4.7.2-5b733a90f`, with `SHA256-SUMS.txt`); its SHA-256 is pinned in `tools/engine_pins.json` and
+`tools/release/package_release.py` (`fetch_pinned_godot.ps1` pins the SHA-512 of the release zip). There is no patched Linux, ARM64 or macOS build yet; build the fork yourself from the branch
+(`BUILD_NAME=eawr`) if you need one.
+
+What the official 4.7.2 download does, so you are not surprised ([engine guard](engine-guard.md)):
+
+- Tests, gates, benchmarks and rig runs refuse it (the viewer exits with code 7, `EAWR-ENGINE-UNPATCHED`).
+- Normal play starts, but only in the Safe render thread mode (`--render-thread safe`, which `play-demo` passes), with
+  `UNPATCHED ENGINE` in the window title and the log. It is for trying the game, not for performance numbers or bug reports.
+- `prototypes/godot/install_dependencies.ps1` fetches the official engine for the prototype and the GDExtension build
+  only; do not run the viewer's tests on it.
+
 ## Selected Godot prototype
 
 The retained presentation prototype is standalone so the root headless matrix stays

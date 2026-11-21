@@ -7,6 +7,7 @@
 #include "eawr/sim/galactic/story_engine.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "../../src/script/foc/mode_time.hpp"
+#include "../../src/campaign/galactic_object_perception.hpp"
 
 #include <bit>
 #include <filesystem>
@@ -1646,6 +1647,89 @@ end
         && bare.first.diagnostics.front().message.find("native shadow") != std::string::npos,
         "Spawn_Unit without a native shadow host is a script error naming the missing host: its thread ends before anything is created");
 }
+// GA-08..13: a scripted start (a mod's starting forces) walks every planet, reads its owner and the owner's faction, asks
+// perception equations about it and spawns by combat rating. Synthetic names and values only.
+void story_world_reads(const std::filesystem::path& root) {
+    namespace gc = eawr::sim::galactic;
+    using Number = eawr::script::numeric::LuaNumber;
+    gc::SyntheticGalaxyOptions shape; shape.players = 2; shape.planets = 4;
+    auto world = take(gc::GalacticSession::create(gc::synthetic_galaxy(shape)));
+    const auto base = world.snapshot();
+    std::vector<gc::PlanetId> ids;
+    for (const auto& row : base->planets()) ids.push_back(row.id);
+    std::sort(ids.begin(), ids.end());
+    const auto owner_of = [&](gc::PlanetId id) {
+        for (const auto& row : base->planets()) if (row.id == id) return row.owner;
+        return gc::PlayerId{};
+    };
+    gc::CensusObject unit{}; unit.id = 40; unit.original_type = 70; unit.current_type = 70; unit.owner = 2; unit.planet = ids.front();
+    gc::NativeSnapshotChanges changes;
+    changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(std::vector<gc::CensusObject>{unit});
+    const std::shared_ptr<const gc::GalacticSnapshot> published = gc::GalacticSnapshot::native_view(base, std::move(changes));
+
+    const auto data = root / "equations" / "loose";
+    std::filesystem::remove_all(root / "equations");
+    write(data / "xml" / "ai" / "perceptualequations" / "probe.xml", "<?xml version=\"1.0\" ?>\n<Equations>\n"
+        "\t<Probe_Wealthy>\n\t\tVariable_Target.BaseIncome > 0.5\n\t</Probe_Wealthy>\n"
+        "\t<Probe_Surface>\n\t\tVariable_Target.IsSurfaceAccessible\n\t</Probe_Surface>\n</Equations>\n");
+    eawr::vfs::MountSpec mount; mount.layer_id = "story-world-equations"; mount.data_root = data;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+
+    cpn::GalacticStoryPlayers players{};
+    players.factions = {"Copper", "Indigo"};
+    players.players = {{1, "Copper", "Normal"}, {2, "Indigo", "Normal"}};
+    players.players[1].neutral = true;
+    players.types = {{"Probe_Ship", 70}};
+    players.type_combat_ratings.emplace(70, Number(125));
+    players.planet_base_income.emplace(ids[0], Number::from_repr(std::bit_cast<std::uint64_t>(0.75)));
+    players.planet_base_income.emplace(ids[1], Number::from_repr(std::bit_cast<std::uint64_t>(0.25)));
+    players.perception = take(cpn::GalacticObjectPerception::load(files));
+    const std::string body = R"LUA(
+function main()
+    local planets = FindPlanet.Get_All_Planets()
+    Count = table.getn(planets)
+    Ascending = true
+    for i = 2, Count do if planets[i - 1] == planets[i] then Ascending = false end end
+    local owner = planets[1].Get_Owner()
+    OwnerFaction = owner.Get_Faction_Name()
+    OwnerIsLookup = owner == Find_Player(owner.Get_Faction_Name())
+    IndigoNeutral = Find_Player("Indigo").Is_Neutral()
+    CopperNeutral = Find_Player("Copper").Is_Neutral()
+    local ship = Find_First_Object("Probe_Ship")
+    ShipOwnerIndigo = ship.Get_Owner() == Find_Player("Indigo")
+    Rating = Find_Object_Type("Probe_Ship").Get_Combat_Rating()
+    Wealthy = EvaluatePerception("Probe_Wealthy", owner, planets[1])
+    Poor = EvaluatePerception("Probe_Wealthy", owner, planets[2])
+    ViaShip = EvaluatePerception("Probe_Wealthy", owner, ship)
+    SurfaceFails = not pcall(EvaluatePerception, "Probe_Surface", owner, planets[1])
+    NoIncomeFails = not pcall(EvaluatePerception, "Probe_Wealthy", owner, planets[3])
+    DestroyedFails = not pcall(planets[1].Is_Planet_Destroyed)
+    Done = true
+end
+)LUA";
+    std::string reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto run = run_scripted(root, "reads_" + std::to_string(workers), body, false, 4242, executor, players, [&] { return published; });
+        const auto text = take(run.scripts.read_global(run.instance, "OwnerFaction"));
+        const std::string expected = owner_of(ids.front()) == 1 ? "COPPER" : "INDIGO";
+        expect(flag_global(run, "Done"), "the world-read script runs to its end");
+        expect(integer_global(run, "Count") == static_cast<std::int64_t>(ids.size()) && flag_global(run, "Ascending"),
+            "FindPlanet.Get_All_Planets lists every planet once (GA-08)");
+        expect(text && std::get<std::string>(text->data) == expected && flag_global(run, "OwnerIsLookup"),
+            "a planet's Get_Owner is its owner and Get_Faction_Name is the upper-case faction identifier (GA-09, GA-10)");
+        expect(flag_global(run, "IndigoNeutral") && !flag_global(run, "CopperNeutral"), "Is_Neutral follows the faction flag (GA-10)");
+        expect(flag_global(run, "ShipOwnerIndigo"), "a unit's Get_Owner is the unit's owner (GA-09)");
+        expect(integer_global(run, "Rating") == 125, "Get_Combat_Rating answers the type's combat power metric (GA-12)");
+        expect(integer_global(run, "Wealthy") == 1 && integer_global(run, "Poor") == 0 && integer_global(run, "ViaShip") == 1,
+            "EvaluatePerception reads the campaign's base income for a planet, and for a unit its planet (GA-13)");
+        expect(flag_global(run, "SurfaceFails") && flag_global(run, "NoIncomeFails") && flag_global(run, "DestroyedFails"),
+            "a lookup the completed world cannot answer is a script error, never a made-up number (GA-11, GA-13)");
+        const auto hash = take(run.scripts.state_hash());
+        if (reference.empty()) reference = hash;
+        expect(hash == reference, "story world reads agree across worker counts");
+    }
+}
 } // namespace
 
 int case_galactic_story_script_host_tests(int argc, char** argv) {
@@ -1668,6 +1752,7 @@ int case_galactic_story_script_host_tests(int argc, char** argv) {
         live_object_and_difficulty(root / "objects");
         advisor_hints_stub(root / "hints");
         spawn_bindings(root / "spawn");
+        story_world_reads(root / "world-reads");
         object_binding_primitives();
         object_perception_unavailable();
         object_sale_bindings();

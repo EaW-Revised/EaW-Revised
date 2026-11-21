@@ -772,8 +772,8 @@ void checkpoint_screen_reconciles_by_peer() {
     std::size_t calls = 0;
     for (auto at = source.find("viewer::reconcile_checkpoint_bindings("); at != std::string::npos;
          at = source.find("viewer::reconcile_checkpoint_bindings(", at + 1)) ++calls;
-    // The two real call sites plus the restore fixture's own seat assignment (#7858).
-    expect(calls == 3, "exactly the two screen call sites and the restore fixture fit the assignment to the room (found " + std::to_string(calls) + ")");
+    // The two real call sites, the restore fixture's own seat assignment (#7858) and the seat assignment applied again to a converted save (#7881).
+    expect(calls == 4, "exactly the two screen call sites, the restore fixture and the converted-save re-apply fit the assignment to the room (found " + std::to_string(calls) + ")");
     const auto read = source.find("void EawrLanLobby::process_checkpoint_read()");
     const auto select = source.find("void EawrLanLobby::new_campaign()", read);
     expect(read != std::string::npos && select != std::string::npos, "the saved-game read source is present");
@@ -821,11 +821,37 @@ void saved_mod_details() {
     expect(static_cast<bool>(bytes), "checkpoint encodes");
     if (!bytes) return;
     const auto same = eawr::viewer::saved_game_mod_details(bytes.value(), saved);
-    expect(same == "Mods: Alpha, Beta\nMatches mounted mods", "names retain load order and a complete match is shown");
+    expect(same == "Mods:\n- Alpha (installed)\n- Beta (installed)\nMatches mounted mods", "names retain load order, one per row, and a complete match is shown");
     const auto different = eawr::viewer::saved_game_mod_details(bytes.value(), {true, {b, a}});
     expect(different.find("Different from mounted mods") != std::string::npos, "reordering is reported");
     const auto unknown = eawr::viewer::saved_game_mod_details(bytes.value(), {});
-    expect(unknown.find("Match could not be fully checked") != std::string::npos, "incomplete mounted information is not a match");
+    expect(unknown.find("Match could not be fully checked") == std::string::npos && unknown.find("Not fully checked:") != std::string::npos
+        && unknown.find("Mod details are incomplete.") != std::string::npos,
+        "incomplete mounted information is not a match and says plainly what could not be checked");
+    // Mounted info still incomplete (discovery not finished): no row may read "(installed)" or "(missing)"; it reads not checked yet.
+    expect(unknown.find("(installed)") == std::string::npos && unknown.find("(missing)") == std::string::npos
+        && unknown.find("- Alpha (not checked yet)\n- Beta (not checked yet)") != std::string::npos,
+        "rows are not claimed installed while the mounted mods are unknown");
+    // A saved mod that is identified in the incomplete mounted list is still installed; the other is unchecked.
+    const auto partial = eawr::viewer::saved_game_mod_details(bytes.value(), mods::ModDescription{false, {a}});
+    expect(partial.find("- Alpha (installed)\n- Beta (not checked yet)") != std::string::npos, "an identified mounted mod stays installed beside an unchecked one");
+    // Three saved mods whose names are only Workshop ids: two installed (names from installed data), one missing.
+    mods::DescriptionEntry x = a, y = a, z = a;
+    x.key = "workshop:111"; x.name = "Workshop item 111"; y.key = "workshop:222"; y.name = "Workshop item 222";
+    z.key = "workshop:333"; z.name = "Workshop item 333";
+    const mods::ModDescription three{true, {x, y, z}};
+    const auto names = [](const std::string& key) -> std::string {
+        return key == "workshop:111" ? "Thrawn Mod" : key == "workshop:222" ? "Old Alliance" : "";
+    };
+    const auto rows = eawr::viewer::saved_game_mod_details(std::optional<mods::ModDescription>{three}, {true, {x, y}}, names);
+    expect(rows.find("- Thrawn Mod (installed)") != std::string::npos && rows.find("- Old Alliance (installed)") != std::string::npos
+        && rows.find("- Mod not installed: 333 (missing)") != std::string::npos && rows.find(", ") == std::string::npos,
+        "names come from installed data, one per row, the id only for the mod that is not installed");
+    // A very long installed name stays whole on its own row (the dialog wraps it); it never joins the next row.
+    const std::string long_name(160, 'L');
+    const auto long_rows = eawr::viewer::saved_game_mod_details(std::optional<mods::ModDescription>{three}, {true, {x, y}},
+        [&](const std::string& key) -> std::string { return key == "workshop:111" ? long_name : key == "workshop:222" ? "Old Alliance" : ""; });
+    expect(long_rows.find("- " + long_name + " (installed)\n- Old Alliance") != std::string::npos, "a long mod name is one whole row");
     const auto stored = eawr::viewer::saved_game_mod_description(bytes.value());
     expect(eawr::viewer::saved_game_mod_details(stored, saved) == same,
         "a previously read description can be compared again when mounted details finish loading");

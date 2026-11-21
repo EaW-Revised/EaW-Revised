@@ -141,6 +141,8 @@ public:
     [[nodiscard]] LiveUnit new_unit(const UnitState& unit, const std::uint64_t frame) const;
 
     [[nodiscard]] std::vector<std::size_t> radar_slots(TypeId type) const;
+    [[nodiscard]] bool radar_mode_multiplayer() const;
+    void record_radar_applied(NamedAbilityLocks&, PlayerId owner, TypeId type) const;
     [[nodiscard]] core::Result<std::vector<SnapshotPlayer>> publish_named_abilities(
         std::vector<LiveUnit>& units, const NamedAbilityLocks&, const RadarRoster&, const PartitionExecutor&) const;
 
@@ -160,6 +162,13 @@ public:
     [[nodiscard]] bool tracks_player_reveal() const noexcept {
         return setup.campaign || std::any_of(economy.command_bonuses.begin(), economy.command_bonuses.end(),
             [](const auto& row) { return row.battlefield && row.reveal_delta != math::Fixed{}; });
+    }
+    // WBR-02/03: the stealth, capture-time and special-weapon player ledgers add checkpoint fields only for content
+    // whose live sources author one, so every other closure keeps the bytes it always had.
+    [[nodiscard]] bool tracks_player_effects() const noexcept {
+        return std::any_of(economy.command_bonuses.begin(), economy.command_bonuses.end(), [](const auto& row) {
+            return row.battlefield && (row.stealth_delta != math::Fixed{} || row.capture_delta != math::Fixed{} || row.special_weapons);
+        });
     }
     [[nodiscard]] std::array<math::Fixed, max_players> fog_multipliers(const CommandLedger& ledger) const {
         std::array<math::Fixed, max_players> values{};
@@ -681,6 +690,7 @@ public:
     void append_canonical_sightings_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_garrison_marks_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_script_invulnerable_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_hold_fire_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_craft_state(std::vector<std::uint8_t>& bytes,
         std::span<const std::vector<std::uint8_t>> encoded = {}) const;
     void append_canonical_squadron_orders_state(std::vector<std::uint8_t>& bytes,
@@ -709,6 +719,7 @@ public:
     void append_canonical_ion_stuns_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_hazard_moves_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_final_facing_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_deploy_pose_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_asteroids_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_engine_disable_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_nebula_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
@@ -746,10 +757,14 @@ public:
         const NamedAbilityLocks& locks) const;
     [[nodiscard]] bool ordinary_handler_ready(const LiveUnit& unit, const AbilityProfile& ability,
         const NamedAbilityLocks& locks, SpecialAbilityKind kind) const;
-    void jammer_reactivated(LiveUnit& unit, const AbilityProfile& ability) const;
+    // WJM-05: whether a nested jammer handler carries the row's authored name; without one the row is inert.
+    [[nodiscard]] static bool has_jammer_handler(const UnitAbilityProfile& profile, const AbilityProfile& ability);
+    [[nodiscard]] bool jammer_reactivated(LiveUnit& unit, const AbilityProfile& ability) const;
     // WSH-05: the inclusive planar centre test, then the rolled model box; shared by healing and WSH-09 damage.
     [[nodiscard]] bool heal_in_range(const LiveUnit& source, const LiveUnit& target, math::Fixed reach) const;
     // WSH-13: a healing source is alive by its hull; a squadron company (the team container) has no hull and serves while it exists.
+    // "While it exists" relies on an emptied company being erased (the team's destroy) before the systems stage of the next tick,
+    // so a company with no live member never reaches the service; a hangar-held squadron has no session entity until it launches.
     [[nodiscard]] bool heal_source_serves(const LiveUnit& source) const;
     // WSH-09: immutable selection of due negative-amount automatic handlers and their victims, in source order.
     core::Result<void> select_passive_damage(const UnitStage& staged, const std::map<EntityId, ArrivalState>& arrivals,

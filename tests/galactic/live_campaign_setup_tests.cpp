@@ -606,6 +606,24 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
                 && std::find(host.activated_spy_abilities.begin(), host.activated_spy_abilities.end(), profile->spy->name)
                     != host.activated_spy_abilities.end(),
                 "installed probe has its enabled consuming 60-second Ground_Activated spy and authored route");
+            // WGCH-39/40/206: the stock smuggler's Siphon_Credits_Ability binds through the authored activated-name list.
+            const auto smuggler = std::find_if(host.profiles.begin(), host.profiles.end(), [](const auto& row) { return row.siphon.has_value(); });
+            expect(smuggler != host.profiles.end(), "an installed siphon bearer reaches the live ability host");
+            if (smuggler != host.profiles.end()) {
+                const auto half = eawr::sim::math::Fixed::from_raw(eawr::sim::math::Fixed::scale / 2);
+                expect(smuggler->siphon->minimum == half && smuggler->siphon->maximum == half && smuggler->siphon->cycles == 5
+                    && smuggler->siphon->initially_enabled && smuggler->siphon->causes_despawn
+                    && std::find(smuggler->ground_activated.begin(), smuggler->ground_activated.end(), gc::AbilityKind::credit_siphon)
+                        != smuggler->ground_activated.end()
+                    && std::find(host.activated_siphon_abilities.begin(), host.activated_siphon_abilities.end(), smuggler->siphon->name)
+                        != host.activated_siphon_abilities.end(),
+                    "the stock smuggler siphons half for five cycles, consumes itself and is routed by the authored name list");
+                // WGM-83/102: the stock smuggler does not author the no-ability flag, so it keeps its plain move everywhere.
+                bool travels_freely = false;
+                if (setup.fleet_control) for (const auto& row : setup.fleet_control->types)
+                    if (row.type == smuggler->type) travels_freely = row.can_hyperspace_without_ability;
+                expect(travels_freely, "the stock smuggler still travels freely (it is not ability-bound)");
+            }
         }
         if (name == "Sandbox_Equal_Footing_Underworld") {
             // CGS-21: a synthetic costless original has no force, roster or

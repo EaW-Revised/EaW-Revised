@@ -104,6 +104,7 @@ public:
     }
 
     [[nodiscard]] bool weapon_up(const WeaponProfile& weapon) const {
+        if (unit_.hold_fire) return false; // Prevent_All_Fire disables every weapon, object weapon included
         if (weapon.hardpoint == object_weapon || unit_.durability_profile == nullptr || unit_.durability == nullptr
             || weapon.hardpoint >= unit_.durability_profile->hardpoints.size()) {
             return true;
@@ -115,11 +116,14 @@ public:
         return (weapon.category_restrictions & categories(target)) != 0U;
     }
 
+    [[nodiscard]] static math::Vec3 local_midpoint(const bool has_fire_b, const math::Vec3& fire_a, const math::Vec3& fire_b) noexcept {
+        if (!has_fire_b) return fire_a;
+        return math::Vec3{math::Fixed::from_raw((fire_a.x.raw() + fire_b.x.raw()) / 2),
+            math::Fixed::from_raw((fire_a.y.raw() + fire_b.y.raw()) / 2),
+            math::Fixed::from_raw((fire_a.z.raw() + fire_b.z.raw()) / 2)};
+    }
     [[nodiscard]] math::Vec3 local_midpoint(const WeaponProfile& weapon) const noexcept {
-        if (!weapon.has_fire_b) return weapon.fire_a;
-        return math::Vec3{math::Fixed::from_raw((weapon.fire_a.x.raw() + weapon.fire_b.x.raw()) / 2),
-            math::Fixed::from_raw((weapon.fire_a.y.raw() + weapon.fire_b.y.raw()) / 2),
-            math::Fixed::from_raw((weapon.fire_a.z.raw() + weapon.fire_b.z.raw()) / 2)};
+        return local_midpoint(weapon.has_fire_b, weapon.fire_a, weapon.fire_b);
     }
 
     // Can_Weapon_Point_At for a fixed hardpoint: the point's yaw and pitch in Fire_Bone_A's
@@ -136,6 +140,10 @@ public:
     };
     [[nodiscard]] std::optional<Aim> choose_aim(const WeaponProfile& weapon, const math::Vec3& midpoint,
         const CombatUnit& target, CombatRandom& random, const RangeMetric metric);
+
+    // WDP-05: the weapon bones the unit's running DEPLOY/UNDEPLOY clip has put in place for this frame, read in place;
+    // null for a unit with no clip state (the profile's own bones apply).
+    [[nodiscard]] const WeaponBonePose* posed_bones(std::uint32_t slot) const noexcept;
 
     // Attempt_Fire_At_Target (R-13 and the audit's firing attempt): on success the shot is
     // recorded and the weapon's burst and recharge advance.
@@ -231,7 +239,10 @@ public:
             const auto& weapon = owner_.profile_.weapons[slot_];
             const auto* target = owner_.world_.find(candidate.id);
             if (target == nullptr) return false;
-            const auto midpoint = owner_.world_point(owner_.unit_, owner_.local_midpoint(weapon));
+            // WDP-05: the same posed bones the shot leaves from, so a bone the clip has brought into reach admits the target.
+            const auto* bones = owner_.posed_bones(slot_);
+            const auto midpoint = owner_.world_point(owner_.unit_, bones
+                ? owner_.local_midpoint(weapon.has_fire_b, bones->fire_a, bones->fire_b) : owner_.local_midpoint(weapon));
             return owner_.choose_aim(weapon, midpoint, *target, random_, RangeMetric::spatial).has_value();
         }
         [[nodiscard]] bool attempt(const EntityId target, bool) override { return owner_.attempt(slot_, target, random_); }

@@ -232,6 +232,8 @@ class WatchdogSmoke(unittest.TestCase):
         self.assertEqual(ntdll.NtSuspendProcess(self.handles[0]), 0)
         status = wait_for(lambda: (value if (value := read(self.watchdog_state / "watchdog.json")).get("prompt") else None))
         self.assertGreaterEqual(status["hung_ms"], 3000)
+        self.assertGreaterEqual(status["probe_ms"], 0)
+        self.assertGreaterEqual(status["since_answer_ms"], 0)
         hwnd = wait_for(self.watchdog_window)
         self.assertIn("Force close", windows.child_texts(hwnd))
         self.assertEqual(ntdll.NtResumeProcess(self.handles[0]), 0)

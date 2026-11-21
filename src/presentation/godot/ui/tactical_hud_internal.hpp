@@ -266,6 +266,7 @@ public:
         if (order_icon_) order_icon_->set_texture(texture);
         if (portrait_cell_) queue_redraw();
     }
+    [[nodiscard]] Ref<Texture2D> icon_texture() const { return order_icon_ ? order_icon_->get_texture() : Ref<Texture2D>(); }
     // Keep the button's existing hit mask and press/drag ownership; share its drawing cell.
     void set_portrait_cell_enabled(bool enabled) {
         portrait_cell_ = enabled;

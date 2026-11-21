@@ -376,6 +376,10 @@ reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasin
 | 37 | Tactical super weapon switch (TSW-07; OrderKind 31) | uint32 stage (1 start approach, 2 start power-up), uint32 admission (0 player, 1 AI object call; a human wire packet must carry 0); exactly one listed unit | 48 |
 | 38 | Move with a final facing (MV-40; OrderKind 2) | three int64 destination raw values, int64 yaw raw in [0, 360) degrees, uint32 flags (bit 0 through hazards, bit 1 queued), uint32 reserved (zero); listed units | 72 + 8n |
 | 39 | Direct script object creation (SSU-03; OrderKind 33) | uint64 type, uint32 owner, uint32 reserved (zero), three int64 Q24 position raws, uint64 creation reference; zero listed units, engine-only | 80 |
+| 40 | Script despawn (OrderKind 32) (legacy EAWR-7886) | uint32 reserved (zero), uint32 reserved (zero); one or more listed units, each removed silently from the battle; script host only | 40 + 8n |
+| 41 | Script teleport (Lua Teleport_And_Face; OrderKind 34) | uint64 target unit (nonzero); one or more listed units, each moved to the target's position and facing and stopped there; squadron containers and craft are skipped; script host only | 40 + 8n |
+| 42 | Script hold fire (Lua Prevent_All_Fire; OrderKind 35) | uint32 enabled (0 or 1), uint32 reserved (zero); one or more listed units, a squadron also covering its members; script host only | 40 + 8n |
+| 43 | Script change owner (Lua Change_Owner; OrderKind 36) | uint32 new owner player (a battle player or the pad-neutral player), uint32 reserved (zero); one or more listed units, a squadron container or member also moving the rest of its squadron; script host only | 40 + 8n |
 
 The explicit-facing reinforcement command is an EAWR extension. Its facing drives both the arrival-lane placement sweep and the spawned unit's rotation and flight direction. Each drop carries the local player's chosen value; absence of a wheel choice retains opcodes 11/19 and the player's authored FoC facing, including their existing bytes. A present zero yaw is an explicit choice. Negative yaw and yaw at or above 360 degrees are rejected during command validation.
 
@@ -739,6 +743,7 @@ SHA-256 consumes, without padding:
 | optional | With cached ion-storm contact (WHZ-30/31): ASCII `STMC`, uint64 count, then ascending-ID records of uint64 unit ID and uint64 last shield-service contact frame. Absent when empty. |
 | optional | While a live unit's damage tracking holds damage (WCC-82, AB-42): coordinator-reserved ASCII `DTRK`, uint64 count, then ascending-ID records of uint64 unit ID, int64 window damage raw (hull and shield lost since the rate window last closed) and int64 damage rate raw (per second). Absent when every window and rate is zero. |
 | optional | With any unit holding a Lua `Make_Invulnerable(true)` flag (TL-03): ASCII `SINV`, uint32 block version 1, uint64 flagged count, then the uint64 IDs of the flagged units in ascending order. It follows the garrison birth marks and precedes the craft block; it is absent while no unit is flagged, so other sessions hash as before. The same flag is archived in the tactical checkpoint (see the checkpoint format). |
+| optional | With any unit under a Lua `Prevent_All_Fire(true)` flag: ASCII `SHFR`, uint32 block version 1, uint64 flagged count, then the uint64 IDs of the flagged units in ascending order. It follows `SINV` and precedes the craft block; it is absent while no unit is flagged, so other sessions hash as before. The same flag is archived in the tactical checkpoint (child-state domain +8: domains 45 to 52). |
 | optional | With converted hero purchases (WHE-02/06/07/49): coordinator-reserved ASCII `HERO`, uint64 carrier count, then ascending carrier-ID records of uint64 carrier ID, uint64 logical purchase type and uint64 contained count. Each contained record stores uint64 identity ID, uint64 type, uint64 parent, uint8 flags and uint64 member count followed recursively by its ordered members. Flag bits 0â€“7 mean named, generic, limbo, model visible, collidable, selected, movement coordinated and preserved combat. Riders and team members retain authored creation order. The block is absent without converted purchases; initial replay units cannot carry this derived state. |
 | optional | While jammer-only sources are registered: coordinator-reserved ASCII `PDEF`, uint64 source count, then uint64 source IDs in registration order. Static shield/passive declarations register at creation; jammer-only owners append on activation and leave on termination/death. The block is absent with no active jammer-only sources; static creation order then follows stable IDs. Staged changes commit only after a successful tick. |
 | optional | With nested special-handler state (WHE-09/10/12): coordinator-reserved ASCII `SPAB`, uint64 owner count, then ascending owner-ID records of uint64 owner ID, uint32 service-cancelled, uint32 zero and uint64 slot count. Declared-order slots store uint32 flags (bits 0 enabled, 1 cancelled, 2 successful despawn), uint32 context-present, uint64 next service frame, optional context (uint64 owner and target, uint32 mode: 0 space/1 ground/2 galactic, uint32 flags: owner exists/type exists/death clone/map editor), uint64 tracked-target count and ascending uint64 target IDs. Activation clears its context after Apply; ordinary committed slots therefore have no context. The block is absent with no nested slots. |
@@ -809,6 +814,11 @@ owner, unit is the old station ID, sequence is the replacement ID, and order and
 reason are none. It does not imply death. The viewer transfers selection from the
 old ID to the new ID, even when several completed ticks reach one presentation.
 The command opcode remains buy (9); no new replay command was reserved.
+
+Event 30 `object_owner_changed` reports a Lua `Change_Owner` transition (opcode 43), one event per object that really
+changed owner, in ascending ID order within the command: player is the new owner, sequence the previous owner, unit the
+object. It carries no pad capture cue; the viewer uses it to drop the previous owner's selection and control groups. A
+same-owner call, a missing unit and a player that is not in the battle emit nothing.
 
 Event 10 `pad_captured` reports a real ownership transition, including capture,
 neutralization and child-death reclamation of a surviving pad (WNO-23/42).
@@ -1264,6 +1274,13 @@ holds a facing: a uint64 count, then ascending uint64 entity ID and int64 yaw ra
 facing sets bit 2 of that leg's flag word in the `WYPT` block (bit 0 hazards, bit 1 repeat) and appends its
 int64 yaw raw directly after the flag word. Accepting any other order clears the facing. A land session
 rejects the command until land formations take a heading.
+
+# Deploy clip state (weapon bones)
+A conditional coordinator-reserved `DEPP` state block follows `MVYW` and appears when any live unit holds a deploy
+clip (a type whose `SPOILER_LOCK` DEPLOY/UNDEPLOY clips move a weapon bone off its bind point; behaviour rule WDP-02
+in docs/behaviour/space-weapon-fire.md): a uint64 count, then per unit in ascending ID the uint64 unit, a uint8 for
+the running clip (1 DEPLOY, 0 UNDEPLOY), the uint64 switch frame and the uint32 start frame. A unit whose type has
+no such clips, and one that has not switched, adds nothing, so battles without one keep their bytes.
 
 # Persistent whole-map reveal
 

@@ -423,7 +423,7 @@ LandLocomotionData Loader::land_locomotion(Object& object) {
         if (!path.empty()) {
             if (const auto clip = assets::load_animation(*input_.filesystem, path)) {
                 member.start_clip_frames = clip.value().stored_frame_count;
-                member.start_clip_fps = clip_frames_per_second(clip.value());
+                member.start_clip_fps = clip_frames_per_second(clip.value()).value_or(Fixed{});
             }
         }
     }

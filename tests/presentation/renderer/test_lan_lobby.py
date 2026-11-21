@@ -163,6 +163,19 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertIn("staging_row_count(ids)", screen)
         self.assertNotRegex(screen, r"dialog_rows\s*=\s*\d")
 
+    def test_a_gc_slot_with_several_humans_stacks_one_cell_per_player(self):
+        # #8020: the humans of one slot are listed one per line, in the cell and in the dropdown, never on one clipped line.
+        galactic = source_text("apps/viewer/src/lan_lobby_screen_galactic.cpp")
+        self.assertIn("slot_players[slot].size() >= 2U", galactic)
+        self.assertIn("TextServer::OVERRUN_TRIM_ELLIPSIS", galactic)
+        self.assertIn("EAWR_SLOT_LINE_", galactic)
+        # The cell's mods state is the one the room list already draws, not a second wording.
+        self.assertEqual(galactic.count("model::mod_check_tag("), 1)
+        self.assertEqual(galactic.count("model::mod_check_tag_tiers("), 1)
+        # The row only grows inside the dialog's own last row; the skirmish lobby never shares a slot between humans.
+        self.assertIn("local_rect(*state.dialog, *last).position.y - local_rect(*state.dialog, *drawn_last).position.y", galactic)
+        self.assertNotIn("EAWR_SLOT_LINE_", source_text("apps/viewer/src/lan_lobby_screen_refresh.cpp"))
+
     def test_skirmish_humans_have_distinct_map_bounded_rows(self):
         screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         self.assertIn("network_row_count(*map)", screen)
@@ -1227,6 +1240,58 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertEqual(cancelled["panel_button"], "Apply saved seats / Retry")
         self.assertFalse(cancelled["panel_button_disabled"], "the lobby can apply the seats again without leaving")
 
+    def test_a_refusal_for_old_battle_records_offers_the_recovery_button_and_says_what_was_dropped(self):
+        # #7881 layout check without the player's campaign: recover_fixture:N is a host whose restore was refused because N finished-
+        # battle records came from an older build. The panel then shows the refusal and a second button, Load without old battle
+        # history; pressing it runs a canned conversion, the offer goes, and the chat says how many battles were dropped.
+        name = "old-battle-history-fixture"
+        saves = self.pictures / (name + "-saves")
+        shutil.rmtree(saves, ignore_errors=True)
+        saves.mkdir(parents=True)
+        steps = (*self.HOST_CAMPAIGN, "recover_fixture:3", "sleep:5", "snapshot", "shot:" + name + "-offered",
+                 "recover_history", "sleep:1", "snapshot", "shot:" + name + "-converting",
+                 "sleep:8", "snapshot", "shot:" + name + "-converted")
+        report = self.run_clicks(name, steps, saves, "separate")
+        offered, converting, converted = (shot["pointer"] for shot in report["snapshots"][-3:])
+        self.assertTrue(offered["recoverable"], offered)
+        self.assertIn("written by another build", offered["problem"])
+        self.assertEqual(offered["recover_button"], "Load without old battle history")
+        self.assertFalse(offered["recover_button_disabled"])
+        self.assertEqual(offered["panel_button"], "Apply saved seats / Retry", "Apply stays the bottom button")
+        self.assertTrue(converting["recovering"], converting)
+        self.assertFalse(converting["recoverable"], "the offer goes while the conversion runs")
+        self.assertTrue(converting["panel_button_disabled"], "Apply is off while the conversion runs: a click would drop it")
+        self.assertFalse(converted["recovering"] or converted["recoverable"], converted)
+        self.assertNotIn("another build", converted["problem"], "the old refusal is gone after the conversion")
+
+    @unittest.skipUnless(os.environ.get("EAWR_JOB_OLD_BATTLE_SAVE"), "set EAWR_JOB_OLD_BATTLE_SAVE to a copy of a save written by an older build")
+    def test_a_save_with_battle_records_of_an_older_build_offers_the_recovery(self):
+        # #7881: the host's restore is refused because finished-battle records came from an older build. The panel then offers
+        # Load without old battle history; pressing it converts the save off the UI thread, says in the chat what was dropped,
+        # and applies the saved seats with the converted file. EAWR_JOB_OLD_BATTLE_SAVE is a COPY of such a save (never the
+        # player's own folder); the case needs the campaign content the save was written with.
+        source = pathlib.Path(os.environ["EAWR_JOB_OLD_BATTLE_SAVE"])
+        name = "old-battle-history"
+        saves = self.pictures / (name + "-saves")
+        shutil.rmtree(saves, ignore_errors=True)
+        saves.mkdir(parents=True)
+        shutil.copyfile(source, saves / source.name)
+        steps = (*self.HOST_CAMPAIGN, "load_game", "wait:load_list@60", "click_row:0", "wait:load_list_closed@30",
+                 "sleep:120", "snapshot", "shot:" + name + "-refused",
+                 "recover_history", "sleep:5", "snapshot", "shot:" + name + "-converting",
+                 "sleep:240", "snapshot", "shot:" + name + "-recovered")
+        report = self.run_clicks(name, steps, saves, "separate")
+        refused, converting, recovered = (shot["pointer"] for shot in report["snapshots"][-3:])
+        self.assertTrue(refused["recoverable"], refused)
+        self.assertIn("another build", refused["problem"], refused)
+        self.assertEqual(refused["recover_button"], "Load without old battle history")
+        self.assertFalse(refused["recover_button_disabled"])
+        self.assertEqual(refused["panel_button"], "Apply saved seats / Retry")
+        self.assertTrue(converting["recovering"] or converting["restoring"], converting)
+        self.assertFalse(converting["recoverable"], "the offer is gone while the conversion runs")
+        self.assertFalse(recovered["recoverable"], recovered)
+        self.assertNotIn("another build", recovered["problem"], recovered)
+
     def test_load_game_list_and_lobby_buttons_take_real_clicks(self):
         # The owner's host pressed Load Game and nothing answered again: the list's modal layer sat over the lobby and the
         # chat edit kept focus. (a) the list is up, its row and Cancel take a click, (b) after Cancel the lobby buttons
@@ -1487,6 +1552,79 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertNotIn("IDC_IMAGE", join["hidden"])
         self.assertNotIn("IDC_STAGING_MAP_LIST", join["hidden"])
         self.assertTrue((self.pictures / "joiner-map-options.png").is_file())
+
+    def test_a_gc_slot_with_several_humans_lists_one_player_per_line(self):
+        # #8020: two and three humans share the host's slot of a co-op campaign room. Every human has its own cell (name and
+        # mods state) below the previous one, nothing is cut at 1080p or on an ultrawide window, the host keeps one Kick per
+        # other human, and the same room before the guests join (they wait 30 s) is where the dialog authors it.
+        for count, resolution in ((2, "1920x1080"), (3, "1920x1080"), (2, "3440x1440"), (3, "3440x1440")):
+            names = ["Fordo", "Fordo #2", "Fordo #3"][:count]
+            tag = f"gc-stack-{count}-{resolution}"
+            with socket.socket() as available:
+                available.bind(("127.0.0.1", 0))
+                game_port = available.getsockname()[1]
+            ports = free_udp_ports(count)
+            host_script = ["host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", f"humans:{count}",
+                           "host:Stacked slot", "wait:staging@60", "click:EAWR_GC_TAB_COOP", "sleep:10", "snapshot",
+                           *["wait:room_player:" + player + "@180" for player in names[1:]], "sleep:30", "snapshot",
+                           "shot:result-" + tag, "chat:stack shots done", "sleep:20", "leave"]
+            scripts = [host_script] + [["sleep:30", "direct:127.0.0.1:" + str(game_port), "wait:room_player:" + player + "@180",
+                                        "share:Fordo", "sleep:30", "snapshot", "wait:chat:stack shots done@240", "leave"] for player in names[1:]]
+            processes, logs = [], []
+            try:
+                for index, (player, steps) in enumerate(zip(names, scripts)):
+                    report_name = f"{tag}-{index}"
+                    actions = [arg for step in steps for arg in ("--eawr-lan-do", step)]
+                    argv = command(self.cache, report_name, self.pictures, self.pictures / f"{report_name}.png",
+                                   "--eawr-lan-name", player, "--eawr-lan-colour", "0",
+                                   "--eawr-lan-broadcast-port", str(ports[index]),
+                                   *[arg for other in ports if other != ports[index]
+                                     for arg in ("--eawr-lan-broadcast-extra", str(other))],
+                                   "--eawr-lan-game-port", str(game_port if index == 0 else 0),
+                                   *actions, resolution=resolution)
+                    log = (self.pictures / f"{report_name}.log").open("w", encoding="utf-8")
+                    logs.append(log)
+                    processes.append(subprocess.Popen(argv, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True))
+                for process in processes:
+                    process.wait(timeout=900)
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=30)
+                for log in logs:
+                    log.close()
+            for index, process in enumerate(processes):
+                log = (self.pictures / f"{tag}-{index}.log").read_text(encoding="utf-8")
+                self.assertEqual(process.returncode, 0, log[-6000:])
+            host_log = (self.pictures / f"{tag}-0.log").read_text(encoding="utf-8")
+            alone, full = load(self, self.pictures, f"{tag}-0", host_log)["snapshots"]
+            shared = next(row for row in full["rows"] if row["cells"] > 1)
+            # One cell and one line per human, in the order they joined; the stack ends on the mods state of each.
+            self.assertEqual(shared["cells"], count)
+            self.assertEqual(len(shared["lines"]), count)
+            for player, line in zip(names, shared["lines"]):
+                self.assertTrue(line.startswith(player), shared["lines"])
+            # Each cell shows its own player's whole name and a mods state that is not cut (a shorter wording when the full one is wider).
+            self.assertEqual(len(shared["cell_texts"]), count)
+            for player, cell in zip(names, shared["cell_texts"]):
+                self.assertTrue(cell.startswith(player) and "\u2026" not in cell, shared["cell_texts"])
+                self.assertRegex(cell, r" - (mods ready|ready|ok)$")
+            self.assertEqual(shared["line_fits"], [True] * count, "a name is cut at " + resolution)
+            # The host's list: every human on its own line, then a Kick per other human and no more.
+            self.assertEqual(shared["items"][:count], shared["lines"])
+            self.assertEqual(shared["items"][count:], ["Kick " + player for player in names[1:]], shared["items"])
+            # A single-human slot of the same room is unchanged: one cell, the dialog's own place.
+            before = {index: row for index, row in enumerate(alone["rows"]) if row["visible"]}
+            after = {index: row for index, row in enumerate(full["rows"]) if row["visible"]}
+            first = min(after)
+            self.assertEqual(shared["top"], before[first]["top"])
+            self.assertTrue(all(row["cells"] == 1 and not row["lines"] for row in alone["rows"]))
+            pitch = before[first + 1]["top"] - before[first]["top"] if first + 1 in before else 0
+            for index in after:
+                if index > first and after[index]["cells"] == 1 and index in before:
+                    self.assertAlmostEqual(after[index]["top"] - before[index]["top"], (count - 1) * pitch, delta=1.0)
+            self.assertTrue((self.pictures / f"result-{tag}.png").is_file())
 
     def test_two_viewers_host_find_join_and_both_stagings_show_both_players(self):
         host_port, join_port = free_udp_ports(2)

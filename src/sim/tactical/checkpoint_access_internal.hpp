@@ -143,6 +143,8 @@ struct Access {
         // closures without player reveal profiles gain no checkpoint fields.
         if (v.tracks_player_reveal())
             a(v.command_ledger.battlefield_defence, v.command_ledger.reveal_multipliers, v.last_fog_multipliers);
+        if (v.tracks_player_effects())
+            a(v.command_ledger.stealth_categories, v.command_ledger.capture_adjustments, v.command_ledger.special_weapon_players);
         // TSW-02: the super weapon records ride the state only when the battle has a TSW setup, so a battle without one
         // saves the bytes it always did.
         if (v.setup.tsw) {

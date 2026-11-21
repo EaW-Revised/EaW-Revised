@@ -24,12 +24,13 @@ constexpr std::array<LegacyBlendSelector, 14> selectors{{
     {1, "Engine/PrimAdditive.fx", "t1", true, ""},
     {2, "Engine/PrimAlpha.fx", "t1", true, ""},
     {3, "Engine/PrimModulate.fx", "t0", true, ""},
-    {4, "Engine/PrimDepthSpriteAdditive.fx", "Depth_Sprite_PS20", false,
-     "depth sprite replaces per-pixel depth from the emitter's depth texture; not implemented"},
-    {5, "Engine/PrimDepthSpriteAlpha.fx", "Depth_Sprite_PS20", false,
-     "depth sprite replaces per-pixel depth from the emitter's depth texture; not implemented"},
-    {6, "Engine/PrimDepthSpriteModulate.fx", "Depth_Sprite_PS20", false,
-     "depth sprite replaces per-pixel depth from the emitter's depth texture; not implemented"},
+    // Depth sprites (4/5/6) draw with the blend of their ordinary sibling (additive, alpha,
+    // modulate). The per-pixel depth output from the emitter's second texture is not applied:
+    // the quad keeps its own depth, so the only difference is where such a sprite
+    // intersects solid geometry (PS-33).
+    {4, "Engine/PrimDepthSpriteAdditive.fx", "Depth_Sprite_PS20", true, ""},
+    {5, "Engine/PrimDepthSpriteAlpha.fx", "Depth_Sprite_PS20", true, ""},
+    {6, "Engine/PrimDepthSpriteModulate.fx", "Depth_Sprite_PS20", true, ""},
     {7, "Engine/PrimDiffuseAlpha.fx", "t1", false,
      "lit 2x diffuse primitive needs the #25 lighting interface"},
     {8, "Engine/StencilDarken.fx", "", false, "stencil darkening pipeline is not implemented"},
@@ -167,9 +168,9 @@ EmitterRenderPlan plan_emitter(const EmitterDefinition& emitter, const std::size
 
     switch (emitter.blend_mode) {
     case 0: plan.blend = Blend::opaque; plan.phase = DrawPhase::opaque; plan.depth_write = true; break;
-    case 1: plan.blend = Blend::additive; break;
-    case 2: plan.blend = Blend::alpha; break;
-    case 3: plan.blend = Blend::modulate; break;
+    case 1: case 4: plan.blend = Blend::additive; break;
+    case 2: case 5: plan.blend = Blend::alpha; break;
+    case 3: case 6: plan.blend = Blend::modulate; break;
     case 10: plan.blend = Blend::heat_distortion; plan.phase = DrawPhase::heat; break;
     case 11: plan.blend = Blend::bump_alpha; plan.normal_texture = emitter.normal_texture; break;
     default: return fail("selector has no blend policy");

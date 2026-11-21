@@ -1,4 +1,5 @@
 #include "eawr/presentation/space/environment_scene.hpp"
+#include "eawr/assets/environment_shaders.hpp"
 #include "eawr/core/text.hpp"
 
 #include "eawr/presentation/space/sun_retail.hpp"
@@ -155,17 +156,19 @@ using Rigid = std::array<float, 12>;
 }
 
 [[nodiscard]] SceneRoute route_of(const std::string_view shader) noexcept {
-    // CEM-01..03: explicit compiled names; unknown suffixes stay unsupported.
-    if (ieq(shader, "MeshGloss.fx") || ieq(shader, "MeshGloss.fxo")
-        || ieq(shader, "MeshGlossForStarfields.fxo")) return SceneRoute::meshgloss;
-    if (ieq(shader, "MeshAdditive.fx") || ieq(shader, "MeshAdditive.fxo")) return SceneRoute::meshadditive;
-    if (ieq(shader, "MeshAdditive2x.fxo")) return SceneRoute::meshadditive2x;
-    if (ieq(shader, "MeshAdditiveVColor.fx")) return SceneRoute::meshadditive_vcolor;
-    if (ieq(shader, "Skydome.fx")) return SceneRoute::skydome;
-    if (ieq(shader, "Planet.fx")) return SceneRoute::planet;
-    if (ieq(shader, "Nebula.fx")) return SceneRoute::nebula;
-    // The alpha companion of the planet model stays with that model's owner.
-    if (ieq(shader, "MeshAlpha.fx") || ieq(shader, "Planet_Deathstar.fx")) return SceneRoute::legacy_mesh;
+    // CEM-01..03: explicit compiled names (one shared table, assets/environment_shaders.hpp); unknown suffixes stay
+    // unsupported. The alpha companion of the planet model stays with that model's owner.
+    switch (assets::environment_shader_kind(shader)) {
+    case assets::EnvironmentShaderKind::meshgloss: return SceneRoute::meshgloss;
+    case assets::EnvironmentShaderKind::meshadditive: return SceneRoute::meshadditive;
+    case assets::EnvironmentShaderKind::meshadditive2x: return SceneRoute::meshadditive2x;
+    case assets::EnvironmentShaderKind::meshadditive_vcolor: return SceneRoute::meshadditive_vcolor;
+    case assets::EnvironmentShaderKind::skydome: return SceneRoute::skydome;
+    case assets::EnvironmentShaderKind::planet: return SceneRoute::planet;
+    case assets::EnvironmentShaderKind::nebula: return SceneRoute::nebula;
+    case assets::EnvironmentShaderKind::legacy_mesh: return SceneRoute::legacy_mesh;
+    case assets::EnvironmentShaderKind::none: break;
+    }
     return SceneRoute::unsupported;
 }
 

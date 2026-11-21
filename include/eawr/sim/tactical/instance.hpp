@@ -66,6 +66,10 @@ struct AbilityStatus {
     bool supports_autofire{};
     std::uint32_t remaining_frames{};
     std::uint32_t total_frames{};
+    // WLD-10: a running recharge countdown while the ability is still on (its countdown started at the switch-on).
+    // The button shows the recharge, never the run. Presentation only, never a hash input; zero otherwise.
+    std::uint32_t countdown_remaining_frames{};
+    std::uint32_t countdown_total_frames{};
     EntityId target{}; // WHE-26/27: presentation only, published from the ordinary tracked slot
     std::uint32_t target_hardpoint{0xffffffffU};
     std::uint64_t started_tick{}; // presentation-only birth of instant wingman effects

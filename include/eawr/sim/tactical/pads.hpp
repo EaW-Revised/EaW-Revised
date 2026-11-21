@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace eawr::sim::tactical {
@@ -100,11 +101,13 @@ struct CaptureCandidate {
 };
 
 // WHZ-40..46: one due service, candidates in authoritative object-query order.
-// `adjustment` is the sum of applicable positive battlefield capture-time adjustments.
+// `adjustments` are the players' battlefield capture-time ledger totals (WBR-02), sorted by player: the
+// transition's duration is multiplied by one plus the total of the player it moves toward.
 [[nodiscard]] PlayerId service_capture(const CaptureProfile& profile, PadState& state,
     PlayerId owner, PlayerId neutral, std::span<const Player> players,
     std::span<const CaptureCandidate> candidates, const PadRules& rules,
-    EntityId point, const math::Vec3& position, math::Fixed adjustment = {});
+    EntityId point, const math::Vec3& position,
+    std::span<const std::pair<PlayerId, math::Fixed>> adjustments = {});
 
 // WBP-07 uses a strict boundary, unlike inclusive capture. Called when opening a menu.
 [[nodiscard]] bool pad_construction_allowed(const CaptureProfile& profile, const PadState& state,

@@ -159,6 +159,8 @@ bool LiveEventLog::presented(const tactical::Event& event) noexcept {
         || event.kind == tactical::EventKind::pad_structure_sold
         // Pad capture and construction cues use the XML-authored sounds in the audio consumer.
         || event.kind == tactical::EventKind::pad_captured
+        // Lua Change_Owner: the selection consumer drops the previous owner's selection and control groups; no cue.
+        || event.kind == tactical::EventKind::object_owner_changed
         || event.kind == tactical::EventKind::pad_construction_started
         || event.kind == tactical::EventKind::pad_construction_completed
         // Committed gifts notify the giving and receiving seats, including retained campaign battles.

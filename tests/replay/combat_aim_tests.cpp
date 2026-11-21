@@ -869,6 +869,209 @@ void test_object_weapon_cone() {
     expect(fired_at(run(open, 150), 2), "W-09: an object weapon without extents fires in any direction");
 }
 
+// WDP-01..05 (#7840): a weapon bone a SPOILER_LOCK clip has moved is where the shot leaves, and a hardpoint whose
+// fire bone is parked beyond its range does not fire until the clip brings the bone in. The parked bone is the bind
+// point (the model's rest pose); the clip frames come from the unit's deploy state, held at the last frame.
+void test_deploy_pose_weapon_bones() {
+    const auto frames_per_tick = Fixed::from_raw(one);
+    // The state machine: the clip shows its start frame plus the frames elapsed, held at the last playable frame.
+    tactical::DeployPoseClip clip;
+    clip.frames = 50;
+    clip.frames_per_tick = frames_per_tick;
+    expect(tactical::deploy_pose_frame(clip, {true, 100, 0}, 100) == 0 && tactical::deploy_pose_frame(clip, {true, 100, 0}, 107) == 7
+        && tactical::deploy_pose_frame(clip, {true, 100, 3}, 107) == 10 && tactical::deploy_pose_frame(clip, {true, 100, 0}, 5000) == 49,
+        "WDP-03: start frame plus elapsed clip frames, held at the last playable frame");
+    clip.frames_per_tick = Fixed::from_raw(one / 2);
+    expect(tactical::deploy_pose_frame(clip, {true, 100, 0}, 110) == 5, "WDP-03: a slower clip advances half a frame per logical frame");
+    tactical::DeployPoseTable machine;
+    machine.deploy.frames = machine.undeploy.frames = 50;
+    machine.deploy.frames_per_tick = machine.undeploy.frames_per_tick = frames_per_tick;
+    const auto first = tactical::deploy_pose_switch(machine, std::nullopt, true, 40);
+    expect(first.on && first.since == 40 && first.start_frame == 0, "WDP-03: the first switch starts the clip at its first frame");
+    const auto back = tactical::deploy_pose_switch(machine, first, false, 50);
+    expect(!back.on && back.since == 50 && back.start_frame == 39, "WDP-03: switching back mirrors the running clip's remaining frames (50 - 10 - 1)");
+    const auto done = tactical::deploy_pose_switch(machine, tactical::DeployPoseState{true, 40, 0}, false, 400);
+    expect(done.start_frame == 0, "WDP-03: a finished clip switches back from the end");
+
+    tactical::detail::CombatWorld world;
+    const std::vector<tactical::Player> owners{{1, 1, 1, tactical::player_flag_commandable},
+        {2, 2, 2, tactical::player_flag_commandable}};
+    const std::vector<tactical::SnapshotPlayer> relationships{{1, 1, false}, {2, 2, false}};
+    world.players = owners;
+    world.relationships = relationships;
+    world.seed = 31;
+    const auto parked = at(0, 5000);
+    const auto hull = at(5, 0);
+    const auto pose = [&](const math::Vec3 point, const bool object) {
+        tactical::WeaponBonePose result;
+        result.fire_a = result.fire_b = object ? math::Vec3{} : point;
+        if (object) result.muzzles = {point};
+        return result;
+    };
+    // The clip steps the bone in at frame 10 on DEPLOY and out again at frame 1 on UNDEPLOY, like a parked-bone barrage.
+    const auto table_for = [&](const bool object) {
+        tactical::DeployPoseTable result;
+        result.deploy.frames = result.undeploy.frames = 50;
+        result.deploy.frames_per_tick = result.undeploy.frames_per_tick = frames_per_tick;
+        result.deploy.segments = {{0, {pose(parked, object)}}, {10, {pose(hull, object)}}};
+        result.undeploy.segments = {{0, {pose(hull, object)}}, {1, {pose(parked, object)}}};
+        return result;
+    };
+    tactical::CombatProfile target_profile;
+    tactical::detail::CombatUnit target;
+    target.id = 2;
+    target.owner = target.team = 2;
+    target.visible_to = 1;
+    target.position = target.previous_position = at(300, 0);
+    target.transform = math::to_matrix(math::identity_quat(), target.position).value();
+    target.profile = &target_profile;
+    for (const bool object : {false, true}) {
+        tactical::CombatProfile shooter_profile;
+        shooter_profile.max_attack_distance = units(1000);
+        auto weapon = ion();
+        weapon.has_fire_b = false;
+        weapon.pulse_count = 1;
+        weapon.cone_width = weapon.cone_height = units(360);
+        if (object) {
+            weapon.hardpoint = tactical::object_weapon;
+            weapon.fire_a = {};
+            weapon.fire_b = {};
+            weapon.muzzles = {parked};
+        } else {
+            weapon.fire_a = parked;
+            weapon.fire_b = parked;
+        }
+        shooter_profile.weapons = {weapon};
+        shooter_profile.deploy_poses = table_for(object);
+        tactical::CombatState state;
+        state.attack_target = 2;
+        state.direct = true;
+        state.weapons.resize(1);
+        tactical::detail::CombatUnit self;
+        self.id = 1;
+        self.owner = self.team = 1;
+        self.profile = &shooter_profile;
+        self.combat = &state;
+        self.transform = math::identity_matrix();
+        world.units = {self, target};
+        const auto shoot = [&](const std::uint64_t frame, const std::optional<tactical::DeployPoseState> deploy) {
+            state.weapons[0].countdown = 0;
+            state.weapons[0].pulses_left = 1;
+            state.weapons[0].next_muzzle = 0;
+            world.frame = frame;
+            world.units.front().deploy_pose = deploy;
+            const auto step = tactical::detail::step_combat(world, world.units.front());
+            expect(static_cast<bool>(step), "WDP-05: the posed weapon's step succeeds");
+            if (!step) return std::optional<tactical::CombatEvent>{};
+            state = step.value().state;
+            if (step.value().events.empty()) return std::optional<tactical::CombatEvent>{};
+            return std::optional<tactical::CombatEvent>{step.value().events.front()};
+        };
+        const std::string what = object ? "object weapon muzzle: " : "hardpoint fire bone: ";
+        const tactical::DeployPoseState deploying{true, 100, 0};
+        if (object) {
+            const auto rest = shoot(300, std::nullopt);
+            expect(rest && rest->origin == parked, what + "WDP-05: with no clip state the shot leaves the bind point");
+            const auto early = shoot(105, deploying);
+            expect(early && early->origin == parked, what + "WDP-05: before the clip frame that moves the bone the shot leaves the parked point");
+            const auto late = shoot(110, deploying);
+            expect(late && late->origin == hull, what + "WDP-05: from the clip frame that moves the bone the shot leaves the moved point");
+            const auto held = shoot(900, deploying);
+            expect(held && held->origin == hull, what + "WDP-05: the clip holds its last frame");
+            const auto out = shoot(300, tactical::DeployPoseState{false, 300, 0});
+            expect(out && out->origin == hull, what + "WDP-05: UNDEPLOY starts with the bone in");
+            const auto gone = shoot(301, tactical::DeployPoseState{false, 300, 0});
+            expect(gone && gone->origin == parked, what + "WDP-05: UNDEPLOY puts the bone out one frame later");
+        } else {
+            expect(!shoot(300, std::nullopt), what + "WDP-05: a fire bone parked beyond the range does not fire at the bind pose");
+            expect(!shoot(105, deploying), what + "WDP-05: nor before the clip frame that brings it in");
+            const auto in_range = shoot(110, deploying);
+            expect(in_range && in_range->origin == hull, what + "WDP-05: it fires from the moved bone once the clip has brought it into range");
+            expect(!shoot(301, tactical::DeployPoseState{false, 300, 0}), what + "WDP-05: and stops when UNDEPLOY parks it again");
+        }
+    }
+}
+
+// WDP-02 (#7840): a unit deployed mid-clip survives a checkpoint: the saved state loads into a fresh session, both
+// continue with identical canonical bytes and the same shots from the same places, and the new domain's refusals hold.
+void test_deploy_pose_checkpoint() {
+    const auto parked = at(5000, 0);
+    auto combat = table();
+    auto& weapon = combat.profiles[0].weapons[0];
+    const auto bind_a = weapon.fire_a, bind_b = weapon.fire_b;
+    weapon.fire_a = weapon.fire_b = parked;
+    tactical::DeployPoseTable clips;
+    clips.deploy.frames = clips.undeploy.frames = 50;
+    clips.deploy.frames_per_tick = clips.undeploy.frames_per_tick = Fixed::from_raw(one);
+    const tactical::WeaponBonePose out{parked, parked, {}}, in{bind_a, bind_b, {}};
+    clips.deploy.segments = {{0, {out}}, {10, {in}}};
+    clips.undeploy.segments = {{0, {in}}, {1, {out}}};
+    combat.profiles[0].deploy_poses = clips;
+    tactical::AbilityProfile lock;
+    lock.kind = tactical::AbilityKind::spoiler_lock;
+    tactical::UnitAbilityProfile unit_abilities{shooter_type, {lock}, false};
+    unit_abilities.deploy_poses = true;
+    tactical::AbilityTable abilities;
+    abilities.profiles = {unit_abilities};
+    const auto start = setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, bomber_type, 2, at(300, 0), true)});
+    const auto make = [&]() {
+        auto created = tactical::TacticalSession::create(start, sensors(2000), {}, {}, std::nullopt, combat, {}, abilities);
+        expect(static_cast<bool>(created), "WDP-02: the deployable session is created");
+        return std::move(created).value();
+    };
+    const eawr::sim::InlineExecutor executor;
+    const auto fires = [&](tactical::TacticalSession& session, const std::uint64_t until, std::vector<tactical::CombatEvent>& shots) {
+        while (session.completed_tick() < until) {
+            auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "WDP-02: a step succeeds");
+            if (!stepped) return;
+            for (const auto& event : stepped.value().snapshot->combat_events()) {
+                if (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1) shots.push_back(event);
+            }
+        }
+    };
+    auto session = make();
+    std::vector<tactical::CombatEvent> before;
+    fires(session, 40, before);
+    expect(before.empty(), "WDP-02: parked at the bind pose, the weapon does not fire");
+    expect(static_cast<bool>(session.submit({{40, 1, 0}, {1},
+        tactical::AbilityPayload{tactical::AbilityKind::spoiler_lock, tactical::AbilityAction::activate}})),
+        "WDP-02: the SPOILER_LOCK order is accepted");
+    fires(session, 46, before);
+    expect(before.empty(), "WDP-02: mid-clip the bone is still parked");
+    const auto state = session.ability_state(1);
+    expect(state && state->deploy_pose && state->deploy_pose->on, "WDP-02: the first switch creates the deploy clip state");
+    const auto saved = session.save_checkpoint_state();
+    expect(static_cast<bool>(saved), "WDP-02: a deployed unit checkpoints");
+    if (!saved) return;
+    auto restored = make();
+    expect(static_cast<bool>(restored.load_checkpoint_state(saved.value())), "WDP-02: the checkpoint loads into a fresh session");
+    expect(restored.ability_state(1) && restored.ability_state(1)->deploy_pose == state->deploy_pose,
+        "WDP-02: the restored unit holds the same clip state");
+    std::vector<tactical::CombatEvent> original, again;
+    fires(session, 90, original);
+    fires(restored, 90, again);
+    expect(!original.empty() && original.front().origin != parked, "WDP-02: once the clip brings the bone in the weapon fires from the hull");
+    expect(original.size() == again.size() && std::equal(original.begin(), original.end(), again.begin(),
+        [](const tactical::CombatEvent& a, const tactical::CombatEvent& b) { return a.tick == b.tick && a.origin == b.origin && a.aim == b.aim; }),
+        "WDP-02: the restored session fires the same shots from the same places");
+    expect(session.canonical_state_bytes() == restored.canonical_state_bytes(), "WDP-02: identical canonical bytes after the restore");
+    // The refusals: a version past the last domain, and the deploy-clip domain without a unit holding a clip.
+    auto beyond = saved.value();
+    beyond[0] = 53;
+    auto fresh = make();
+    expect(!fresh.load_checkpoint_state(beyond), "WDP-02: a domain above 52 is refused");
+    auto idle = make();
+    const auto idle_saved = idle.save_checkpoint_state();
+    expect(static_cast<bool>(idle_saved) && idle_saved.value()[0] < 45, "WDP-02: a battle without a clip state keeps the earlier domain");
+    if (idle_saved) {
+        auto forged = idle_saved.value();
+        forged[0] = static_cast<std::uint8_t>(forged[0] + 8);
+        auto target = make();
+        expect(!target.load_checkpoint_state(forged), "WDP-02: the deploy-clip domain without a unit holding a clip is refused");
+    }
+}
+
 // WWP-47/49/50 (#710): the unit's own weapon aims at the hardpoint attached to its attack target
 // (ordered, else the nearest standing one, G-W3), else a keyed draw over the target's Target_Bones,
 // else the height-adjusted centre; and it leaves its muzzle bones in turn.

@@ -20,7 +20,7 @@ namespace eawr::sim::galactic::detail {
 
 inline constexpr std::array<std::uint8_t, 8> state_magic{'E', 'A', 'W', 'R', 'G', 'S', 'T', 0};
 inline constexpr std::array<std::uint8_t, 8> snapshot_magic{'E', 'A', 'W', 'R', 'G', 'S', 'N', 0};
-inline constexpr std::uint32_t state_encoding_version = 21;
+inline constexpr std::uint32_t state_encoding_version = 23;
 inline constexpr std::uint16_t section_version = 1;
 
 void put_u8(std::vector<std::uint8_t>& bytes, std::uint8_t value);

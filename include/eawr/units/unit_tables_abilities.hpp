@@ -104,6 +104,11 @@ struct BattlefieldBonus final {
     std::uint32_t category{};
     Fixed defence{}, reveal_delta{};
     bool all_allies{}, enabled{true};
+    // WBR-02/03: the other source-owned player ledgers a live standalone source writes: each delta is the
+    // authored multiplier minus one (zero = no entry), the flag is the authored Enable_Special_Weapons.
+    Fixed stealth_delta{}, capture_delta{};
+    bool special_weapons{};
+    bool reverse{}; // WBR-04: the effect belongs to the source's removal, not its presence
     bool operator==(const BattlefieldBonus&) const = default;
 };
 

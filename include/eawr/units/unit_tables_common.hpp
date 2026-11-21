@@ -35,6 +35,29 @@ struct BonePoint final {
     bool operator==(const BonePoint&) const = default;
 };
 
+// WDP-01: where a type's weapon bones stand at each frame of its SPOILER_LOCK DEPLOY and UNDEPLOY clips, in model
+// space before Scale_Factor like BonePoint. `bones` are the owner-model bone indices of every muzzle bone and fixed
+// hardpoint fire bone, ascending; each segment's `points` run parallel to them and hold from `from_frame` until the
+// next segment (consecutive frames that leave every bone where it was are one segment). Present only when a clip moves
+// one of them off its bind point; derived from the clips, so it is part of the content identity.
+struct DeployPoseData final {
+    struct Segment final {
+        std::uint32_t from_frame{};
+        std::vector<Vec3> points;
+        bool operator==(const Segment&) const = default;
+    };
+    struct Clip final {
+        std::uint32_t frames{};  // playable frames; the clip holds its last one
+        Fixed frames_per_tick{}; // Deployment_Anim_Rate times the clip's frames per second over the 30 logical frames
+        std::vector<Segment> segments;
+        bool operator==(const Clip&) const = default;
+    };
+    std::vector<std::uint32_t> bones;
+    Clip deploy;
+    Clip undeploy;
+    bool operator==(const DeployPoseData&) const = default;
+};
+
 // A model-space box before Scale_Factor: the union of the model's collidable meshes, each
 // mesh's bounds placed by its bone's bind frame (docs/behaviour/space-damage.md DG-31).
 struct CollisionBounds final {

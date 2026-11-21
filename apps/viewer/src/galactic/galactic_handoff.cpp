@@ -405,7 +405,14 @@ bool GalacticMode::State::process_battle_transition(double delta) {
     }
     const auto local_binding = std::find_if(frame.conflict->seats.begin(), frame.conflict->seats.end(),
         [&](const auto& seat) { return seat.seat == sim::SeatId{galaxy->local.seat}; });
-    if (local_binding == frame.conflict->seats.end() || !local_binding->player) return false;
+    // #8082: a seat whose side took the spectate role has no battle player but still joins the battle, read-only, through
+    // the agreed observer perspective. Any other seat without a battle player stays on the galaxy.
+    const auto spectator = std::find_if(frame.battle_spectators.begin(), frame.battle_spectators.end(),
+        [&](const auto& row) { return row.seat == sim::SeatId{galaxy->local.seat}; });
+    const bool spectating = local_binding != frame.conflict->seats.end() && !local_binding->player
+        && spectator != frame.battle_spectators.end();
+    if (local_binding == frame.conflict->seats.end() || (!local_binding->player && !spectating)) return false;
+    const sim::tactical::PlayerId view_player = spectating ? spectator->observer : local_binding->player;
     if (frame.conflict->layer != campaign::BattleLayer::space) {
         // WGP-90/170: M3 has no playable land child. Auto-resolve stays with
         // its owner; an admitted tactical mission is not silently converted.
@@ -480,7 +487,8 @@ bool GalacticMode::State::process_battle_transition(double delta) {
             briefing_conflict = conflict; briefing_done = briefing_accepted = intro_requested = false;
             briefing_movie.clear();
         }
-        for (const auto& row : source.briefings) if (row.player == local_binding->player) {
+        // A spectator has no briefing of its own: the briefing belongs to the players of the battle.
+        if (!spectating) for (const auto& row : source.briefings) if (row.player == local_binding->player) {
             campaign_briefing = row;
             intro_requested = campaign::space_intro_allowed(row.intro);
             break;
@@ -537,7 +545,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         const auto feed = game->battle_feed(conflict, sim::SeatId{galaxy->local.seat});
         const auto seat = std::find_if(frame.conflict->seats.begin(), frame.conflict->seats.end(),
             [&](const auto& binding) { return binding.seat == sim::SeatId{galaxy->local.seat}; });
-        if (!feed || seat == frame.conflict->seats.end() || seat->player == 0) {
+        if (!feed || seat == frame.conflict->seats.end() || (seat->player == 0 && !spectating)) {
             failure = "Space battle has no playing feed for the local seat";
             release_battle_presentation();
             return false;
@@ -558,7 +566,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
             [](const auto& binding) { return binding.active && binding.human; }) == 1;
         const bool begin_barrier = map.loading_begin_barrier;
         map.borrowed_battle = prepared; map.borrowed_feed = feed;
-        map.borrowed_player = seat->player;
+        map.borrowed_player = view_player;
         map.controller_seat = sim::SeatId{galaxy->local.seat};
         for (const auto& identity : options.lan_players)
             map.controller_names.emplace_back(identity.seat, identity.player);

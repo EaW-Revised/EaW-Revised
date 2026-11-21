@@ -85,11 +85,11 @@ void inertness() {
     const auto none_before = state.under_construction;
     // An owned pad with no one near it: a capturing pad without stickiness returns to the neutral player; an inert pad keeps
     // its owner (the faction pad of a start belongs to its player and stays so).
-    const auto kept = service_capture(inert, state, 1, 3, players, {}, PadRules{}, 7, sim::math::Vec3{}, Fixed{});
+    const auto kept = service_capture(inert, state, 1, 3, players, {}, PadRules{}, 7, sim::math::Vec3{});
     expect(kept == 1 && state.progress == Fixed{} && state.under_construction == none_before,
         "LE-LOADER: an inert pad keeps its owner and does not move its capture progress");
     PadState other{};
-    const auto lost = service_capture(live, other, 1, 3, players, {}, PadRules{}, 7, sim::math::Vec3{}, Fixed{});
+    const auto lost = service_capture(live, other, 1, 3, players, {}, PadRules{}, 7, sim::math::Vec3{});
     expect(lost != 1 || other.target == 3 || other.progress != Fixed{},
         "LE-LOADER: the same pad as a capture point does start to leave its owner (the case the inert flag prevents)");
 }

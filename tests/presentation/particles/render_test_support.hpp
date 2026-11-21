@@ -168,7 +168,7 @@ inline particles::SystemDefinition mixed_system() {
     system.emitters.push_back(second);
     auto kite = spray_emitter(); kite.renderer_id = 52; kite.name = "kite"; kite.tail_size = 3;
     system.emitters.push_back(kite);
-    auto unsupported = spray_emitter(); unsupported.blend_mode = 5; unsupported.name = "depth-sprite";
+    auto unsupported = spray_emitter(); unsupported.blend_mode = 7; unsupported.name = "lit-diffuse";
     system.emitters.push_back(unsupported);
     return system;
 }

@@ -579,6 +579,43 @@ void categories() {
     c.state[1].current = Fixed::from_ratio(1, 2).value();
     expect(calculate(c, p, prior, {}, s.routes).state.target == f(2), "trade needs BOTH endpoints at allegiance at least one");
 }
+void live_special_categories() {
+    auto s = setup(); auto inputs = *s.control; auto planet = inputs.planets[0];
+    planet.ground_base = {1, 1}; planet.special_control = {f(4)};
+    inputs.types = {{1, 1, false, false}, {2, 0, false, false},
+        {3, 0, false, false, 3}, {4, 0, false, false, -2}};
+    gc::PlanetProduction production; production.planet = planet.planet;
+    production.objects = {
+        {30, 3, 1, {}, gc::ProductionDomain::space, gc::ProductionKind::structure},
+        {31, 4, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure},
+        {32, 1, 2, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure},
+        {33, 2, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure},
+        {34, 3, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::unit}};
+    const auto prior = state(1, 1, 1);
+    const auto current = [&] {
+        return gc::calculate_planet_control(inputs, planet, prior, {}, nullptr, {}, 0, {}, nullptr, &production).value();
+    };
+    expect(current().state.target == f(3) && !current().degraded,
+        "live ground and orbital specials add signed integers, regardless of owner; zero and ordinary units add nothing");
+    expect(calculate(inputs, planet, prior).state.target == f(5),
+        "explicit control-only inputs retain their supplied special categories");
+    auto explicit_planet = planet; explicit_planet.special_control = {f(-2), f(1), f(3)};
+    expect(current().state.target == calculate(inputs, explicit_planet, prior).state.target,
+        "live special projection agrees with equivalent direct-placement categories");
+    const std::array<gc::CensusObject, 1> changed{{{30, 3, 1, planet.planet, planet.planet, false, true, 4}}};
+    const auto represented = gc::calculate_planet_control(inputs, planet, prior, {}, nullptr, {}, 0,
+        changed, nullptr, &production).value();
+    expect(represented.state.target == f(1),
+        "special contribution reads the current representation type without an independent deleting-source filter");
+    production.objects.push_back({35, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+    expect(current().state.target == f(1) && current().degraded,
+        "the first three nonzero ground categories exhaust the range before the earlier-ID orbital special");
+    production.objects.clear();
+    expect(current().state.target == f(1), "an empty live roster replaces stale retained special values");
+    production.objects.push_back({36, 99, 1, {}, gc::ProductionDomain::space, gc::ProductionKind::structure});
+    expect(current().state.target == f(1) && current().degraded,
+        "missing live special type facts are diagnosed without inventing a contribution");
+}
 // #6798 / WGM-66, WGM-67: a system with no ground surface changes hands by orbital presence alone, through the live session and its
 // events. The production controller is the owner of the item currently under production, derived every tick, never the planet's owner.
 void with_production(gc::GalacticSetup& s) {
@@ -1423,6 +1460,82 @@ void capture_structure_cleanup() {
         const auto continued = game.step(executor).value(); hashes.push_back(continued.state_hash.get());
         expect(restored.session.step(executor).value().state_hash.get() == continued.state_hash.get(), "special cleanup restore continues equally");
         if (reference.empty()) reference = hashes; else expect(hashes == reference, "special removal is equal on 1/2/4/8 workers");
+    }
+}
+// WGM-70 / GFS-07: political categories follow the real production roster on
+// the next admitted control service, including after restoring saved work.
+void live_special_lifecycle() {
+    using eawr::testing::result_diagnostic::take;
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto s = setup();
+        s.control->planets[0].ground_base = {};
+        s.control->planets[0].starbase = {1, 1};
+        s.player_economy.emplace(); s.fiscal.emplace(); s.fiscal->credit_cap_per_planet = f(1000);
+        for (const auto& player : s.players) {
+            s.player_economy->players.push_back({player.player_id, f(100), f(1000), 0, 5});
+            s.fiscal->players.push_back({player.player_id, true, f(1)});
+        }
+        for (const auto& planet : s.planets) s.fiscal->planets.push_back({planet.id, f(1)});
+        enable_production(s);
+        gc::ProductionOffer structure; structure.type = 3; structure.kind = gc::ProductionKind::structure;
+        structure.domain = gc::ProductionDomain::ground; structure.price = structure.authored_price = f(3);
+        structure.seconds = Fixed::from_ratio(1, 10).value();
+        structure.affiliated = true; structure.direct_build_allowed = true;
+        s.production->planets[0].offers = {structure};
+        s.census = gc::PopulationCensus{{{1, f(1), 0}, {2, {}, 0}, {3, {}, 0}},
+            {{1, 100, false, {}}, {2, 100, false, {}}, {3, 100, false, {}}},
+            {{20, 1, 1, 1, 10, false, false}, {21, 2, 1, 1, 10, false, false}, {22, 1, 2, 3, 11, false, false}}};
+        qualify_census_roles(*s.census);
+        auto game = take(gc::GalacticSession::create(s));
+        std::uint64_t sequence{};
+        const auto command = [&](gc::CommandPayload payload) {
+            return gc::GameCommand{{game.completed_tick(), gc::SeatId{1}, ++sequence}, std::move(payload)};
+        };
+        const auto target = [](const auto& session) {
+            return session.snapshot()->control()->state[0].target;
+        };
+        const auto buy = gc::ProductionCommand{1, 3, gc::ProductionAction::buy, gc::ProductionDomain::ground, 0};
+        std::vector<std::string> hashes;
+        take(game.submit(command(buy)));
+        for (int i = 0; i < 12 && target(game) != f(2); ++i)
+            hashes.push_back(take(game.step(executor)).state_hash.get());
+        expect(game.snapshot()->production()->planets[0].objects.size() == 1 && target(game) == f(2),
+            "ordinary production adds its nonzero special control on admitted planet service");
+        const auto saved = take(game.save_checkpoint_state());
+        auto restored = take(gc::GalacticSession::create(s));
+        take(restored.load_checkpoint_state(saved));
+        expect(take(restored.save_checkpoint_state()) == saved,
+            "live special control restores through existing production and type records");
+        const auto paired_step = [&] {
+            const auto hash = take(game.step(executor)).state_hash.get();
+            hashes.push_back(hash);
+            expect(take(restored.step(executor)).state_hash.get() == hash,
+                "special control lifecycle continues identically after restore");
+        };
+        const auto paired_command = [&](gc::CommandPayload payload) {
+            const auto ordered = command(std::move(payload));
+            take(game.submit(ordered)); take(restored.submit(ordered));
+        };
+        const auto id = game.snapshot()->production()->planets[0].objects.front().id;
+        paired_command(gc::SellObject{1, id});
+        for (int i = 0; i < 12 && target(game) != f(1); ++i) paired_step();
+        expect(game.snapshot()->production()->planets[0].objects.empty() && target(game) == f(1),
+            "selling the source removes its political contribution");
+        paired_command(buy);
+        for (int i = 0; i < 12 && target(game) != f(2); ++i) paired_step();
+        expect(game.snapshot()->production()->planets[0].objects.size() == 1 && target(game) == f(2),
+            "a later completed source contributes again after sale and restore");
+        const std::array<eawr::sim::EntityId, 1> destroyed{
+            game.snapshot()->production()->planets[0].objects.front().id};
+        take(game.apply_battle_losses(destroyed, {}));
+        take(restored.apply_battle_losses(destroyed, {}));
+        for (int i = 0; i < 12 && target(game) != f(1); ++i) paired_step();
+        expect(game.snapshot()->production()->planets[0].objects.empty() && target(game) == f(1),
+            "removing a destroyed source removes its political contribution");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "live special categories are equal on 1/2/4/8 workers");
     }
 }
 // WGS-93 / WGM-188: a ground special that completes, sells or dies refreshes the planet's ground base level
@@ -3199,6 +3312,87 @@ Create_Thread('main')
         "a scripted sale removes the structure, its dummy and the sell object and refunds one third of its authored cost plus one");
 }
 
+// #7964: the galactic object-script host answers Player.Is_Human from the setup's seats and binds Game_Message, so the planet-upgrade
+// structure scripts (a mod's company/agricultural/trade-hub upgrades) run their authored path: a library function asks the owner's
+// seat, messages a human, and the script goes on to despawn its spawner. The script below is that path in the stock library's shape.
+void object_host_is_human_and_game_message() {
+    namespace auth = eawr::script::authoritative;
+    namespace campaign = eawr::campaign;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const eawr::sim::InlineExecutor executor;
+    auto world = take(gc::GalacticSession::create(native_force_fixture()));
+    campaign::GalacticStoryPlayers players;
+    players.players = {{1, "Rebel", "Normal", true}, {2, "Empire", "Normal", false}};
+    players.types = {{"Spawner", 1}};
+    const auto catalog = take(campaign::make_galactic_object_query_catalog(eawr::units::UnitTables{}, players.types));
+    campaign::GalacticWorldImmediateRules rules;
+    campaign::add_galactic_object_world_rules(rules, catalog, executor);
+    auto host = campaign::make_galactic_world_immediate_host(world, std::move(rules), 32);
+    auth::SessionConfig config; config.galactic_clock = true;
+    auth::ModuleManifest modules;
+    require(modules.add("Upgrade.lua", R"LUA(
+function Check_For_Higher_Level(player, error_message)
+    if player.Is_Human() then
+        Game_Message(error_message)
+    end
+    return false
+end
+function main()
+    local human = Human()
+    local ai = Computer()
+    if human.Is_Human() ~= true then error('the human seat answered ' .. tostring(human.Is_Human())) end
+    if ai.Is_Human() ~= false then error('the AI seat answered ' .. tostring(ai.Is_Human())) end
+    local has_higher_level = Check_For_Higher_Level(human, 'TEXT_BUILDING_ABORTED_MINING_COMPANY')
+    if has_higher_level == false and not ai.Is_Human() then
+        Check_For_Higher_Level(ai, 'TEXT_BUILDING_ABORTED_MINING_COMPANY')
+    end
+    Object().Despawn()
+end
+Create_Thread('main')
+)LUA"));
+    auto scripts = take(auth::ScriptScheduler::create(config, std::move(modules)));
+    require(campaign::register_galactic_object_bindings(scripts, players));
+    require(scripts.register_binding("Object", [](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{eawr::script::foc::handle_game_object, 20}}});
+    }));
+    require(scripts.register_binding("Human", [](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{eawr::script::foc::handle_player, 1}}});
+    }));
+    require(scripts.register_binding("Computer", [](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({auth::Value{auth::Handle{eawr::script::foc::handle_player, 2}}});
+    }));
+    require(scripts.set_immediate_effect_host(host, 1));
+    expect(std::any_of(world.snapshot()->actor_records().begin(), world.snapshot()->actor_records().end(),
+        [](const auto& actor) { return actor.id == 20; }), "the spawner exists before the upgrade script runs");
+    require(scripts.create_instance(7, "Upgrade.lua"));
+    auth::ServiceOptions options; options.time_tick = 1;
+    const auto report = take(scripts.service(executor, options));
+    const auto messages = static_cast<std::size_t>(std::count_if(report.diagnostics.begin(), report.diagnostics.end(), [](const auto& row) {
+        return row.message.find("Game_Message presentation is unavailable") != std::string::npos;
+    }));
+    const auto actors = world.snapshot()->actor_records();
+    expect(report.diagnostics.size() == messages && messages == 1,
+        "only the human seat reaches Game_Message (one call); Is_Human and Game_Message raise no unbound or script fault: "
+            + std::to_string(report.diagnostics.size()) + " diagnostics");
+    expect(std::none_of(actors.begin(), actors.end(), [](const auto& actor) { return actor.id == 20; }),
+        "the upgrade script runs to its end and removes its spawner");
+    auto bad = take(auth::ScriptScheduler::create(config, [] {
+        auth::ModuleManifest m;
+        (void)m.add("Bad.lua", "function main() Game_Message() end\nCreate_Thread('main')\n");
+        return m;
+    }()));
+    require(campaign::register_galactic_object_bindings(bad, players));
+    require(bad.create_instance(8, "Bad.lua"));
+    const auto bad_report = take(bad.service(executor, options));
+    expect(std::any_of(bad_report.diagnostics.begin(), bad_report.diagnostics.end(), [](const auto& row) {
+        return row.message.find("Game_Message requires exactly one text key") != std::string::npos;
+    }), "Game_Message without a text key is a named script fault");
+}
+
 // GOL-17: EvaluatePerception answers the mounted equations from the completed world, equally on 1, 2, 4 and 8 workers.
 void world_script_perception_contract() {
     namespace auth = eawr::script::authoritative;
@@ -4584,8 +4778,8 @@ int main(int argc, const char* const argv[]) {
         if (argc == 2 && std::string_view(argv[1]) == "--capture-build-list") {
             capture_build_and_ground_views(); return galactic_test::failures == 0 ? 0 : 1;
         }
-        selected_landing_commands(); ground_layout_commands(); load_guard_contracts(); authored_mixed_surface_owners(); native_view_reuse_is_exact(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); world_immediate_host_contract(); world_script_despawn_contract(); script_despawn_leaves_no_dangling_rows(); world_script_despawn_is_atomic(); world_script_force_failure_is_atomic(); world_script_journal_bound_contract(); world_script_birth_probe_contract(); world_script_sale_contract(); world_script_perception_diagnostic(); world_script_perception_contract(); orbital_stand_in_leaves_by_script_contract(); wide_galactic_lua_handles(); independent_native_barrier();
-        native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); space_only_conquest(); alignment_strength(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); signed_capture_rewards(); capture_structure_cleanup(); ground_structure_base_level(); hostile_landing_refreshes_ground_base_level(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); selected_units_invade_defended_ground(); child_battle_control(); adapter();
+        selected_landing_commands(); ground_layout_commands(); load_guard_contracts(); authored_mixed_surface_owners(); native_view_reuse_is_exact(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); world_immediate_host_contract(); world_script_despawn_contract(); script_despawn_leaves_no_dangling_rows(); world_script_despawn_is_atomic(); world_script_force_failure_is_atomic(); world_script_journal_bound_contract(); world_script_birth_probe_contract(); world_script_sale_contract(); object_host_is_human_and_game_message(); world_script_perception_diagnostic(); world_script_perception_contract(); orbital_stand_in_leaves_by_script_contract(); wide_galactic_lua_handles(); independent_native_barrier();
+        native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); live_special_categories(); live_special_lifecycle(); space_only_conquest(); alignment_strength(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); signed_capture_rewards(); capture_structure_cleanup(); ground_structure_base_level(); hostile_landing_refreshes_ground_base_level(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); selected_units_invade_defended_ground(); child_battle_control(); adapter();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;
 }

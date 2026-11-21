@@ -747,11 +747,34 @@ void planet_effect_contracts() {
                && eawr::scene::material_selector(missing[0]) == &eawr::scene::missing_effect_selector(),
         "an absent Planet.fx effect file takes the missing-effect route, not the planet material");
 }
+
+// A placed prop whose layers name the source shield program (a sea plane of stacked additive layers over an opaque
+// base) is a drawable surface set, never a shader_unsupported placement: every layer keeps its additive pass.
+void shield_source_name_surface_contracts() {
+    Assets assets;
+    assets.files.insert("data/art/shaders/meshshield.fxo");
+    assets.models.emplace("data/art/models/eawr_sea_plane.alo",
+        model({"MeshShield.fx", "MeshShield.fx", "MeshGloss.fx"}, "eawr_sea_layer.tga", {}));
+    const auto surfaces = eawr::scene::construction_surfaces(assets.access(), "data/art/models/eawr_sea_plane.alo");
+    expect(surfaces.size() == 3, "every layer of the sea-plane model is listed");
+    if (surfaces.size() != 3) return;
+    for (std::size_t layer = 0; layer < 2; ++layer) {
+        const auto* selector = eawr::scene::material_selector(surfaces[layer]);
+        expect(surfaces[layer].supported && !surfaces[layer].effect_missing && !surfaces[layer].translated
+                   && surfaces[layer].technique == "t0" && surfaces[layer].pass == "t0_p0"
+                   && selector != nullptr && selector->transparent,
+            "a source-named shield layer is supported on the additive t0 pass");
+    }
+    expect(surfaces[2].supported && eawr::scene::material_selector(surfaces[2]) != nullptr
+               && !eawr::scene::material_selector(surfaces[2])->transparent,
+        "the opaque base beside the layers keeps its own selector");
+}
 } // namespace
 
 void selector_contracts() {
     translated_scene_contracts();
     planet_effect_contracts();
+    shield_source_name_surface_contracts();
     asset_name_contracts();
     expect(eawr::scene::legacy_selectors().size() == 24, "the selector table matches the accepted legacy list");
     const auto* alpha = eawr::scene::find_legacy_selector("MeshAlpha.fx");
@@ -789,9 +812,14 @@ void selector_contracts() {
     expect(shield != nullptr && shield->transparent && shield->technique == "t0"
                && farseer != nullptr && farseer->transparent && farseer->technique == "sph_t3",
            "qualified compiled shields select their own additive passes");
-    expect(eawr::scene::find_legacy_selector("MeshShield.fx") == nullptr
-               && eawr::scene::find_legacy_selector("MeshShieldFarseer.fx") == nullptr,
-           "generic compiled shield admission does not change existing uncompiled selectors");
+    // The source name a model authors selects the same shield row; the Farseer program has no source name.
+    for (const std::string_view alias : {"MeshShield.fx", "meshshield.FX"}) {
+        expect(eawr::scene::find_legacy_selector(alias) == shield,
+               "the authored source name selects the compiled shield selector and its additive pass");
+    }
+    expect(eawr::scene::find_legacy_selector("MeshShieldFarseer.fx") == nullptr
+               && eawr::scene::find_legacy_selector("MeshShield.fxx") == nullptr,
+           "only the shield source name joins the compiled shield selector");
     const auto* deathstar = eawr::scene::find_legacy_selector("planet_deathstar.FX");
     expect(deathstar != nullptr && !deathstar->transparent && deathstar->stored_values
                && deathstar->technique == "sph_t3", "Death Star is the stored-value opaque highest-detail family");
@@ -856,8 +884,12 @@ void selector_contracts() {
         expect(eawr::scene::find_legacy_selector(alias) == doubled,
                "compiled doubled additive selects the qualified family");
     }
+    for (const std::string_view alias : {"MeshAlpha.fxo", "meshalpha.FXO"}) {
+        expect(eawr::scene::find_legacy_selector(alias) == alpha,
+               "compiled alpha uses the existing canonical selector and transparent pass");
+    }
     for (const std::string_view unsupported : {"MeshGloss.fxoo", "MeshAdditive.fxo.extra",
-             "MeshGlossForStarfields.fxo", "MeshAdditive2x.fxoo"}) {
+             "MeshGlossForStarfields.fxo", "MeshAdditive2x.fxoo", "MeshAlpha.fxoo"}) {
         expect(eawr::scene::find_legacy_selector(unsupported) == nullptr,
                "unqualified generic selectors are not admitted by suffix or environment support");
     }

@@ -155,7 +155,7 @@ class EffectModeGraphical(unittest.TestCase):
         self.assertEqual(emitters["heat"]["adapter"], "eawr-particle-heat-v1")
         self.assertEqual(emitters["heat"]["phase"], "heat")
         self.assertFalse(emitters["depth-sprite"]["drawn"])
-        self.assertIn("depth sprite", emitters["depth-sprite"]["cause"])
+        self.assertIn("diffuse", emitters["depth-sprite"]["cause"])
         for entry in first["emitters"]:
             self.assertFalse(entry["legacy_route_supported"])
         self.assertEqual(len(first["frames"]), 60)

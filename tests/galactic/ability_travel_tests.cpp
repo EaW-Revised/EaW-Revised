@@ -5,7 +5,9 @@
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/ability_host.hpp"
+#include "../../apps/viewer/src/galactic/ability_drop.hpp"
 #include <array>
+#include <optional>
 #include <iostream>
 
 namespace {
@@ -261,6 +263,149 @@ void consumed_spy_arrival() {
         else expect(actual == reference, "spy arrival has canonical equality on 1/2/4/8 workers");
     }
 }
+// The credit-siphon trip (legacy #1143, #7963). The bearer's own type refuses an ordinary move (WGM-83/101), so the only way
+// it leaves its planet is a drop onto a planet its ability may use: an enemy one (WGCH-55/103).
+using Fx = eawr::sim::math::Fixed;
+constexpr gc::PlanetId enemy_planet = 1, own_planet = 4;
+Fx fraction(std::int64_t numerator, std::int64_t denominator) { return Fx::from_raw(numerator * Fx::scale / denominator); }
+gc::GalacticSetup siphon_setup(bool free_travel, Fx low = fraction(1, 2), Fx high = fraction(1, 2)) {
+    auto config = setup();
+    auto& host = *config.ability_host; auto& profile = host.profiles[0];
+    profile.corruption.reset();
+    gc::SiphonAbilityProfile ability; ability.name = "MOD_SIPHON"; ability.text_identity = "TEXT_MOD_SIPHON";
+    ability.minimum = low; ability.maximum = high; ability.cycles = 5; ability.causes_despawn = true; ability.hero = true;
+    profile.siphon = ability; profile.ground_activated = {gc::AbilityKind::credit_siphon};
+    host.activated_corruption_abilities.clear(); host.activated_siphon_abilities = {"MOD_SIPHON"};
+    for (auto& row : config.fleet_control->types) if (row.type == 1000) row.can_hyperspace_without_ability = free_travel;
+    return config;
+}
+std::optional<gc::CorruptionEconomyPlanet> economy_row(const gc::GalacticSession& galaxy, gc::PlanetId planet) {
+    const auto snapshot = galaxy.snapshot();
+    const auto* economy = snapshot->economy_corruption();
+    const auto at = std::find_if(economy->planets.begin(), economy->planets.end(), [&](const auto& row) { return row.planet == planet; });
+    return at == economy->planets.end() ? std::nullopt : std::optional<gc::CorruptionEconomyPlanet>(*at);
+}
+bool alive(const gc::GalacticSession& galaxy, eawr::sim::EntityId id) {
+    const auto snapshot = galaxy.snapshot();
+    const auto rows = snapshot->actor_records();
+    const auto at = std::find_if(rows.begin(), rows.end(), [&](const auto& row) { return row.id == id; });
+    return at != rows.end() && !at->dead && !at->delete_pending;
+}
+void siphon_viewer_admission(const eawr::sim::PartitionExecutor& pool) {
+    namespace view = eawr::viewer::galactic;
+    for (const bool free_travel : {false, true}) {
+        auto config = siphon_setup(free_travel);
+        ability_fixture::add_observer(config, 2, {1000, 2000}); // the published service gates need the local observer
+        auto game = take(Game::create(config));
+        (void)take(game.step(pool));
+        const auto snapshot = game.galaxy().snapshot();
+        const auto order = [&](gc::PlanetId destination) {
+            return gc::MoveFleet{config.fleets[1].id, destination == own_planet ? std::vector<gc::PlanetId>{2, 1, 4}
+                : std::vector<gc::PlanetId>{2, 1}, {}, false, 0};
+        };
+        const auto enemy = view::ability_drop_candidate(*snapshot, 2, config.fleets[1].id, *config.ability_host, {}, enemy_planet);
+        expect(enemy && enemy->kind == gc::AbilityKind::credit_siphon && enemy->planet == enemy_planet && enemy->supplied == transport,
+            "an enabled routed siphon bearer is offered a drop on an enemy planet");
+        expect(!view::ability_drop_candidate(*snapshot, 2, config.fleets[1].id, *config.ability_host, {}, own_planet),
+            "an own planet is not a siphon target, so the drag has no ability drop there");
+        const auto enemy_order = view::ability_move_order(*snapshot, 2, order(enemy_planet), enemy);
+        const auto own_order = view::ability_move_order(*snapshot, 2, order(own_planet), std::nullopt);
+        if (free_travel) {
+            expect(enemy_order && !enemy_order->destination_actor && own_order && !own_order->destination_actor,
+                "a bearer whose type travels freely keeps its plain move everywhere (stock smuggler)");
+        } else {
+            expect(enemy_order && enemy_order->destination_actor == transport,
+                "a bearer that may only travel by its ability moves to the enemy planet carrying the supplied container");
+            expect(!own_order, "the same bearer is refused a move to an own planet (no ability drop there)");
+            expect(!view::ability_move_order(*snapshot, 2, order(enemy_planet), std::nullopt),
+                "a plain move of an ability-bound bearer is refused without a drop");
+        }
+        auto routed_off = *config.ability_host; routed_off.activated_siphon_abilities.clear();
+        expect(!view::ability_drop_candidate(*snapshot, 2, config.fleets[1].id, routed_off, {}, enemy_planet),
+            "the siphon ability is offered only while the authored activated-name list routes it");
+    }
+}
+void siphon_arrival(const eawr::sim::PartitionExecutor& pool) {
+    const auto config = siphon_setup(false, fraction(1, 4), fraction(3, 4));
+    auto game = take(Game::create(config)); submit(game, move(config)); (void)take(game.step(pool));
+    expect(economy_row(game.galaxy(), enemy_planet) && !economy_row(game.galaxy(), enemy_planet)->siphon.active, "no siphon while in transit");
+    finish(game, pool);
+    const auto row = economy_row(game.galaxy(), enemy_planet);
+    const auto frame = game.galaxy().clock().galactic_frame;
+    expect(row && row->siphon.active && row->siphon.recipient == 2, "arrival installs the siphon for the acting player");
+    expect(row && row->siphon.fraction >= fraction(1, 4) && row->siphon.fraction <= fraction(3, 4),
+        "the percentage is sampled inside the authored range");
+    expect(row && row->siphon.end >= 5U * 3000U && row->siphon.end - 5U * 3000U <= frame,
+        "the siphon runs for the authored cycles of the fiscal cycle length from arrival");
+    expect(!alive(game.galaxy(), first), "the deploying bearer is consumed on a successful deployment");
+    const auto& results = game.galaxy().ability_state()->results;
+    expect(results.size() == 1 && results[0].kind == gc::AbilityKind::credit_siphon && results[0].outcome == gc::AbilityOutcome::purchased,
+        "a successful deployment publishes its result");
+    expect(game.galaxy().snapshot()->player_economy()->players[1].credits == ability_fixture::whole(1000), "deploying a siphon costs nothing");
+    for (const auto planet : {gc::PlanetId{2}, gc::PlanetId{3}, gc::PlanetId{4}})
+        expect(economy_row(game.galaxy(), planet) && !economy_row(game.galaxy(), planet)->siphon.active, "only the target planet is siphoned");
+    const auto ids = cp::game_identities(config); const auto saved = take(cp::save_game_checkpoint(game, ids));
+    auto loaded = take(cp::load_game_checkpoint(saved, ids, {}, pool));
+    expect(take(cp::save_game_checkpoint(loaded.session, ids)) == saved, "save retains the siphon record and the siphon service state");
+    expect(economy_row(loaded.session.galaxy(), enemy_planet)->siphon == row->siphon, "a loaded save keeps the sampled fraction and deadline");
+}
+void siphon_refusals(const eawr::sim::PartitionExecutor& pool) {
+    const auto refused = [&](const gc::GalacticSetup& config, std::vector<gc::PlanetId> path, const char* why, unsigned variant) {
+        auto game = take(Game::create(config)); submit(game, move(config, std::move(path)));
+        (void)take(game.step(pool)); // the move starts on the first tick; finish() waits for transit to end
+        if (variant == 1) {
+            take(game.set_ability_lifecycle(first, false, true, gc::AbilityKind::credit_siphon));
+            take(game.set_ability_lifecycle(second, false, true, gc::AbilityKind::credit_siphon));
+        }
+        finish(game, pool);
+        for (const auto planet : {gc::PlanetId{1}, gc::PlanetId{2}, gc::PlanetId{3}, gc::PlanetId{4}}) {
+            const auto row = economy_row(game.galaxy(), planet);
+            const bool kept = variant == 2 && planet == enemy_planet;
+            expect(row && row->siphon.active == kept && (!kept || row->siphon.recipient == 1), why);
+        }
+        expect(alive(game.galaxy(), first) && alive(game.galaxy(), second) && game.return_state().heroes.empty()
+            && game.galaxy().ability_state()->results.empty(), why);
+    };
+    refused(siphon_setup(false), {2, 1, 4}, "an own planet is refused: nothing installed, nothing consumed", 0);
+    refused(siphon_setup(false), {2, 1}, "a cancelled siphon service refuses on arrival without consuming", 1);
+    auto taken = siphon_setup(false);
+    taken.economy_corruption->planets[0].siphon = {true, 1, fraction(1, 2), 1000000};
+    refused(taken, {2, 1}, "a planet that already carries a siphon refuses a new one before any draw", 2);
+    auto neutral_current = siphon_setup(false);
+    for (auto& row : neutral_current.economy_corruption->players) if (row.player == 1) row.playable = false;
+    refused(neutral_current, {2, 1}, "a planet whose current allegiance has no playable faction is not a siphon target", 3);
+}
+void siphon_generic_capture(const eawr::sim::PartitionExecutor& pool) {
+    // WGCH-39: a generic actor on a planet that captures minor heroes is captured instead of siphoning.
+    auto config = siphon_setup(false); config.ability_host->profiles[0].named = false;
+    config.ability_host->theft_planets.push_back({enemy_planet, ability_fixture::whole(1), ability_fixture::whole(1), {}, true});
+    auto game = take(Game::create(config)); submit(game, move(config)); (void)take(game.step(pool)); finish(game, pool);
+    expect(!economy_row(game.galaxy(), enemy_planet)->siphon.active && !alive(game.galaxy(), first),
+        "an auto-capturing planet removes a generic siphon bearer without installing a siphon");
+    expect(game.galaxy().ability_state()->results.size() == 1
+        && game.galaxy().ability_state()->results[0].outcome == gc::AbilityOutcome::refused, "the capture is a refused deployment");
+    auto named = siphon_setup(false);
+    named.ability_host->theft_planets.push_back({enemy_planet, ability_fixture::whole(1), ability_fixture::whole(1), {}, true});
+    auto kept = take(Game::create(named)); submit(kept, move(named)); (void)take(kept.step(pool)); finish(kept, pool);
+    expect(economy_row(kept.galaxy(), enemy_planet)->siphon.active, "a named hero is not captured by that planet flag");
+}
+void siphon_workers_and_validation() {
+    const auto low = fraction(1, 4), high = fraction(3, 4);
+    const auto config = siphon_setup(false, low, high);
+    std::vector<std::string> states;
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto game = take(Game::create(config)); submit(game, move(config));
+        (void)take(game.step(pool)); finish(game, pool);
+        states.push_back(take(game.step(pool)).state_hash.get());
+    }
+    expect(std::all_of(states.begin(), states.end(), [&](const auto& state) { return state == states.front(); }),
+        "siphon arrival state is identical on 1/2/4/8 workers");
+    expect(!Game::create(siphon_setup(false, high, low)), "an inverted siphon percentage range is refused at setup");
+    expect(!Game::create(siphon_setup(false, low, ability_fixture::whole(2))), "a siphon percentage above 1 is refused at setup (WGEP-12)");
+    auto unnamed = siphon_setup(false); unnamed.ability_host->profiles[0].siphon->name.clear();
+    expect(!Game::create(unnamed), "an unnamed siphon ability is refused at setup");
+}
 void codecs() {
     const auto config = setup();
     for (const gc::CommandPayload& payload : {gc::CommandPayload{move(config)}, gc::CommandPayload{gc::LaunchFleet{{transport}, {2, 1}, {}, transport}}}) {
@@ -277,6 +422,8 @@ int case_galactic_ability_travel_tests() {
         eawr::platform::ThreadWorkerAdapter pool(1);
         final_and_save(pool); clear_and_stale(pool); paths_launch_merge(pool); destruction_uses_qualified_bearer(pool);
         consumed_spy_arrival();
+        siphon_viewer_admission(pool); siphon_arrival(pool); siphon_refusals(pool); siphon_generic_capture(pool);
+        siphon_workers_and_validation();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

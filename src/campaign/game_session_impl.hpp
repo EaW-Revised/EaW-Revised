@@ -90,6 +90,7 @@ public:
     std::set<std::string> story_reported;     // refusal texts already published (diagnostics only, never saved)
     core::Result<void> apply_story_rewards();
     bool force_click_request(galactic::story::Triggered& record);
+    bool story_pause_request(galactic::story::Triggered& record, bool replaying); // #7826
     bool story_hud_request(galactic::story::Triggered& record);
     bool story_objective_request(galactic::story::Triggered& record);
     bool story_goal_request(galactic::story::Triggered& record);

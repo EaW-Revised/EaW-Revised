@@ -3,8 +3,12 @@
 #include "eawr/core/load_profile.hpp"
 
 #include "eawr/data/retail_values.hpp"
+#include "eawr/assets/assets.hpp"
+#include "eawr/sim/math/geometry.hpp"
 
 #include <algorithm>
+#include <array>
+#include <utility>
 
 namespace eawr::units::unit_tables_detail {
 
@@ -140,6 +144,10 @@ void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames*
             weapon.pulse_delay_seconds = object->fixed("Fire_Pulse_Delay_Seconds", report_, false);
             weapon.appearance_delay_frames = count(*object, "Projectile_Appearance_Delay_Frames", false);
             weapon.full_salvo_delay_multiplier = object->fixed("Full_Salvo_Weapon_Delay_Multiplier", report_, false);
+            weapon.defend_delay_multiplier = object->fixed("Defend_Mode_Weapon_Delay_Multiplier", report_, false);
+            weapon.turbo_delay_multiplier = object->fixed("Turbo_Mode_Weapon_Delay_Multiplier", report_, false);
+            weapon.power_to_weapons_delay_multiplier =
+                object->fixed("Power_To_Weapons_Mode_Weapon_Delay_Multiplier", report_, false);
             weapon.range = object->fixed("Fire_Range_Distance", report_, true);
             weapon.min_range = object->fixed("Fire_Min_Range_Distance", report_, false);
             weapon.cone_width_degrees = object->fixed("Fire_Cone_Width", report_, true);
@@ -167,6 +175,10 @@ void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames*
             weapon.opportunity_fire_when_idle = flag(*object, "Allow_Opportunity_Fire_When_Idle", false).value_or(true);
             weapon.fire_in_rocket_mode = flag(*object, "Fire_When_In_Rocket_Attack_Mode", false).value_or(true);
             weapon.fire_in_normal_mode = flag(*object, "Fire_When_In_Normal_Attack_Mode", false).value_or(true);
+            weapon.fire_in_defend_mode = flag(*object, "Fire_When_In_Defend_Mode", false).value_or(true);
+            weapon.fire_in_turbo_mode = flag(*object, "Fire_When_In_Turbo_Mode", false).value_or(true);
+            weapon.fire_in_power_to_weapons_mode =
+                flag(*object, "Fire_When_In_Power_To_Weapons_Mode", false).value_or(true);
             hardpoint.weapon = std::move(weapon);
         }
         object->note_duplicates(report_);
@@ -734,6 +746,106 @@ void Loader::load_selection(Object& object, UnitType& unit) {
             || selection_behavior("FIGHTER_LOCOMOTOR") || selection_behavior("TEAM_LOCOMOTOR");
         unit.decoration = flag(object, "Is_Decoration", false).value_or(false);
     }
+
+void Loader::load_deploy_poses(Object& object, UnitType& unit) {
+    // WDP-01..03: a shot leaves the weapon bone as it stands when the shot is made, so a type whose SPOILER_LOCK plays
+    // DEPLOY and UNDEPLOY clips shows its weapon bones where those clips put them.
+    if (input_.filesystem == nullptr || unit.model_path.empty()) return;
+    if (std::none_of(unit.abilities.begin(), unit.abilities.end(),
+            [](const Ability& ability) { return iequals(ability.type, "SPOILER_LOCK"); })) return;
+    std::vector<std::uint32_t> wanted;
+    const auto want = [&](const BonePoint& point) {
+        if (point.position && !point.from_attached_model && point.owner_bone_index) wanted.push_back(*point.owner_bone_index);
+    };
+    for (const auto& bone : unit.muzzle_bones) want(bone);
+    for (const auto& hardpoint : unit.hardpoints) {
+        if (!hardpoint.weapon) continue;
+        want(hardpoint.fire_a.position ? hardpoint.fire_a : hardpoint.attachment);
+        if (!hardpoint.fire_b.bone.empty()) want(hardpoint.fire_b);
+    }
+    std::sort(wanted.begin(), wanted.end());
+    wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+    if (wanted.empty()) return;
+    const Frames* model = frames(unit.model_path, unit.id);
+    if (model == nullptr) return;
+    // The clip files follow the presentation's naming: `<dir>/<model or override stem>_<type>_00.ala`, lower case.
+    const std::string path_text = lower(unit.model_path);
+    const auto slash = path_text.rfind('/');
+    const std::string directory = slash == std::string::npos ? std::string{} : path_text.substr(0, slash + 1);
+    const auto stem_of = [](std::string name) {
+        if (const auto cut = name.rfind('/'); cut != std::string::npos) name.erase(0, cut + 1);
+        if (const auto dot = name.rfind('.'); dot != std::string::npos) name.resize(dot);
+        return name;
+    };
+    std::string base = stem_of(path_text);
+    if (const auto override_name = trim(object.text("Space_Model_Anim_Override_Name")); !override_name.empty()) base = stem_of(lower(override_name));
+    if (base.empty()) return;
+    const std::string deploy_path = directory + base + "_deploy_00.ala";
+    const std::string undeploy_path = directory + base + "_undeploy_00.ala";
+    if (!input_.filesystem->stat(deploy_path) || !input_.filesystem->stat(undeploy_path)) {
+        // A modder who relies on the clips to move a weapon bone sees why nothing moves: both files must sit beside the model.
+        report_.note(unit.id, "SPOILER_LOCK", deploy_path + " / " + undeploy_path,
+            "WDP-01: a DEPLOY/UNDEPLOY clip pair is missing beside the model; its weapon bones keep their bind points");
+        return;
+    }
+    const auto rate = object.fixed("Deployment_Anim_Rate", report_, false).value_or(Fixed::from_raw(Fixed::scale));
+    DeployPoseData data;
+    data.bones = wanted;
+    std::vector<Vec3> bind;
+    for (const auto bone : wanted) bind.push_back(translation(model->frames[bone]));
+    // Below the packed clips' own rounding a bone has not moved (a 16-bit rotation turned about a long lever).
+    constexpr std::int64_t noise_raw = Fixed::scale / 16;
+    bool moved = false;
+    const auto near_bind = [&](const std::vector<Vec3>& points) {
+        for (std::size_t index = 0; index < points.size(); ++index) {
+            const std::array<std::int64_t, 3> gaps{points[index].x.raw() - bind[index].x.raw(),
+                points[index].y.raw() - bind[index].y.raw(), points[index].z.raw() - bind[index].z.raw()};
+            for (const auto gap : gaps) {
+                if (gap > noise_raw || gap < -noise_raw) return false;
+            }
+        }
+        return true;
+    };
+    const std::array<std::pair<const std::string*, DeployPoseData::Clip*>, 2> clips{{{&deploy_path, &data.deploy}, {&undeploy_path, &data.undeploy}}};
+    for (const auto& [path_ptr, clip_out] : clips) {
+        const std::string& path = *path_ptr;
+        auto clip = assets::load_animation(*input_.filesystem, path);
+        if (!clip) {
+            report_.note(unit.id, "SPOILER_LOCK", path, "WDP-01: clip is not loadable; its weapon bones keep their bind points");
+            return;
+        }
+        const auto& animation = clip.value();
+        report_.input({path, animation.source.source_id, animation.source.layer_id, input_.digest ? input_.digest(path) : std::string{}});
+        // The shown frames are 0 .. playable-1: the clip holds its last playable frame.
+        clip_out->frames = animation.playable_frame_count;
+        const auto clip_fps = clip_frames_per_second(animation);
+        if (!clip_fps) {
+            report_.note(unit.id, "SPOILER_LOCK", path, "WDP-01: clip rate is not representable; its weapon bones keep their bind points");
+            return;
+        }
+        const auto per_second = sim::math::multiply(rate, *clip_fps);
+        const auto per_tick = per_second ?sim::math::divide(per_second.value(),
+            Fixed::from_raw(static_cast<std::int64_t>(sim::tactical::logical_frames_per_second) * Fixed::scale))
+            : core::Result<Fixed>::failure(per_second.error());
+        if (!per_tick || animation.playable_frame_count == 0) {
+            report_.note(unit.id, "SPOILER_LOCK", path, "WDP-01: clip rate is not representable; its weapon bones keep their bind points");
+            return;
+        }
+        clip_out->frames_per_tick = per_tick.value();
+        auto shown = clip_pose_points(*model->model, animation, wanted);
+        if (!shown) {
+            report_.note(unit.id, "SPOILER_LOCK", path, "WDP-01: clip pose is not representable in Q24; its weapon bones keep their bind points");
+            return;
+        }
+        for (std::uint32_t frame = 0; frame < shown->size(); ++frame) {
+            auto& points = (*shown)[frame];
+            if (!clip_out->segments.empty() && clip_out->segments.back().points == points) continue;
+            if (!near_bind(points)) moved = true;
+            clip_out->segments.push_back({frame, std::move(points)});
+        }
+    }
+    if (moved) unit.deploy_poses = std::move(data);
+}
 
 } // namespace eawr::units::unit_tables_detail
 

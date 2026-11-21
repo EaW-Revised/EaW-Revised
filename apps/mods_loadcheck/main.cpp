@@ -14,6 +14,7 @@
 #include "eawr/platform/load_notes.hpp"
 #include "eawr/core/build_identity.hpp"
 #include "eawr/mods/fingerprint.hpp"
+#include "eawr/scene/shader_routes.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -227,6 +228,18 @@ int run(std::vector<fs::path> args) {
         for (auto& note : catalog.value().notes) notes.append(std::move(note));
         for (const auto& d : catalog.value().diagnostics) eawr::loadcheck::add(diagnostics, d);
         if (catalog.value().health.failed()) { ok = false; return; }
+        {
+            // Per-mod shader activation report: every visible model layer whose shader nothing draws (no adapter, alias,
+            // planet/environment/built-in route). The header-only scan reads no geometry; the native translation is off in
+            // this pass, so a name only that route could admit is listed too.
+            const auto audit = eawr::scene::audit_model_shaders(filesystem.value());
+            auto shader_notes = eawr::scene::shader_audit_notes(audit);
+            eawr::core::bind_load_note_layers(shader_notes, mod_ids, stock_ids);
+            for (auto& note : shader_notes) notes.append(std::move(note));
+            std::cerr << "shader audit: " << audit.models_scanned << " models, " << audit.visible_meshes
+                      << " visible mesh layers, " << audit.unhandled.size() << " unhandled shader names, "
+                      << audit.models_unreadable << " unreadable models" << '\n';
+        }
         progress("types", 2);
         // The load check reads each model once and keeps only the simulation projection: no VfsAssetCache pins.
         eawr::units::SimulationModelStore models(filesystem.value());

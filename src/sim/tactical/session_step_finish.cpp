@@ -78,6 +78,7 @@ void session_detail::Tick::sync_radar_creations(const UnitStage& staged, const E
             auto slots = impl_->radar_slots(added->second.state.type_id);
             if (!slots.empty()) {
                 if (!radar_roster_) radar_roster_ = impl_->radar_roster;
+                impl_->record_radar_applied(named_ability_locks_, added->second.state.owner, added->second.state.type_id);
                 radar_roster_->insert_or_assign(id, std::move(slots));
                 radar_dirty_ = true;
             }
@@ -93,7 +94,10 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
     if ((before && roster.contains(before->entity_id)) || !slots.empty()) {
         if (!radar_roster_) radar_roster_ = impl_->radar_roster;
         if (before) radar_roster_->erase(before->entity_id);
-        if (after && !slots.empty()) radar_roster_->insert_or_assign(after->entity_id, std::move(slots));
+        if (after && !slots.empty()) {
+            impl_->record_radar_applied(named_ability_locks_, after->owner, after->type_id);
+            radar_roster_->insert_or_assign(after->entity_id, std::move(slots));
+        }
         radar_dirty_ = true;
     }
     if (!before && after) if (const auto* health = impl_->durability.find(after->type_id))

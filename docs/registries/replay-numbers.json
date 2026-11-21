@@ -390,6 +390,30 @@
     "constant": "opcode_script_create_object",
     "name": "direct script object creation",
     "documented": true
+   },
+   {
+    "value": 40,
+    "constant": "opcode_script_despawn",
+    "name": "script despawn",
+    "documented": true
+   },
+   {
+    "value": 41,
+    "constant": "opcode_script_teleport",
+    "name": "script teleport",
+    "documented": true
+   },
+   {
+    "value": 42,
+    "constant": "opcode_script_hold_fire",
+    "name": "script hold fire",
+    "documented": true
+   },
+   {
+    "value": 43,
+    "constant": "opcode_script_change_owner",
+    "name": "script change owner",
+    "documented": true
    }
   ]
  },
@@ -477,6 +501,11 @@
   {
    "tag": "DDMG",
    "constant": "blast_tag",
+   "documented": true
+  },
+  {
+   "tag": "DEPP",
+   "constant": "deploy_pose_tag",
    "documented": true
   },
   {
@@ -633,6 +662,11 @@
    "tag": "SEEN",
    "constant": "sighting_tag",
    "documented": false
+  },
+  {
+   "tag": "SHFR",
+   "constant": "hold_fire_tag",
+   "documented": true
   },
   {
    "tag": "SINV",

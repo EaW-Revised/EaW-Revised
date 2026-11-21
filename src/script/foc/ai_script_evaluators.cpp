@@ -210,6 +210,7 @@ core::Result<std::shared_ptr<ScriptEvaluators>> ScriptEvaluators::create(
     std::vector<core::Diagnostic> errors;
     register_globals(scheduler.value(), host, errors, true, !galactic);
     register_methods(scheduler.value(), host, errors);
+    register_battle_object_bindings(scheduler.value(), host, errors);
     if (!errors.empty()) return Result::failure(errors.front());
     impl->scheduler.emplace(std::move(scheduler).value());
     return Result::success(std::shared_ptr<ScriptEvaluators>(new ScriptEvaluators(std::move(impl))));

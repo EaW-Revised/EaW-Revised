@@ -44,7 +44,18 @@ namespace eawr::sim::tactical {
 
 bool TacticalSession::Impl::jammer_ready(const LiveUnit& unit, const AbilityProfile& ability,
     const NamedAbilityLocks& locks) const {
+    if (!unit.abilities) return false;
+    const auto* profile = abilities.find(unit.state.type_id);
+    if (!profile) return false;
+    // WJM-05: a row whose authored name matches no nested handler has nothing to gate; it still runs.
+    if (!has_jammer_handler(*profile, ability)) return true;
     return ordinary_handler_ready(unit, ability, locks, SpecialAbilityKind::sensor_jamming);
+}
+
+bool TacticalSession::Impl::has_jammer_handler(const UnitAbilityProfile& profile, const AbilityProfile& ability) {
+    return std::any_of(profile.special.begin(), profile.special.end(), [&](const auto& handler) {
+        return handler.kind == SpecialAbilityKind::sensor_jamming && handler.name == ability.gui_activated_ability_name;
+    });
 }
 
 bool TacticalSession::Impl::ordinary_handler_ready(const LiveUnit& unit, const AbilityProfile& ability,
@@ -63,10 +74,11 @@ bool TacticalSession::Impl::ordinary_handler_ready(const LiveUnit& unit, const A
     return false;
 }
 
-void TacticalSession::Impl::jammer_reactivated(LiveUnit& unit, const AbilityProfile& ability) const {
-    if (!unit.abilities) return;
+bool TacticalSession::Impl::jammer_reactivated(LiveUnit& unit, const AbilityProfile& ability) const {
+    if (!unit.abilities) return false;
     const auto* profile = abilities.find(unit.state.type_id);
-    if (!profile) return;
+    if (!profile) return false;
+    bool matched = false;
     for (std::size_t slot = 0; slot < profile->special.size(); ++slot) {
         const auto& handler = profile->special[slot];
         if (handler.kind == SpecialAbilityKind::sensor_jamming && handler.name == ability.gui_activated_ability_name) {
@@ -74,8 +86,10 @@ void TacticalSession::Impl::jammer_reactivated(LiveUnit& unit, const AbilityProf
             unit.abilities->special.slots[slot].jammer_disabled_registration = false;
             unit.abilities->special.slots[slot].jammer_registered = true;
             unit.abilities->special.slots[slot].jammer_initialized = false;
+            matched = true;
         }
     }
+    return matched;
 }
 
 core::Result<void> TacticalSession::Impl::service_jamming(std::vector<LiveUnit>& units,
@@ -1298,8 +1312,19 @@ math::Fixed TacticalSession::Impl::stealth_duration_factor(const PlayerId owner,
             }
         }
     }
+    // WBR-02: a live source's contribution sits in the same per-category ledger as a held upgrade's.
+    if (const auto live = command_ledger.stealth_categories.find(owner); live != command_ledger.stealth_categories.end()) {
+        for (const auto& [category, delta] : live->second) {
+            const auto found = std::find_if(largest.begin(), largest.end(),
+                [&](const auto& entry) { return entry.first == category; });
+            if (found == largest.end()) largest.emplace_back(category, delta);
+            else found->second = std::max(found->second, delta);
+        }
+    }
     auto total = math::Fixed::scale; // 1 plus the category winners
     for (const auto& entry : largest) total += entry.second.raw();
+    // The ledger's -0.99 floor on the summed deltas.
+    total = std::max<std::int64_t>(total, math::Fixed::scale - (math::Fixed::scale / 100) * 99);
     return math::Fixed::from_raw(total);
 }
 
@@ -1631,6 +1656,15 @@ bool TacticalSession::Impl::service_abilities(LiveUnit& unit, const std::uint64_
                 speed = switched.speed || speed;
             }
         }
+        // WDP-02/03: a type whose DEPLOY/UNDEPLOY clips move a weapon bone follows the SPOILER_LOCK switch: the other
+        // clip starts when the slot flips (after every switch above, so a lost engine switches it too).
+        if (profile.deploy_poses) {
+            const auto spoiler = ability_slot(profile, AbilityKind::spoiler_lock);
+            if (const auto* shape = combat.find(unit.state.type_id); spoiler && shape != nullptr && shape->deploy_poses) {
+                const bool on = state.slots[*spoiler].active;
+                if (on != (state.deploy_pose && state.deploy_pose->on)) state.deploy_pose = deploy_pose_switch(*shape->deploy_poses, state.deploy_pose, on, tick);
+            }
+        }
         refresh_damage_modes(unit);
         return speed;
     }
@@ -1699,10 +1733,34 @@ std::vector<AbilityStatus> TacticalSession::Impl::ability_statuses(const LiveUni
                 status.remaining_frames = static_cast<std::uint32_t>(slot.ready_tick - tick);
                 status.total_frames = ability.recharge_frames;
             }
+            // WLD-10: the recharge check comes before the on-state in the button, so a countdown that runs
+            // during the run is what the button shows.
+            if (slot.active && ability.recharge_at_activation && slot.ready_tick > tick && ability.recharge_frames != 0) {
+                status.countdown_remaining_frames = static_cast<std::uint32_t>(slot.ready_tick - tick);
+                status.countdown_total_frames = ability.recharge_frames;
+            }
             result.push_back(status);
         }
         return result;
     }
+
+bool TacticalSession::Impl::radar_mode_multiplayer() const {
+    // FC-75: not a campaign battle (skirmish, single-player included, is the multiplayer case) or a multiplayer campaign.
+    return setup.native_scene ? setup.native_scene->multiplayer : !setup.campaign;
+}
+
+void TacticalSession::Impl::record_radar_applied(NamedAbilityLocks& locks, const PlayerId owner, const TypeId type) const {
+    // WRAD-06: a Skirmish_Automatic radar handler that is enabled without a lock event applies from creation, so it
+    // leaves the owner's list entry as an unlocked row; the row outlives the unit. Disabled handlers get their row from
+    // the creation unlock, so stock data writes nothing here.
+    if (!radar_mode_multiplayer()) return;
+    const auto* profile = abilities.find(type);
+    if (!profile) return;
+    for (const auto& handler : profile->special)
+        if (handler.kind == SpecialAbilityKind::enable_radar && handler.style == SpecialActivationStyle::skirmish_automatic
+            && handler.initially_enabled.value_or(true) && !has_named_ability_lock(locks, owner, type, handler.name))
+            static_cast<void>(set_named_ability_lock(locks, owner, *profile, handler.name, false));
+}
 
 std::vector<std::size_t> TacticalSession::Impl::radar_slots(const TypeId type) const {
     std::vector<std::size_t> slots;
@@ -1716,8 +1774,32 @@ core::Result<std::vector<SnapshotPlayer>> TacticalSession::Impl::publish_named_a
     std::vector<LiveUnit>& inputs, const NamedAbilityLocks& locks, const RadarRoster& roster,
     const PartitionExecutor& executor) const {
     auto players = snapshot_players;
-    for (auto& player : players) player.radar_enabled = false;
-    if (roster.empty()) return core::Result<std::vector<SnapshotPlayer>>::success(std::move(players));
+    const bool multiplayer = radar_mode_multiplayer();
+    // WRAD-02/WRAD-06: a player with a radar permission list is admitted by that list. A player without one keeps the
+    // default: enemies stay admitted in a campaign battle (no list can exist there), and stay excluded in every other
+    // battle until the list exists (the list's creation at battle start is not decompiled, so the least visible choice).
+    for (auto& player : players) player.radar_enabled = !multiplayer;
+    // WRAD-06: a retained named lock records that an admitted radar handler once applied for its owner (and, when it
+    // affects allies, the owner's allies). The entry outlives its source, so a station's loss leaves an empty list.
+    std::vector<std::uint8_t> retained(players.size(), 0);
+    if (multiplayer && !locks.empty())
+        for (const auto& profile : abilities.profiles)
+            for (const auto& handler : profile.special) {
+                if (handler.kind != SpecialAbilityKind::enable_radar
+                    || handler.style != SpecialActivationStyle::skirmish_automatic) continue;
+                for (const auto& owner : players) {
+                    if (!has_named_ability_lock(locks, owner.player_id, profile.type_id, handler.name)) continue;
+                    for (std::size_t player = 0; player < players.size(); ++player)
+                        if (players[player].player_id == owner.player_id
+                            || (handler.affects_all_allies && allied(owner.player_id, players[player].player_id)))
+                            retained[player] = 1;
+                }
+            }
+    if (roster.empty()) {
+        for (std::size_t player = 0; player < players.size(); ++player)
+            if (retained[player] != 0) players[player].radar_enabled = false;
+        return core::Result<std::vector<SnapshotPlayer>>::success(std::move(players));
+    }
     // One source per unit keeps its slot writes disjoint even with multiple radar handlers.
     std::vector<const RadarRoster::value_type*> sources;
     sources.reserve(roster.size());
@@ -1740,19 +1822,25 @@ core::Result<std::vector<SnapshotPlayer>> TacticalSession::Impl::publish_named_a
                 auto& state = unit.abilities->special.slots[slot];
                 // WRAD-04/FC-75: zero-interval automatic effect, driven by lifecycle locks.
                 state.enabled = named_ability_enabled(locks, unit.state.owner, unit.state.type_id, handler);
-                if (!state.enabled || state.cancelled || unit.abilities->special.service_cancelled
-                    || handler.style != SpecialActivationStyle::skirmish_automatic) continue;
+                // FC-75: Skirmish_Automatic admits multiplayer tactical mode only; elsewhere the handler never applies, so
+                // its player gets no radar-source entry (bit 2) and keeps the mode default.
+                if (handler.style != SpecialActivationStyle::skirmish_automatic || !multiplayer) continue;
+                const bool applied = state.enabled && !state.cancelled && !unit.abilities->special.service_cancelled;
                 for (std::size_t player = 0; player < players.size(); ++player)
                     if (players[player].player_id == unit.state.owner
                         || (handler.affects_all_allies && allied(unit.state.owner, players[player].player_id)))
-                        contributions[partition][player] = 1;
+                        contributions[partition][player] = static_cast<std::uint8_t>(contributions[partition][player] | (applied ? 3U : 2U));
             }
         }
     });
     if (!prepared) return core::Result<std::vector<SnapshotPlayer>>::failure(prepared.error());
     // Ordered reduction of bounded player outputs; no serial per-object work.
-    for (const auto& partition : contributions) for (std::size_t player = 0; player < players.size(); ++player)
-        players[player].radar_enabled |= partition[player] != 0;
+    for (std::size_t player = 0; player < players.size(); ++player) {
+        std::uint8_t bits = 0;
+        for (const auto& partition : contributions) bits = static_cast<std::uint8_t>(bits | partition[player]);
+        // Entry present: the permission list decides (empty is false); entry absent: the mode default.
+        players[player].radar_enabled = ((bits & 2U) == 0 && retained[player] == 0) ? !multiplayer : (bits & 1U) != 0;
+    }
     return core::Result<std::vector<SnapshotPlayer>>::success(std::move(players));
 }
 

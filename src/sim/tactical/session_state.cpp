@@ -60,10 +60,15 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
                 unit.waypoints->points.begin(), unit.waypoints->points.end(),
                 [](const auto& point) { return point.move.final_yaw.has_value(); }));
         });
+        // WDP-02: a live unit that has switched a deploy clip selects the wider ability layout.
+        out.deploy_poses = std::any_of(live.begin(), live.end(), [](const auto& unit) {
+            return unit.abilities && unit.abilities->deploy_pose.has_value();
+        });
+        out.hold_fire = std::any_of(live.begin(), live.end(), [](const auto& unit) { return unit.hold_fire; });
         // SSU-03: domain 37 base includes direct-creation references and positions.
-        // +1 fire range; +2 script invulnerability; +4 final facing. Older layouts are refused.
+        // +1 fire range; +2 script invulnerability; +4 final facing; +8 deploy clips; +16 hold fire. Older layouts are refused.
         out(std::uint32_t{37U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)
-            + (out.final_facing ? 4U : 0U)});
+            + (out.final_facing ? 4U : 0U) + (out.deploy_poses ? 8U : 0U) + (out.hold_fire ? 16U : 0U)});
         checkpoint_detail::Access::state(out, std::as_const(*impl_));
         out(live);
         out(checkpoint_detail::Access::visibility(*impl_));
@@ -111,10 +116,12 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         checkpoint_detail::Reader in(bytes);
         std::uint32_t version{};
         in(version);
-        if (version < 37U || version > 44U) throw checkpoint_detail::Invalid("unsupported child state domain");
+        if (version < 37U || version > 68U) throw checkpoint_detail::Invalid("unsupported child state domain");
         in.fire_range_bonuses = (version - 37U) % 2U == 1U;
         in.script_invulnerable = (version - 37U) % 4U >= 2U;
-        in.final_facing = version >= 41U;
+        in.final_facing = (version - 37U) % 8U >= 4U;
+        in.deploy_poses = (version - 37U) % 16U >= 8U;
+        in.hold_fire = (version - 37U) % 32U >= 16U;
         const auto cursors = impl_->last_submitted;
         checkpoint_detail::Access::state(in, *impl_);
         // SAE-10: a reinforcement whose search failed advanced its issuer's cursor but is never recorded, so the
@@ -148,6 +155,12 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         if (in.script_invulnerable && std::none_of(live.begin(), live.end(), [](const auto& unit) {
                 return unit.script_invulnerable;
             })) throw checkpoint_detail::Invalid("noncanonical empty script-invulnerable domain");
+        if (in.deploy_poses && std::none_of(live.begin(), live.end(), [](const auto& unit) {
+                return unit.abilities && unit.abilities->deploy_pose.has_value();
+            })) throw checkpoint_detail::Invalid("noncanonical empty deploy-pose domain");
+        if (in.hold_fire && std::none_of(live.begin(), live.end(), [](const auto& unit) {
+                return unit.hold_fire;
+            })) throw checkpoint_detail::Invalid("noncanonical empty hold-fire domain");
         if (in.final_facing && std::none_of(live.begin(), live.end(), [](const auto& unit) {
                 return unit.state.order.final_yaw.has_value() || (unit.waypoints && std::any_of(
                     unit.waypoints->points.begin(), unit.waypoints->points.end(),
@@ -223,14 +236,19 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
             if (!profile || (spawner.ready && spawner.entries.size() != profile->entries.size()))
                 throw checkpoint_detail::Invalid("hangar binding disagrees with content");
         }
-        if (impl_->tracks_player_reveal()) {
+        if (impl_->tracks_player_reveal() || impl_->tracks_player_effects()) {
             auto derived = impl_->update_command_ledger(live, impl_->next_id, InlineExecutor{});
             if (!derived || derived.value().battlefield_defence != impl_->command_ledger.battlefield_defence
-                || derived.value().reveal_multipliers != impl_->command_ledger.reveal_multipliers)
+                || derived.value().reveal_multipliers != impl_->command_ledger.reveal_multipliers
+                || derived.value().stealth_categories != impl_->command_ledger.stealth_categories
+                || derived.value().capture_adjustments != impl_->command_ledger.capture_adjustments
+                || derived.value().special_weapon_players != impl_->command_ledger.special_weapon_players)
                 throw checkpoint_detail::Invalid("player modifier ledger disagrees with its live sources");
-            for(std::size_t i=impl_->setup.players.size();i<impl_->last_fog_multipliers.size();++i)
-                if(impl_->last_fog_multipliers[i]!=math::Fixed{}) throw checkpoint_detail::Invalid("invalid last-fog multiplier cache");
-            impl_->fog_modifiers_dirty=impl_->fog_multipliers(impl_->command_ledger)!=impl_->last_fog_multipliers;
+            if (impl_->tracks_player_reveal()) {
+                for(std::size_t i=impl_->setup.players.size();i<impl_->last_fog_multipliers.size();++i)
+                    if(impl_->last_fog_multipliers[i]!=math::Fixed{}) throw checkpoint_detail::Invalid("invalid last-fog multiplier cache");
+                impl_->fog_modifiers_dirty=impl_->fog_multipliers(impl_->command_ledger)!=impl_->last_fog_multipliers;
+            }
         }
         const auto search_count = in.count();
         impl_->searches.clear();
@@ -876,6 +894,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.sightings"); append_canonical_sightings_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.garrison_marks"); append_canonical_garrison_marks_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.script_invulnerable"); append_canonical_script_invulnerable_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.hold_fire"); append_canonical_hold_fire_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.craft"); append_canonical_craft_state(bytes, parts(&CanonicalEncoding::crafts)); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.squadron_orders"); append_canonical_squadron_orders_state(bytes, parts(&CanonicalEncoding::minds)); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.attack_paths"); append_canonical_attack_paths_state(bytes); }
@@ -899,6 +918,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.ion_stuns"); append_canonical_ion_stuns_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.hazard_moves"); append_canonical_hazard_moves_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.final_facing"); append_canonical_final_facing_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.deploy_pose"); append_canonical_deploy_pose_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.asteroids"); append_canonical_asteroids_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.engine_disable"); append_canonical_engine_disable_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.nebula"); append_canonical_nebula_state(bytes, units, counts); }

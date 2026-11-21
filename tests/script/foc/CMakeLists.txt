@@ -5,7 +5,9 @@ add_executable(foc_ai_contract_tests
     foc_ai_contract_economy_tests.cpp
     foc_ai_contract_tactical_tests.cpp
     foc_ai_contract_objects_tests.cpp
+    foc_ai_contract_story_tests.cpp
     foc_ai_contract_tsw_tests.cpp
+    foc_ai_contract_hint_radar_tests.cpp
     foc_ai_contract_evaluator_tests.cpp
     foc_ai_contract_build_tests.cpp)
 target_link_libraries(foc_ai_contract_tests PRIVATE eawr::script_foc eawr::platform eawr::platform_live_ai eawr::vfs)

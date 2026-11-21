@@ -54,6 +54,8 @@ int main(int argc, char* argv[]) {
     }
     test_station_radar_and_named_locks();
     test_radar_lifecycle_work_budget();
+    test_radar_enemy_admission_by_mode();
+    test_radar_initially_enabled_source_retains_list();
     test_replenished_radar_creation();
     test_hardpoint_dependencies();
     test_space_healing();
@@ -69,6 +71,7 @@ int main(int argc, char* argv[]) {
     test_corrupt_scatter();
     test_corrupt_systems();
     test_full_salvo();
+    test_mode_entries();
     test_rocket_attack();
     test_stealth_session();
     test_stealth_duration_modifiers();
@@ -83,6 +86,13 @@ int main(int argc, char* argv[]) {
     test_impact_shooter_bonus();
     test_fire_range_bonus();
     test_script_invulnerable();
+    test_script_despawn();
+    test_script_despawn_cleanup();
+    test_script_hold_fire();
+    test_script_change_owner();
+    test_script_change_owner_edges();
+    test_script_hold_fire_beam();
+    test_script_teleport();
     test_hero_environment_damage_routing();
     test_hero_damage_after_escorts_die();
     test_hero_wingmen();

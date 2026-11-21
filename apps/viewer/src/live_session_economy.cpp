@@ -261,6 +261,7 @@ std::optional<ui::UnitAbilityState> LiveSessionView::Abilities::state(const sim:
     bool all_autofire = true;
     bool blocked = false;
     std::optional<double> recharge;
+    bool running_countdown = false; // WLD-10
     std::optional<double> active_dial; // AB-05: the largest share of a timed duration left among the units that are on
     // WU-46: the cards and world overlays share this lookup. Visit only this unit's holders;
     // sorted snapshot lookup neither allocates nor scans unrelated units on each drawn frame.
@@ -272,7 +273,12 @@ std::optional<ui::UnitAbilityState> LiveSessionView::Abilities::state(const sim:
             has = true;
             all_active = all_active && status.active;
             all_autofire = all_autofire && status.autofire;
-            if (status.active && status.total_frames > 0) {
+            if (status.active && status.countdown_total_frames > 0) {
+                // WLD-10: a countdown running during the run is shown as the recharge fill, not the run.
+                const double done = 1.0 - static_cast<double>(status.countdown_remaining_frames) / status.countdown_total_frames;
+                recharge = recharge ? std::min(*recharge, done) : done;
+                running_countdown = true;
+            } else if (status.active && status.total_frames > 0) {
                 const double left = static_cast<double>(status.remaining_frames) / status.total_frames;
                 active_dial = active_dial ? std::max(*active_dial, left) : left;
             }
@@ -289,7 +295,10 @@ std::optional<ui::UnitAbilityState> LiveSessionView::Abilities::state(const sim:
     if (!has) return ui::UnitAbilityState{ui::AbilityStatus::disabled, 1.0, false};
     ui::UnitAbilityState result;
     result.autofire = all_autofire;
-    if (all_active) {
+    if (all_active && running_countdown && recharge) {
+        result.status = ui::AbilityStatus::recharging;
+        result.recharge = std::clamp(*recharge, 0.0, 1.0);
+    } else if (all_active) {
         result.status = ui::AbilityStatus::active;
         if (active_dial) result.recharge = std::clamp(*active_dial, 0.0, 1.0);
     } else if (recharge) {

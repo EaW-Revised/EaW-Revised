@@ -128,8 +128,29 @@ std::size_t HudViewModel::family_size(const std::string_view stem) const {
 ShellPlacement HudViewModel::placement(const ReferenceSpace& space) const noexcept {
     // D4 measures right extent from the authored origin; preserve FoC's safe
     // area placement, including its one-unit negative faceplate border.
-    return place_command_bar(space, visible_extent ? std::max(0.0F,visible_extent->right()) : 0.0,
+    auto placed = place_command_bar(space, visible_extent ? std::max(0.0F,visible_extent->right()) : 0.0,
         shell_placement);
+    if (right_margin > 0.0F && visible_extent && placed.scale > 0.0) keep_right_margin(placed, *visible_extent, space);
+    return placed;
+}
+void HudViewModel::keep_right_margin(ShellPlacement& placed, const data::ui::ReferenceRect& extent,
+    const ReferenceSpace& space) const noexcept {
+    // The shell keeps right_margin units free on its right and, once it has to move, on its left too: a shell that fits
+    // is left where it is; one that is too far right moves left while its left edge keeps the margin; one too wide even
+    // then is scaled down uniformly so that both gaps are right_margin units of the final scale. The bottom stays.
+    const double margin = static_cast<double>(right_margin);
+    const double width = static_cast<double>(space.viewport.width);
+    const double limit = width - margin * placed.scale;
+    const double left_edge = placed.left + static_cast<double>(extent.x) * placed.scale;
+    const double right_edge = placed.left + static_cast<double>(extent.right()) * placed.scale;
+    if (right_edge <= limit || limit <= 0.0 || extent.width <= 0.0F) return;
+    const double shift = right_edge - limit;
+    if (left_edge - shift >= margin * placed.scale) {
+        placed.left -= shift;
+        return;
+    }
+    placed.scale = width / (static_cast<double>(extent.width) + 2.0 * margin);
+    placed.left = (margin - static_cast<double>(extent.x)) * placed.scale;
 }
 bool HudViewModel::hit_test(const ReferencePoint point) const noexcept {
     if (!visible_extent || !contains(*visible_extent,point)) return false;

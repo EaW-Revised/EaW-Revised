@@ -219,7 +219,7 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
                 tsw_states.emplace(unit.entity_id, TswState{});
             live.push_back(new_unit(unit, 0));
             auto slots = radar_slots(unit.type_id);
-            if (!slots.empty()) radar_roster.emplace(unit.entity_id, std::move(slots));
+            if (!slots.empty()) { record_radar_applied(named_ability_locks, unit.owner, unit.type_id); radar_roster.emplace(unit.entity_id, std::move(slots)); }
             if (const auto* health = durability.find(unit.type_id))
                 if (const auto* handlers = abilities.find(unit.type_id))
                     for (const auto& point : health->hardpoints)

@@ -247,6 +247,22 @@ numerators therefore do not change game normalization denominators. Hero
 exclusion remains the authored equation subtraction. Presence is independent
 of metric and garrisons, and bitfields inspect live contents.
 
+**WGA-192a (debug build).** The WGA-192 weighting has no guard for the authored
+`MaximumFleetMovementDistance`. A mod may author 0 (fleets then move along trade routes only,
+WGM-16); the neighbourhood is then the planet itself and its direct trade-route neighbours, and
+each weight `1 - (1 - attenuator) * (distance / maximum)` is computed in binary64 with IEEE
+division: the planet itself gives 0/0 = NaN, a neighbour gives an infinite quotient, so with the
+default attenuator 1 every term is NaN. The getter returns that NaN (or infinity) as a
+**successful** value. Only the existing denominator rule refuses: a zero game-wide denominator
+answers 0 for a zero total and is unavailable otherwise, a NaN total included. The equation
+layer already follows IEEE (PE rules: comparisons with NaN are false except `!=`, clamp keeps
+NaN, divide refuses only a nonzero numerator over zero), so a defend-planet equation whose
+threat term compares the nearby total stays finite.
+Deviation DEV-29: the original accepts a goal whose final desire is NaN and ranks it by
+an artefact of its sort; we refuse a NaN desire at the proposal gate like any nonpositive desire
+(least visible choice, no unspecified rank). The original rebuilds the neighbourhood after a load
+without the planet itself; WGA-192 keeps it (DEV-30).
+
 Force metrics/categories/starting rows, structure space/garrison masks, live
 stealth and potential indigenous facts are typed copied authoring/service
 inputs. Missing applicable inputs refuse a number. Island tokens consume known

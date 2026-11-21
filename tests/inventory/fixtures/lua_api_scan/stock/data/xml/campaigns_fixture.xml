@@ -1,0 +1,5 @@
+<Campaigns>
+	<Campaign Name="Fixture_Campaign">
+		<Rebel_Story_Name>Story_Plots_Fixture.xml</Rebel_Story_Name>
+	</Campaign>
+</Campaigns>

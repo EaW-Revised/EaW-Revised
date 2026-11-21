@@ -1462,6 +1462,55 @@ std::string force_contracts(unsigned workers) {
     return host.world->state_hash().value() + visible_flags.world->state_hash().value();
 }
 
+// WGA-192a: a mod that authors a zero movement range (fleets move along trade routes only) divides by it without a guard:
+// the nearby force total is a successful NaN, and an equation that compares it stays finite. Synthetic names and values only.
+std::string zero_range_nearby_contracts(unsigned workers) {
+    auto setup = fixture_setup(); setup.uses_fog = false; setup.maximum_fleet_distance = ai::Real{};
+    setup.types.clear();
+    foc::AiType type; type.type_id = 100; type.name = "A"; type.category_bits = 1; setup.types.push_back(type);
+    ai::GalacticForceType facts; facts.type = 100; facts.categories = 1; facts.power = real(1250); setup.force_types.push_back(facts);
+    for (auto& planet : setup.planets) planet.enemy_indigenous.emplace();
+    const auto data = equations({{"zero.xml", R"(<Equations>
+<Nearby>Variable_Target.EnemyForce.NearbySpaceTotal</Nearby>
+<Attenuated>Variable_Target.EnemyForce.NearbySpaceTotal {Parameter_Attenuator=0}</Attenuated>
+<Threat>(Variable_Target.EnemyForce.NearbySpaceTotal > 0.0) + (1 - (Variable_Target.EnemyForce.NearbySpaceTotal == 0.0))</Threat>
+</Equations>)"}});
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    QueryHost host(setup, data);
+    gc::PlayerEconomySetup accounts; accounts.players = {{1, whole(100), whole(1000), 3, 5}, {2, whole(100), whole(1000), 3, 5}};
+    // Player 2's fleet sits at the trade-route neighbour 30 (200 away) and at 20 (100 away, no route): only 30 is nearby.
+    gc::Fleet routed; routed.id = 60; routed.owner = 2; routed.orbit = 30; routed.members = {{61, 100}};
+    gc::Fleet unrouted; unrouted.id = 62; unrouted.owner = 2; unrouted.orbit = 20; unrouted.members = {{63, 100}, {64, 100}};
+    gc::GalacticClock clock; clock.session_tick = clock.galactic_frame = 1;
+    const auto snapshot = std::make_shared<gc::GalacticSnapshot>(1, clock, std::vector<gc::GalacticPlayer>{{1, 1, 0}, {2, 2, 0}, {3, 3, 0}},
+        std::vector<gc::Planet>{{10, {}, 1}, {20, {whole(100), {}, {}}, 2}, {30, {whole(200), {}, {}}, 3}},
+        std::vector<gc::Route>{{40, 10, 30, whole(1)}}, std::vector<gc::Fleet>{routed, unrouted}, std::vector<gc::GalacticEvent>{},
+        std::nullopt, std::nullopt, std::make_shared<gc::MovementSetup>(), std::nullopt, std::vector<gc::Seat>{}, accounts,
+        gc::ProductionSetup{}, gc::PoliticalControlSetup{});
+    ai::GalacticConnectivity connectivity;
+    expect(static_cast<bool>(host.world->bind(snapshot, connectivity, executor, 1, 100)), "zero-range fixture binds"); host.initialize(executor);
+    // The planet itself weighs 0/0 and the trade-route neighbour d/0: binary64 NaN, returned as a successful value.
+    const auto is_nan_value = [](const std::optional<ai::Real>& value) { return value && !(*value == *value); };
+    expect(is_nan_value(host.query("Nearby")), "WGA-192a: zero range gives a successful NaN nearby total, not unavailable");
+    expect(is_nan_value(host.query("Attenuated")), "WGA-192a: any attenuator divides by the zero range the same way");
+    // IEEE comparisons swallow the NaN: (NaN > 0) = 0, (NaN == 0) = 0, so the threat term is a finite 1.
+    expect(host.query("Threat") == real(1), "WGA-192a: an equation that compares the NaN total stays finite");
+    // The cached NaN answer survives a save/load round trip bit for bit.
+    const auto state = host.world->state();
+    expect(std::any_of(state.cache.begin(), state.cache.end(), [](const auto& row) { return !(row.value == row.value); }),
+        "WGA-192a: the NaN nearby total is a cached answer");
+    const auto captured = host.world->capture();
+    if (!captured) throw std::runtime_error(captured.error().message);
+    QueryHost restored(setup, data);
+    expect(static_cast<bool>(restored.world->bind(snapshot, connectivity, executor, 1, 100)), "zero-range restore fixture binds");
+    restored.initialize(executor);
+    const auto reloaded = restored.world->restore(captured.value());
+    expect(static_cast<bool>(reloaded), "WGA-192a: a perception archive holding the NaN nearby total loads again");
+    expect(restored.world->state_hash().value() == host.world->state_hash().value(), "WGA-192a: the reloaded cache is bit-identical");
+    expect(is_nan_value(restored.query("Nearby")), "WGA-192a: the reloaded nearby total is still the NaN answer");
+    return host.world->state_hash().value();
+}
+
 std::optional<std::string> game_root() {
     return eawr::testing::game_root();
 }
@@ -1792,7 +1841,7 @@ int case_galactic_ai_perception_stock_tests(int argc, char**) {
         else {
             std::string reference;
             for (const auto workers : {1U, 2U, 4U, 8U}) {
-                const auto trace = owner_scope_contracts(workers) + binding_lifetime_contracts(workers) + interned_contracts(workers) + unchanged_record_contracts(workers) + connectivity_record_contracts(workers) + restored_connectivity_contracts(workers) + contracts(workers) + force_contracts(workers)
+                const auto trace = owner_scope_contracts(workers) + binding_lifetime_contracts(workers) + interned_contracts(workers) + unchanged_record_contracts(workers) + connectivity_record_contracts(workers) + restored_connectivity_contracts(workers) + contracts(workers) + force_contracts(workers) + zero_range_nearby_contracts(workers)
                     + story_campaign_contracts(workers) + difficulty_seat_contracts(workers)
                     + producer_preparation_contracts(workers) + path_coefficient_contracts(workers) + path_coefficient_reader_contracts(workers) + supplemental_reader_contracts(workers) + offensive_reader_contracts(workers) + underworld_corruption_readers(workers);
                 const auto target_trace = target_contrast_contracts(workers);

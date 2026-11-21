@@ -28,6 +28,12 @@ struct SessionStoreBonuses {
         std::map<EntityId, std::vector<std::size_t>> recipients;
         std::map<PlayerId, std::vector<std::pair<std::uint32_t, math::Fixed>>> battlefield_defence;
         std::vector<std::pair<PlayerId, math::Fixed>> reveal_multipliers;
+        // WBR-02/03: the other source-owned player ledgers. Stealth duration keeps its category winners (the cloak
+        // switch-on merges them with held upgrades); capture time is the floored sum of its winners per player;
+        // a player is in the special-weapon list while any live source enables it.
+        std::map<PlayerId, std::vector<std::pair<std::uint32_t, math::Fixed>>> stealth_categories;
+        std::vector<std::pair<PlayerId, math::Fixed>> capture_adjustments;
+        std::vector<PlayerId> special_weapon_players;
     };
     CommandLedger command_ledger;
     // WGT-50: last multiplier consumed by fog, indexed by bounded setup player order.

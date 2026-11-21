@@ -53,6 +53,29 @@ std::size_t omitted_by_bar(const std::size_t choice_count,
     return choice_count > shown ? choice_count - shown : 0;
 }
 
+float widest_panel(const float view, const float left, const float share, const std::optional<float> clear_from) noexcept {
+    float right = std::min(left + view * share, view);
+    if (clear_from && *clear_from > left) right = std::min(right, *clear_from);
+    return std::max(0.0F, right - left);
+}
+
+std::vector<BandPiece> band_pieces(const float target_x, const float target_width, const float span) {
+    std::vector<BandPiece> pieces;
+    if (!(target_width > 0.0F) || !(span > 0.0F)) return pieces;
+    // A sample under one pixel is too thin to repeat (a sliver triangle in mod data would give a quad per fraction of a
+    // pixel): the one sample is stretched over the whole band instead.
+    if (span < 1.0F) return {{target_x, target_width}};
+    const float end = target_x + target_width;
+    // Each piece starts at target_x + i * span, so rounding never accumulates; a remainder under a hundredth of a pixel is
+    // rounding, not a piece.
+    for (std::size_t i = 0;; ++i) {
+        const float x = target_x + static_cast<float>(i) * span;
+        if (end - x <= 0.01F) break;
+        pieces.push_back({x, std::min(span, end - x)});
+    }
+    return pieces;
+}
+
 float queue_strip_lift(const Box& strip, const std::optional<Box>& panel, const std::optional<Box>& handle,
     const float gap, const float view_top) noexcept {
     const auto meets = [](const Box& a, const Box& b) {
@@ -104,6 +127,10 @@ std::optional<UvMap> uv_map_at(const std::span<const data::ui::ShellTriangle> tr
         map.du_dy = (cu * bx - bu * cx) / det;
         map.dv_dx = (bv * cy - cv * by) / det;
         map.dv_dy = (cv * bx - bv * cx) / det;
+        map.x_min = std::min({a.position.x, b.position.x, c.position.x});
+        map.x_max = std::max({a.position.x, b.position.x, c.position.x});
+        map.y_min = std::min({a.position.y, b.position.y, c.position.y});
+        map.y_max = std::max({a.position.y, b.position.y, c.position.y});
         return map;
     }
     return std::nullopt;

@@ -48,6 +48,9 @@ struct SaveTransferView {
     // restore that blocks the frame does not show in restored_ms - last_chunk_ms). Zero until it has finished.
     std::uint64_t restore_wall_ms{};
     bool timed_chunks{};
+    // Host: the guests that have not yet reported their own restore of the selected save (empty when nothing is selected or the
+    // transfer was refused). The lobby names them in its waiting line.
+    std::vector<PeerIndex> unrestored;
     std::optional<core::Diagnostic> refusal;
 };
 

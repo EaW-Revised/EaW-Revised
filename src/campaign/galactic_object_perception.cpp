@@ -30,10 +30,13 @@ struct WorldResolver final : ai::LookupResolver {
     std::uint64_t seed;
     std::string& why;
     std::uint64_t& visited;
+    const std::map<gc::PlanetId, ai::Real>* base_income;
     unsigned depth;
     WorldResolver(const ai::EquationSet& set, const gc::GalacticSnapshot& world, gc::PlayerId who, std::optional<gc::PlanetId> at,
-        std::uint64_t world_seed, std::string& reason, std::uint64_t& work, unsigned nesting = 0)
-        : equations(set), snapshot(world), player(who), target(at), seed(world_seed), why(reason), visited(work), depth(nesting) {}
+        std::uint64_t world_seed, std::string& reason, std::uint64_t& work, const std::map<gc::PlanetId, ai::Real>* incomes,
+        unsigned nesting = 0)
+        : equations(set), snapshot(world), player(who), target(at), seed(world_seed), why(reason), visited(work),
+          base_income(incomes), depth(nesting) {}
 
     [[nodiscard]] bool allied(gc::PlayerId other) const {
         if (other == player) return true;
@@ -66,7 +69,7 @@ struct WorldResolver final : ai::LookupResolver {
             if (!nested) { why = "function " + tokens[0] + " is not an equation"; return {}; }
             ai::AiRandom random;
             random.set_seed(static_cast<std::uint32_t>(seed) + (player + 1U) * 0x83U + 0x12345678U + ai::crc32(nested->name));
-            WorldResolver inner(equations, snapshot, player, target, seed, why, visited, depth + 1);
+            WorldResolver inner(equations, snapshot, player, target, seed, why, visited, base_income, depth + 1);
             return ai::run(*nested, inner, random);
         }
         const bool targeted = !tokens.empty() && tokens.front() == "VARIABLE_TARGET";
@@ -82,6 +85,26 @@ struct WorldResolver final : ai::LookupResolver {
                 if (row.planet == *target) return ai::real(row.space_level);
             why = "lookup " + join(tokens) + " has no production row for the target planet";
             return {};
+        }
+        // GA-13: the planet's surface access (the value the AI's IsSurfaceAccessible reads) and its normalized authored
+        // base income (the AI's BaseIncome), for the story scripts' scripted starting forces.
+        if (targeted && tokens.size() == 2 && tokens[1] == "ISSURFACEACCESSIBLE") {
+            if (!bindings.empty()) { why = "lookup " + join(tokens) + " takes no parameters here"; return {}; }
+            const auto& production = snapshot.production();
+            if (!production) { why = "lookup " + join(tokens) + " has no production data"; return {}; }
+            for (const auto& row : production->planets)
+                if (row.planet == *target) return ai::real(row.surface_accessible ? 1 : 0);
+            why = "lookup " + join(tokens) + " has no production row for the target planet";
+            return {};
+        }
+        if (targeted && tokens.size() == 2 && tokens[1] == "BASEINCOME") {
+            if (!bindings.empty()) { why = "lookup " + join(tokens) + " takes no parameters here"; return {}; }
+            const auto found = base_income ? base_income->find(*target) : std::map<gc::PlanetId, ai::Real>::const_iterator{};
+            if (!base_income || found == base_income->end()) {
+                why = "lookup " + join(tokens) + " has no authored income for the target planet";
+                return {};
+            }
+            return found->second;
         }
         why = "lookup " + join(tokens) + " is not available to object scripts";
         return {};
@@ -120,7 +143,7 @@ core::Result<std::shared_ptr<const GalacticObjectPerception>> GalacticObjectPerc
 
 std::optional<ai::Real> GalacticObjectPerception::evaluate(std::string_view name, gc::PlayerId player,
     std::optional<gc::PlanetId> target, const gc::GalacticSnapshot& snapshot, std::uint64_t seed, std::string& why,
-    std::uint64_t& visited) const {
+    std::uint64_t& visited, const std::map<gc::PlanetId, ai::Real>* base_income) const {
     const auto* equation = equations_.find(name);
     if (!equation) { why = "no perception equation is named " + std::string(name); return {}; }
     if (target) {
@@ -133,7 +156,7 @@ std::optional<ai::Real> GalacticObjectPerception::evaluate(std::string_view name
     ai::AiRandom random;
     random.set_seed(static_cast<std::uint32_t>(seed) + (player + 1U) * 0x83U + 0x12345678U + ai::crc32(equation->name)
         + (target ? static_cast<std::uint32_t>(*target) : 0U));
-    WorldResolver resolver(equations_, snapshot, player, target, seed, why, visited);
+    WorldResolver resolver(equations_, snapshot, player, target, seed, why, visited, base_income);
     auto value = ai::run(*equation, resolver, random);
     if (!value && why.empty()) why = "equation " + equation->name + " did not evaluate";
     return value;

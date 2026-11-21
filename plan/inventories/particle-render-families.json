@@ -204,34 +204,34 @@
       "value": 4,
       "program": "Engine/PrimDepthSpriteAdditive.fx",
       "technique": "Depth_Sprite_PS20",
-      "disposition": "listed",
+      "disposition": "implemented",
       "blend": "additive",
-      "render_state": "SrcBlend ONE, DestBlend ONE, per-pixel depth output",
-      "depth_write": null,
+      "render_state": "SrcBlend ONE, DestBlend ONE, ZWriteEnable FALSE (per-pixel depth output from the second texture is not applied)",
+      "depth_write": false,
       "corpus_emitters": 870,
-      "cause": "depth sprite replaces per-pixel depth from the emitter's depth texture; the replacement is derivable from the public PrimDepthSprite program but is not implemented in this slice"
+      "cause": ""
     },
     {
       "value": 5,
       "program": "Engine/PrimDepthSpriteAlpha.fx",
       "technique": "Depth_Sprite_PS20",
-      "disposition": "listed",
+      "disposition": "implemented",
       "blend": "alpha",
-      "render_state": "SrcBlend SRCALPHA, DestBlend INVSRCALPHA, per-pixel depth output",
-      "depth_write": null,
+      "render_state": "SrcBlend SRCALPHA, DestBlend INVSRCALPHA, ZWriteEnable FALSE (per-pixel depth output from the second texture is not applied)",
+      "depth_write": false,
       "corpus_emitters": 141,
-      "cause": "depth sprite replaces per-pixel depth from the emitter's depth texture; not implemented in this slice"
+      "cause": ""
     },
     {
       "value": 6,
       "program": "Engine/PrimDepthSpriteModulate.fx",
       "technique": "Depth_Sprite_PS20",
-      "disposition": "listed",
+      "disposition": "implemented",
       "blend": "modulate",
-      "render_state": "SrcBlend ZERO, DestBlend SRCCOLOR, per-pixel depth output",
-      "depth_write": null,
+      "render_state": "SrcBlend ZERO, DestBlend SRCCOLOR, ZWriteEnable FALSE (per-pixel depth output from the second texture is not applied)",
+      "depth_write": false,
       "corpus_emitters": 0,
-      "cause": "depth sprite replaces per-pixel depth; not implemented; no corpus emitter selects it"
+      "cause": ""
     },
     {
       "value": 7,
@@ -425,7 +425,7 @@
       "evidence": ""
     }
   ],
-  "sort_policy": "PS-32: authored depth sorting for opaque/alpha/bump-alpha with depth enabled, farthest first by squared camera distance; ignore-depth and additive omit sorting. Unsupported depth-sprite alpha remains fail-closed. Equal-distance ties use stable particle IDs as project policy.",
+  "sort_policy": "PS-32: authored depth sorting for opaque/alpha/bump-alpha with depth enabled, farthest first by squared camera distance; ignore-depth and additive omit sorting. Depth-sprite alpha (5) sorts like alpha; depth sprites 4/5/6 draw with the sibling blend and without the per-pixel depth output. Equal-distance ties use stable particle IDs as project policy.",
   "coverage_manifest": "plan/inventories/godot-material-coverage.json still lists particles under not_supported; it is owned by P1-01 and should gain these modern_spatial particle adapters when that owner accepts them",
   "corpus_runs": [
     {

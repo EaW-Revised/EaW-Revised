@@ -74,6 +74,9 @@ bool pause_press_admitted(const bool has_command_bar, const bool bar_clock_enabl
     if (has_command_bar) return bar_clock_enabled;
     return !gates.lan_match || clock_controls_open(gates);
 }
+bool pause_request_admitted(const bool pause, const bool battle_prompt_pending) noexcept {
+    return pause || !battle_prompt_pending;
+}
 std::optional<sim::math::Fixed> live_fast_forward_factor(const bool fixture, const bool live_game, const bool multiplayer) noexcept {
     if (fixture || !live_game) return std::nullopt;
     return sim::math::Fixed::from_raw(multiplayer ? sim::galactic::multiplayer_speed_max_raw : sim::galactic::fast_forward_factor_raw);
@@ -552,8 +555,9 @@ BonusIconStyle planet_bonus_icon_style(const bool layer_visible, const std::stri
 }
 
 BonusIconRect planet_bonus_icon_rect(const double anchor_x, const double anchor_y, const double offset_x,
-    const double offset_y, const double ui_scale, const double texture_width, const double texture_height) noexcept {
-    const double width = texture_width * ui_scale, height = texture_height * ui_scale;
+    const double offset_y, const double ui_scale, const double texture_width, const double texture_height,
+    const double component_scale) noexcept {
+    const double width = texture_width * ui_scale * component_scale, height = texture_height * ui_scale * component_scale;
     return {anchor_x + offset_x * ui_scale - width / 2.0, anchor_y - offset_y * ui_scale - height / 2.0, width, height};
 }
 
