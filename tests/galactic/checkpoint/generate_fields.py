@@ -15,6 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "presentation/rende
 from viewer_mode_sources import SOURCE_BUNDLES, source_text  # noqa: E402
 
 EXCLUDED = {
+    "eawr::script::authoritative::Handle": {
+        "aux": "a position wrapper's z; Fields<Value> in checkpoint_owner_internal.hpp refuses to save a handle whose third word is nonzero instead of dropping it",
+    },
     "eawr::sim::galactic::story::State": {
         "edits": "serialized as the optional Lua-edit tail after the goals in game_session_lifecycle.cpp (WST-56); absent when nothing was edited",
         "ai_flags": "serialized as the optional TRIGGER_AI flag tail after the Lua edits in game_session_lifecycle.cpp (WST-49); absent when no flag is set",
@@ -87,7 +90,7 @@ OWNER_EXCLUSIONS = {
         "runtime callbacks rebound by the caller": "auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech conflict_gate control_observer corruption_mission_readiness corruption_mission_service hasher hero_placement hero_resolver hero_structures layers outcome_services pending_alert story_handler story_rewards ai_control_switch technology_handler vote_progress",
         "immutable content lookup tables rebound on load": "story_factions story_heroes story_planets story_scripts story_types",
         "transient story-script failure set: filled by a tick's story service with the plots whose script had a thread fail, consumed and cleared by that tick's control-lock release, never saved": "failed_story_plots",
-        "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index entry_notes story_notes story_notices story_reported story_locks story_triggers story_presentation gui_click_tick gui_clicks_this_tick",
+        "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index entry_notes entry_infos entry_fallback story_notes story_notices story_reported story_locks story_triggers story_presentation gui_click_tick gui_clicks_this_tick",
         "liveness token whose weak_ptr appliers hold so they fail cleanly once the session is gone; process-local, never saved": "story_plot_alive",
         "host-side diagnostic oracle trace session id": "native_oracle_session",
         "LOAD_CAMPAIGN request and its refusal warnings (WST-95): host state for the next frame, never saved or hashed; a save refuses while the request is pending": "campaign_switch campaign_switch_fresh script_warnings",

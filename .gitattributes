@@ -57,6 +57,7 @@ tools/sched/deploy/* text eol=lf
 tests/degradation_baseline.json text eol=lf
 # The reviewed release layer manifest pins these templates' exact bytes.
 tools/revised_build_tray/*.xml text eol=lf
+tools/revised_tweaks/*.xml text eol=lf
 # CRLF on every host, like the shipped layer's other XML (the gift templates keep theirs with -text).
 tools/revised_planet_search/*.xml text eol=crlf
 # The publish scan reviews the build tray layout drawing by its committed SHA-256 on every platform.

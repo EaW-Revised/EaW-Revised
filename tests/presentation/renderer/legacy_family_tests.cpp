@@ -54,7 +54,7 @@ void check(const bool condition, const std::string_view message) {
     if (family.authored_binormals) {
         material.bindings = {{"BaseTexture", std::string("hull.dds")}, {"NormalTexture", std::string("hull_b.dds")}};
     }
-    if (family.program == "MeshAlphaGloss.fx") {
+    if (family.program == "MeshAlphaGloss.fx" || family.program == "RSkinAlphaGloss.fx") {
         material.bindings = {{"BaseTexture", std::string("rock.tga")}, {"GlossTexture", std::string("rock_gloss.tga")}};
     }
     return material;

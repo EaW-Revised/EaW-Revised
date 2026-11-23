@@ -5,7 +5,8 @@ This presentation-only implementation follows the MIT-licensed alo-viewer revisi
 `reference/alo-viewer/`; its notice is retained in `THIRD_PARTY_NOTICES.md`.
 The random-sample surface offset below follows the debug build; it corrects
 the fixed-distance offset inherited from that reference implementation.
-V2 creator parameters remain metadata only.
+V2 creator parameters remain metadata only. Reference-derived rules are not
+FoC-verified unless a specific debug-build or particle-walk citation says so.
 
 Legacy mini `0x34` selects disabled (`0`), random vertex (`1`), random surface
 (`2`), or every vertex (`3`). Any other nonzero value falls back to random

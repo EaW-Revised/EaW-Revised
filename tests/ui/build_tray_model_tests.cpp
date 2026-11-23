@@ -42,6 +42,12 @@ tray::TypeFacts type(std::string name, std::vector<std::string> categories, bool
     return facts;
 }
 
+tray::TypeFacts classed(tray::TypeFacts facts, std::string key, std::string text = {}) {
+    facts.encyclopedia_class = std::move(key);
+    facts.class_text = std::move(text);
+    return facts;
+}
+
 const tray::Group* find_group(const std::vector<tray::Group>& groups, const std::string& name) {
     for (const auto& group : groups) if (group.name == name) return &group;
     return nullptr;
@@ -175,6 +181,110 @@ void test_classification() {
     const auto plain = tray::classify(choices, index, categories, bare);
     expect(find_group(plain, "Structure") && find_group(plain, "Structure")->choices == std::vector<std::size_t>({4}),
         "an empty building categories list leaves the choice in its category");
+}
+
+// GBT-05 (legacy #8160): a category group splits by the encyclopedia class its choices carry: one group per class in the
+// order the classes first appear, headed by the class text; choices without a class stay in the category's own group
+// after them; a group with one class (or none) stays whole; nothing outside a category group splits.
+void test_a_category_group_splits_by_encyclopedia_class() {
+    tray::TypeIndex index;
+    index.add(classed(type("Speeder_A", {"Vehicle"}), "TEXT_CLASS_SPEEDER", "Speeder"));
+    index.add(classed(type("Droid_A", {"Vehicle"}), "TEXT_CLASS_DROID", "Class: Droid"));
+    index.add(classed(type("Speeder_B", {"Vehicle"}), "TEXT_CLASS_SPEEDER_ALT", "Class:  speeder "));
+    index.add(classed(type("Tank_A", {"Vehicle"}), "TEXT_CLASS_TANK"));
+    index.add(type("Plain_Vehicle", {"Vehicle"}));
+    index.add(classed(type("Walker_Company", {}, false, {"Walker_Member"}), "TEXT_CLASS_WALKER", "Walker"));
+    index.add(type("Walker_Member", {"Vehicle"}));
+    index.add(classed(type("Squad", {"Infantry"}, false, {"Trooper"}), "", ""));
+    index.add(classed(type("Trooper", {"Infantry"}), "TEXT_CLASS_INFANTRY", "Infantry"));
+    index.add(classed(type("Trooper_Two", {"Infantry"}), "TEXT_CLASS_INFANTRY", "Infantry"));
+    index.add(classed(type("Office", {"Structure"}, true), "TEXT_CLASS_STRUCTURE", "Structure"));
+    index.add(classed(type("Barracks", {"Structure"}, true), "TEXT_CLASS_OTHER", "Other"));
+    index.add(classed(type("Odd_Fighter", {"Fighter"}), "TEXT_CLASS_FIGHTER"));
+    const std::vector<std::string> choices{"Speeder_A", "Droid_A", "Plain_Vehicle", "Speeder_B", "Tank_A", "Walker_Company",
+        "Squad", "Trooper_Two", "Office", "Barracks", "Odd_Fighter"};
+    const auto groups = tray::classify(choices, index, stock_like_enum(), default_definition());
+
+    std::vector<std::string> shown;
+    for (const auto& group : groups) {
+        shown.push_back(group.name + (group.label.empty() ? "" : "/" + group.label));
+    }
+    expect(shown == std::vector<std::string>({"Fighter", "Infantry", "Vehicle/Speeder", "Vehicle/Droid",
+                "Vehicle/TEXT_CLASS_TANK", "Vehicle/Walker", "Vehicle", "Buildings"}),
+        "a category with several classes splits into one group per class in first-appearance order, the unclassed rest last; "
+        "a class-less member of a one-class group and a lone class keep the group whole");
+    const auto vehicle_classes = std::vector<const tray::Group*>{&groups[2], &groups[3], &groups[4], &groups[5], &groups[6]};
+    expect(vehicle_classes[0]->choices == std::vector<std::size_t>({0, 3}) && vehicle_classes[0]->label == "Speeder",
+        "two keys whose texts read the same (up to case and spaces after the colon) are one class; the header is the class text");
+    expect(vehicle_classes[1]->choices == std::vector<std::size_t>({1}) && vehicle_classes[1]->label == "Droid",
+        "the \"Class: \" prefix is dropped: the header keeps what follows the first colon");
+    expect(vehicle_classes[2]->choices == std::vector<std::size_t>({4}) && vehicle_classes[2]->label == "TEXT_CLASS_TANK",
+        "a class whose text the mod lacks shows its key");
+    expect(vehicle_classes[3]->choices == std::vector<std::size_t>({5}) && vehicle_classes[3]->label == "Walker",
+        "a company's own authored class splits like any other");
+    expect(vehicle_classes[4]->choices == std::vector<std::size_t>({2}) && vehicle_classes[4]->label.empty(),
+        "choices without a class stay in the category's own group, headed by its caption");
+    const auto* infantry = find_group(groups, "Infantry");
+    expect(infantry && infantry->label.empty() && infantry->choices == std::vector<std::size_t>({6, 7}),
+        "a squadron takes its member's class; one class in the group, no split");
+    const auto* buildings = find_group(groups, "Buildings");
+    expect(buildings && buildings->choices == std::vector<std::size_t>({8, 9}) && buildings->label.empty(),
+        "the buildings group never splits");
+    expect(index.class_of("Squad").key == "TEXT_CLASS_INFANTRY" && index.class_of("Nothing").key.empty(),
+        "class_of: own class, else a member's; an unknown type has none");
+
+    // Extra groups and sort keys keep working next to a split group.
+    auto definition = default_definition();
+    definition.extra_groups = {{"Picks", "TEXT_PICKS", tray::ExtraGroup::Where::after, "Vehicle"}};
+    definition.assignments = {{"Tank_A", "Picks", std::nullopt}};
+    const auto with_extra = tray::classify(choices, index, stock_like_enum(), definition);
+    std::vector<std::string> names;
+    for (const auto& group : with_extra) names.push_back(group.name);
+    expect(names == std::vector<std::string>({"Fighter", "Infantry", "Vehicle", "Vehicle", "Vehicle", "Vehicle", "Picks", "Buildings"}),
+        "an extra group placed after a category comes after all of its split groups");
+}
+
+// GBT-05: a class group whose header reads the same as a category group's is merged with it, in tray order (the sort keys
+// then put the keyed ones first as in any group); two category groups that read alike without a class group stay apart.
+void test_a_class_group_merges_into_a_category_that_reads_the_same_in_tray_order() {
+    const tray::CategoryEnum categories{{"Droid", "Vehicle"}};
+    tray::TypeIndex index;
+    index.add(classed(type("Type_A", {"Vehicle"}), "TEXT_CLASS_DROID", "Class: Droid"));
+    index.add(type("Type_B", {"Droid"}));
+    index.add(classed(type("Type_C", {"Vehicle"}), "TEXT_CLASS_DROID", "Class: Droid"));
+    index.add(classed(type("Type_D", {"Vehicle"}), "TEXT_CLASS_WALKER", "Class: Walker"));
+    const std::vector<std::string> choices{"Type_A", "Type_B", "Type_C", "Type_D"};
+    tray::GroupDefinition definition;
+
+    const auto merged = tray::classify(choices, index, categories, definition);
+    std::vector<std::string> shown;
+    for (const auto& group : merged) shown.push_back(group.name + (group.label.empty() ? "" : "/" + group.label));
+    expect(shown == std::vector<std::string>({"Droid", "Vehicle/Walker"}),
+        "the Droid class group of Vehicle is merged into the Droid category (the header reads the same), Walker stays");
+    expect(merged[0].choices == std::vector<std::size_t>({0, 1, 2}),
+        "the merged choices are in choice list order (the class group's 0 and 2 around the category's 1), not appended");
+
+    // A sort key keeps first place in the merged group, as in any group.
+    definition.assignments = {{"Type_C", "Droid", std::int64_t{7}}};
+    const auto keyed = tray::classify(choices, index, categories, definition);
+    expect(keyed[0].choices == std::vector<std::size_t>({2, 0, 1}), "a keyed entry of the merged group still comes first");
+
+    // The caller's resolved header decides what reads the same: a category worded like the class header merges...
+    const std::vector<std::pair<std::string, std::string>> headers{{"Droid", "Mechanical"}};
+    const auto reworded = tray::classify(choices, index, categories, tray::GroupDefinition{}, headers);
+    shown.clear();
+    for (const auto& group : reworded) shown.push_back(group.name + (group.label.empty() ? "" : "/" + group.label));
+    expect(shown == std::vector<std::string>({"Droid", "Vehicle/Droid", "Vehicle/Walker"}),
+        "a category whose resolved header differs from the class text is not merged");
+
+    // ...and without any class group, two categories that read alike keep their own groups (nothing changes for such data).
+    tray::TypeIndex plain;
+    plain.add(type("Plain_A", {"Vehicle"}));
+    plain.add(type("Plain_B", {"Droid"}));
+    const std::vector<std::string> plain_choices{"Plain_A", "Plain_B"};
+    const std::vector<std::pair<std::string, std::string>> alike{{"Droid", "Same"}, {"Vehicle", "Same"}};
+    const auto apart = tray::classify(plain_choices, plain, categories, tray::GroupDefinition{}, alike);
+    expect(apart.size() == 2, "categories without a class group are never merged, however their headers read");
 }
 
 void test_derived_captions() {
@@ -436,6 +546,8 @@ int main() {
     test_category_choice();
     test_member_union();
     test_classification();
+    test_a_category_group_splits_by_encyclopedia_class();
+    test_a_class_group_merges_into_a_category_that_reads_the_same_in_tray_order();
     test_derived_captions();
     test_handle_label();
     test_entries_per_line();

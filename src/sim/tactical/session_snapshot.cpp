@@ -443,7 +443,7 @@ std::vector<std::uint8_t> TacticalSnapshot::canonical_bytes() const {
     // WLD-12: a point-defence zap is presentation too; the shot it removed is the canonical effect.
     const auto presentation_only = [](const CombatEvent& event) {
         return event.kind == CombatEventKind::projectile_expired || event.kind == CombatEventKind::point_defence_zap
-            || event.kind == CombatEventKind::heal_pulse;
+            || event.kind == CombatEventKind::heal_pulse || event.kind == CombatEventKind::combat_modifier_applied;
     };
     const auto canonical_combat_events = std::count_if(combat_events_.begin(), combat_events_.end(),
         [&](const CombatEvent& event) { return !presentation_only(event); });

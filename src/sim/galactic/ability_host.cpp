@@ -53,6 +53,7 @@ void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId 
         const auto* contents = find(movement_inputs->contents, supplied, [](const auto& r) { return r.container; });
         if (contents) for (const auto& child : contents->children) candidates.push_back(child.id);
     }
+    const auto dispatch_begin = events.size();
     // WGCH-155/156: scan live contents in stored order, never retain a prepared bearer.
     for (const auto id : candidates) {
         const auto at = actor_records.find(id);
@@ -70,12 +71,19 @@ void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId 
         const bool ai_slicer = ai_purchaser && !ai_purchaser->human && profile->theft
             && std::find(kinds.begin(), kinds.end(), AbilityKind::technology_theft) == kinds.end();
         if (ai_slicer) kinds.push_back(AbilityKind::technology_theft);
+        // #8157: the market ability is not ground-activated in stock data (it authors no activation style), so the listed kinds
+        // never include it; yet a human's drop of the hero onto its own planet is the purchase gesture and the viewer offers
+        // the tile for it. An explicit drop by a human buyer therefore also tries the market, after the listed kinds. An AI
+        // seat's landing is unchanged (named seam: its market behaviour).
+        const bool human_market = explicit_use && profile->has_market && ai_purchaser && ai_purchaser->human
+            && std::find(kinds.begin(), kinds.end(), AbilityKind::black_market) == kinds.end();
+        if (human_market) kinds.push_back(AbilityKind::black_market);
         for (const auto kind : kinds) {
             if (kind == AbilityKind::corruption || kind == AbilityKind::remove_corruption) {
                 const auto* policy = find(ability_host->transitions, target, [](const auto& row) { return row.planet; });
                 if (policy && policy->restricted) continue;
             }
-            if (!ground_ability_enabled(*profile, *service, kind, ai_slicer && kind == AbilityKind::technology_theft)) continue;
+            if (!ground_ability_enabled(*profile, *service, kind, (ai_slicer && kind == AbilityKind::technology_theft) || (human_market && kind == AbilityKind::black_market))) continue;
             // WGCH-187: neutralization is ground-activated for every seat. A human's drop or landing opens its menu, an AI's
             // chooses and executes in the same step (WGCH-24/93, ability_neutralize.cpp).
             if (kind == AbilityKind::technology_theft || kind == AbilityKind::system_spy || kind == AbilityKind::credit_siphon) {
@@ -131,7 +139,15 @@ void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId 
             } else execute_ability({key, PrepareGalacticAbility{id, target, kind}}, tick, events);
             if (std::any_of(events.begin() + static_cast<std::ptrdiff_t>(begin), events.end(), [](const auto& e) {
                 return e.kind == GalacticEventKind::ability_prepared || e.kind == GalacticEventKind::ability_settled;
-            })) return;
+            })) {
+                // A refusal from an earlier ground-activated kind of this same dispatch (e.g. a corruption removal on a planet
+                // with nothing to remove) is not the seat's answer once a later kind went through: drop it, so the seat is not
+                // told "cannot be used" about a drop that was accepted (the siphon of a hero that also authors a removal).
+                const auto first = events.begin() + static_cast<std::ptrdiff_t>(dispatch_begin);
+                const auto last = events.begin() + static_cast<std::ptrdiff_t>(begin);
+                events.erase(std::remove_if(first, last, [](const auto& e) { return e.kind == GalacticEventKind::command_rejected; }), last);
+                return;
+            }
             // #6120: a landing that finds no hero to neutralize says nothing (only a seat's own drop is refused), and does not
             // take the submission away from the next ability or bearer.
             if (!explicit_use && kind == AbilityKind::hero_neutralization) { events.erase(events.begin() + static_cast<std::ptrdiff_t>(begin), events.end()); qualified = was_qualified; }
@@ -173,7 +189,8 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
                 || siphon.name.find('\0') != std::string::npos || siphon.text_identity.size() > 1024
                 || siphon.text_identity.find('\0') != std::string::npos
                 || siphon.minimum < math::Fixed{} || siphon.maximum > math::Fixed::from_raw(math::Fixed::scale)
-                || siphon.minimum > siphon.maximum) return bad(); // WGEP-12: a siphon fraction lies in 0..1
+                || siphon.minimum > siphon.maximum
+                || siphon.respawn_minimum > siphon.respawn_maximum) return bad(); // WGEP-12: a siphon fraction lies in 0..1
         }
         if (profile.spy && (!setup.observer || !setup.control || !profile.spy->identity
             || profile.spy->name.empty() || profile.spy->name.size() > 4096 || profile.spy->name.find('\0') != std::string::npos
@@ -476,7 +493,7 @@ void GalacticSession::Impl::execute_ability(const GameCommand& command, std::uin
     const auto reject = [&](GalacticRejectReason why) { event.reason = why; events.push_back(event); };
     const auto* issuer = seat(command.key.seat);
     if (!issuer || !issuer->active) return reject(GalacticRejectReason::inactive_seat);
-    if (!ability_host || !setup.ability_host || !economy_corruption) return reject(GalacticRejectReason::unknown_value);
+    if (!ability_host || !setup.ability_host || !economy_corruption) return reject(GalacticRejectReason::ability_unavailable);
     const auto live = actor_records.find(actor);
     if (live == actor_records.end() || live->second.dead || live->second.delete_pending)
         return reject(GalacticRejectReason::unknown_subject);
@@ -485,7 +502,7 @@ void GalacticSession::Impl::execute_ability(const GameCommand& command, std::uin
     const auto* profile = find(setup.ability_host->profiles, actor_value.current_type, [](const auto& p) { return p.type; });
     const auto early_kind = prepare ? prepare->kind : execute ? execute->prepared.kind : AbilityKind::black_market;
     // A cancellation needs only the retained preparation: a supplied transport (WGCH-155) may own no profile.
-    if (!profile && !cancel && early_kind != AbilityKind::planet_destruction) return reject(GalacticRejectReason::unknown_value);
+    if (!profile && !cancel && early_kind != AbilityKind::planet_destruction) return reject(GalacticRejectReason::ability_unavailable);
     auto* retained = find(ability_host->preparations, actor, [](const auto& p) { return p.actor; });
     const auto changed = [&] { touch_abilities(); };
     const auto result_full = ability_host->results.size() >= galactic_max_objects
@@ -519,18 +536,21 @@ void GalacticSession::Impl::execute_ability(const GameCommand& command, std::uin
     }
     const auto* service = find(ability_host->actors, actor, [](const auto& a) { return a.actor; });
     const auto kind = prepare ? prepare->kind : execute ? execute->prepared.kind : AbilityKind::black_market;
-    if (!service || (kind == AbilityKind::corruption
-        ? !profile->corruption || !service->corruption_enabled || service->corruption_cancelled
-        : kind == AbilityKind::superweapon_hack
-        ? !profile->hack || !service->hack_enabled || service->hack_cancelled
-        : kind == AbilityKind::technology_theft
-        ? !profile->theft || !service->theft_enabled || service->theft_cancelled
-        : kind == AbilityKind::structure_sabotage
-        ? !profile->sabotage || !service->sabotage_enabled || service->sabotage_cancelled
-        : kind == AbilityKind::hero_neutralization
-        ? !profile->neutralize || !service->neutralize_enabled || service->neutralize_cancelled
-        : kind != AbilityKind::black_market || !profile->has_market || !service->enabled || service->cancelled))
-        return reject(GalacticRejectReason::unknown_value);
+    // #8157: no such ability (or no service row) and an ability a story or script switched off are different causes.
+    if (!service || (kind == AbilityKind::corruption ? !profile->corruption
+        : kind == AbilityKind::superweapon_hack ? !profile->hack
+        : kind == AbilityKind::technology_theft ? !profile->theft
+        : kind == AbilityKind::structure_sabotage ? !profile->sabotage
+        : kind == AbilityKind::hero_neutralization ? !profile->neutralize
+        : kind != AbilityKind::black_market || !profile->has_market))
+        return reject(GalacticRejectReason::ability_unavailable);
+    if (kind == AbilityKind::corruption ? !service->corruption_enabled || service->corruption_cancelled
+        : kind == AbilityKind::superweapon_hack ? !service->hack_enabled || service->hack_cancelled
+        : kind == AbilityKind::technology_theft ? !service->theft_enabled || service->theft_cancelled
+        : kind == AbilityKind::structure_sabotage ? !service->sabotage_enabled || service->sabotage_cancelled
+        : kind == AbilityKind::hero_neutralization ? !service->neutralize_enabled || service->neutralize_cancelled
+        : !service->enabled || service->cancelled)
+        return reject(GalacticRejectReason::ability_disabled);
     // #7426: a human player's corruption and hero action menus are published only for a planet that player has discovered
     // (WGUI-99). A lone stealth hero does not discover the planet it orbits (WGUI-01), so a menu prepared there stayed open
     // with nothing shown to choose from or cancel. Refuse it with a reason the seat is told instead; the viewer's route gate
@@ -582,7 +602,7 @@ void GalacticSession::Impl::execute_ability(const GameCommand& command, std::uin
         if (control) for (const auto& relation : control->relations)
             if (relation.player == issuer->player && relation.other == owner) allied |= relation.allied;
         auto* buyer = find(economy_corruption->buyers, actor, [](const auto& p) { return p.buyer; });
-        if (!buyer) return reject(GalacticRejectReason::unknown_value);
+        if (!buyer) return reject(GalacticRejectReason::ability_unavailable);
         if (buyer->opposing_planet != !allied) {
             buyer->opposing_planet = !allied;
             dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;

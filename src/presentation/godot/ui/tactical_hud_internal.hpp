@@ -1,6 +1,7 @@
 #pragma once
 #include "ui/movie_player.hpp"
 #include "tactical_hud.hpp"
+#include "tactical_texture_lookup.hpp"
 #include "ui/hud_icon_text.hpp"
 
 #include "perf_overlay_view.hpp"
@@ -523,6 +524,7 @@ struct TacticalHud::State final {
     bool gift_open{};
     bool gift_enabled{};
     bool gift_policy{};
+    bool view_only{}; // #8182: a spectator's battle view: no order controls
     model::ProjectHudLayoutWatch gift_layout;
     std::uint64_t gift_presses{}, gift_submissions{};
     EawrHudButton* beacon_button{};
@@ -586,7 +588,9 @@ struct TacticalHud::State final {
     const data::Catalog* objects{};
     std::optional<data::ui::TextDatabase> text_database;
     model::StandaloneTextures standalone;
+    model::StandaloneTextures quiet_standalone;
     std::map<std::string, Ref<Texture2D>, std::less<>> card_textures;
+    std::map<std::string, Ref<Texture2D>, std::less<>> optional_card_textures;
     std::map<std::string, std::pair<std::string, String>, std::less<>> card_types; // Icon_Name, display name
     // This cache belongs to one HUD and is rebuilt with it for each battle.
     std::map<std::string, std::map<std::uint32_t, std::string>, std::less<>> ability_icons;
@@ -595,7 +599,8 @@ struct TacticalHud::State final {
     const model::UnitCardLooks& encyclopedia_type(const std::string& type);
     const std::pair<std::string, String>& card_type(const std::string& type);
     // A command bar texture (the atlas, then files) at texel size, decoded once; null when missing.
-    Ref<Texture2D> command_texture(const std::string& name, const std::string& use, bool quiet = false);
+    Ref<Texture2D> command_texture(const std::string& name, const std::string& use, bool quiet = false,
+                                   TacticalAssetRequirement requirement = TacticalAssetRequirement::required);
     // #454: the ability buttons.
     EawrAbilityButtons* abilities{};
     // #530: the build queue, the credits and the reinforcement pane.

@@ -2,6 +2,7 @@
 
 #include "eawr/presentation/ui/input_routing.hpp"
 #include "eawr/skirmish/start.hpp"
+#include "eawr/sim/galactic/types.hpp"
 
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/input_event.hpp>
@@ -167,6 +168,8 @@ public:
         bool observer_multiplayer{};
         sim::SeatId controller_seat{};
         std::vector<std::pair<sim::SeatId, std::string>> controller_names;
+        std::vector<sim::galactic::Seat> colour_seats{};
+        std::vector<sim::galactic::TeamLead> colour_teams{};
         // #5130: names belong to the observer, outside deterministic battle content.
         std::vector<std::pair<sim::tactical::PlayerId, std::string>> observer_names;
         std::shared_ptr<const live_session::PreparedBattle> borrowed_battle;
@@ -178,6 +181,8 @@ public:
         // another clock event). Cheap (no lock, no allocation) while nothing changed. The skirmish LAN view carries its own.
         std::function<std::uint64_t(std::uint64_t known, std::string& line)> shared_speed_notice{};
         sim::tactical::PlayerId borrowed_player{1};
+        // #8182: the borrowed battle is only watched (a spectating seat): no selection, orders or order controls.
+        bool borrowed_view_only{};
         std::shared_ptr<LanMatch> lan;
         // MNU-41: a recording the Load Game screen chose; the live session replays it as
         // `--eawr-live-session replay --eawr-live-replay <path>` does.

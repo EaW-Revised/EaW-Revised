@@ -80,7 +80,7 @@ void TacticalHud::set_gift(const bool policy, const bool enabled, const std::vec
     if (changed) state.gift_recipients = recipients;
     if (!state.gift_enabled) state.gift_open = false;
     const auto definition = state.project_hud.find("gift");
-    if (!policy || !state.hud || definition == state.project_hud.end() || !definition->second.enabled) {
+    if (!policy || state.view_only || !state.hud || definition == state.project_hud.end() || !definition->second.enabled) { // #8182: a spectator view has no gift control
         if (state.gift_button) state.gift_button->hide();
         if (state.gift_scroll) state.gift_scroll->hide();
         for (auto& cell : state.gift_cells) cell.button->hide();
@@ -350,6 +350,19 @@ void TacticalHud::advance_movie_bands(const double delta) {
     if (auto* bottom = Object::cast_to<Control>(state.movie_bands->get_child(1))) bottom->set_anchor(SIDE_TOP, 1.0F - height, true);
     state.movie_bands->set_visible(state.bands.visible());
 }
+void TacticalHud::set_view_only(const bool on) {
+    auto& state = *state_;
+    state.view_only = on;
+    if (!on) return;
+    for (const auto& entry : state.order_buttons) entry.second->hide();
+    for (Control* control : std::initializer_list<Control*>{state.special_button, state.retreat_button, state.sl_button,
+            state.sl_card, state.ds_button, state.beacon_button, state.gift_button, state.gift_scroll, state.cards,
+            state.heroes, state.abilities, state.production})
+        if (control) control->hide();
+    for (auto& cell : state.gift_cells) cell.button->hide();
+    state.gift_open = false;
+}
+bool TacticalHud::view_only() const noexcept { return state_->view_only; }
 void TacticalHud::set_order_handler(std::function<void(std::string_view)> handler) {
     state_->order_handler = std::move(handler);
 }

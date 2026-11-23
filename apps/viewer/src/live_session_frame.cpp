@@ -1153,6 +1153,8 @@ std::optional<core::Diagnostic> LiveSessionView::compose_frame_units(BattleScene
         for (const live::LiveUnitPose& pose : *drawn) {
             // Spawned after tick zero without a launch slot (a squadron's container): nothing composed.
             if (!pad_visible(pose.entity)) continue;
+            // TL-14: a unit the script hid keeps its simulation and loses its model.
+            if (snapshot_index_.is_script_hidden(pose.entity)) continue;
             const auto ship = ship_of(pose.entity, pose.type, pose.owner);
             if (!ship) continue;
             BattleScene::LivePose placed;
@@ -1547,6 +1549,12 @@ void LiveSessionView::apply_frame_opacity(const std::shared_ptr<const sim::tacti
                         effect->second.kind, effect->second.pulses, scale});
             }
         visual_scales.emplace(pose.entity, scale);
+        std::optional<std::array<std::uint8_t, 3>> participant_model;
+        if (options_.borrowed_battle && pose.instance) {
+            participant_model = instance_model_colour(*pose.instance, placed_ships_[*ship].object_id);
+            placed_ships_[*ship].team_colour = participant_model;
+            if (pad == pad_tints_.end()) population.set_live_colour(renderer, *ship, participant_model);
+        }
         // WBP-52: capture colour belongs to each material mask, independently of lighting.
         for (const sim::EntityId piece : population.live_ship_entities(*ship)) {
             if (pad != pad_tints_.end()) renderer.set_unit_colorization(piece, pad->second);

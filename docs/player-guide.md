@@ -21,6 +21,23 @@ included in this download.
 The graphics card must support Vulkan or Direct3D 12 (any card from the last several years; update its driver if
 EAWR reports it cannot start the renderer).
 
+## Linux x64
+
+The Linux player is a separate download (`eaw-revised-<version>-linux-x64-player.zip`); it is new and was tested with software
+rendering on Ubuntu 24.04, not yet on a range of graphics cards. Reports from real hardware are welcome.
+
+- **System:** 64-bit x86 Linux with glibc 2.38 or newer: Ubuntu 24.04, Debian 13, Fedora 39 or newer. Older systems (Ubuntu 22.04,
+  Debian 12) cannot run it; `play.sh` says so.
+- **Libraries:** OpenSSL 3 (`libssl.so.3`, `libcrypto.so.3`; installed by default on Ubuntu 24.04 and the other systems above).
+- **Graphics:** a Vulkan driver (Mesa for AMD and Intel, the NVIDIA driver, or `mesa-vulkan-drivers` for software rendering).
+- **Start:** extract with `unzip` (or any tool that keeps file permissions), then run `./play.sh` in the folder. If the permissions
+  were lost, run `chmod +x play.sh godot/godot.linuxbsd.editor.x86_64` first. `play.sh` finds a Steam copy of Forces of
+  Corruption by itself; otherwise run `./play.sh --game-root /path/to/"Star Wars Empire at War"` (the folder holding `GameData`
+  and `corruption`). `./play.sh --check` only tests your system.
+- **Data:** the folder stays read-only-safe; settings, saves and the extracted fonts live under `~/.local/share/godot/app_userdata/`
+  and the last run report under `~/.local/state/eaw-revised/`.
+- There is no launcher, mod manager or automatic updater on Linux yet.
+
 ## What EAWR writes, and where
 
 EAWR is built not to write into this folder or into your game. Everything it creates lives in your Windows
@@ -62,8 +79,9 @@ choice takes effect when you restart EAWR. An explicit launch flag overrides it.
 
 Offline skirmish needs no network access. LAN and online play open network ports; Windows may then ask
 whether to allow `Godot_v4.7.2-stable_win64.exe` (the engine in the `godot` folder) on private networks.
-EAWR itself never adds firewall rules, never asks for administrator rights and never changes
-router settings. All players of a match must run the same EAWR version.
+EAWR itself never adds firewall rules or asks for administrator rights. It changes router
+settings only if the host selects **Map router TCP port for Internet play**. All players
+of a match must run the same EAWR version.
 
 ## Checking a download
 

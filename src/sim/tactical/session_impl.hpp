@@ -235,6 +235,7 @@ public:
     void refresh_damage_modes(session_detail::LiveUnit& unit) const;
     [[nodiscard]] const BuzzDroidsProfile* buzz_profile(TypeId source) const;
     [[nodiscard]] const SpawnedAbilityProfile* spawn_profile(TypeId) const;
+    void service_combat_mods(const std::vector<LiveUnit>&, std::uint64_t);
     [[nodiscard]] core::Result<void> service_weaken(std::vector<LiveUnit>&, std::uint64_t, const PartitionExecutor&);
     [[nodiscard]] const SpecialAbilityProfile* beam_profile(const LiveUnit&, AbilityKind) const;
     [[nodiscard]] bool beam_target_valid(const LiveUnit&, const LiveUnit&, const SpecialAbilityProfile&, bool admission = true) const;
@@ -690,6 +691,7 @@ public:
     void append_canonical_sightings_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_garrison_marks_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_script_invulnerable_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_script_view_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_hold_fire_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_craft_state(std::vector<std::uint8_t>& bytes,
         std::span<const std::vector<std::uint8_t>> encoded = {}) const;

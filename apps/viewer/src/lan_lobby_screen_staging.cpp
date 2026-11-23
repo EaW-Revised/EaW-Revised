@@ -1,6 +1,8 @@
 #include "lan_lobby_screen_internal.hpp"
 #include "viewer_mounted_mods.hpp"
 
+#include "galactic_lobby_backend.hpp"
+
 namespace eawr::presentation::godot_backend {
 void EawrLanLobby::fill_host_seats(const std::uint32_t requested_count) {
     auto* seats = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO");
@@ -21,6 +23,7 @@ void EawrLanLobby::fill_host_seats(const std::uint32_t requested_count) {
     // Transport capacity is an upper bound. The staging rows choose actual players (LLB-18).
     // Campaign hosting retains its separate human-side configuration.
     const auto seat_limit = map ? network_row_count(*map) : 0U;
+    impl_->galactic_seat_limit = seat_limit;
     if (map && impl_->map_index < 0 && page_ == Page::host_options)
         impl_->map_index = static_cast<int>(map - resources_->maps.data());
     if (impl_->host_options.game_type != galactic_game_type) {
@@ -33,10 +36,29 @@ void EawrLanLobby::fill_host_seats(const std::uint32_t requested_count) {
     } else {
         seats->show();
         if (auto* label = EAWR_CONTROL(EawrUiLabel, "IDC_TEXT_HOST_CLAN")) label->show();
-        for (std::uint32_t humans = 2; humans <= seat_limit; ++humans)
+        // D8 (#8071): the room opens for exactly this many players (its seats and its connections) and waits for all of them; rows
+        // are claimed from there. Say so where the host chooses it.
+        seats->set_tooltip_text(text("The room waits for this many players before the campaign can start. A multiplayer campaign opens it for "
+                                     "one player per playable faction (at most " + std::to_string(sim::galactic::galactic_max_human_seats)
+                                     + "), a co-op campaign for two, unless you choose fewer. Each player takes a faction row; every other "
+                                     "faction of the campaign is played by the AI."));
+        // The most humans the campaign can start with (a multiplayer campaign's playable factions, never above eight): the dropdown offers no
+        // more, so no host opens a room that Start would refuse. Until the campaign list is known, only the human seat ceiling bounds it.
+        const sim::galactic::MpLobbyCampaign* hostable = nullptr;
+        if (impl_->galactic_backend && impl_->galactic_backend->content_ready())
+            hostable = eawr::campaign::first_hostable_lobby_campaign(impl_->galactic_backend->campaigns());
+        const auto limit = hostable ? net::galactic_lobby_max_humans(*hostable, seat_limit)
+                                    : std::min(seat_limit, static_cast<std::uint32_t>(sim::galactic::galactic_max_human_seats));
+        for (std::uint32_t humans = 2; humans <= limit; ++humans)
             seats->add_item(text(std::to_string(humans)), static_cast<int>(humans));
-        if (seat_limit >= 2) {
-            const auto count = std::clamp(requested_count == 0 ? impl_->galactic_humans : requested_count, 2U, seat_limit);
+        if (limit >= 2) {
+            if (requested_count != 0) impl_->galactic_humans_chosen = true;
+            else if (!impl_->galactic_humans_chosen && hostable != nullptr) {
+                // The campaign list is known: the room opens for every playable faction of the campaign it opens on (two for a co-op one).
+                impl_->galactic_humans = net::galactic_lobby_default_humans(*hostable, seat_limit);
+                impl_->galactic_humans_defaulted = true;
+            }
+            const auto count = std::clamp(requested_count == 0 ? impl_->galactic_humans : requested_count, 2U, limit);
             impl_->galactic_humans = count;
             seats->select(static_cast<int>(count) - 2);
             impl_->human_owners.resize(count);
@@ -104,9 +126,11 @@ void EawrLanLobby::begin_hosting() {
         show_failure(std::string(model::online_failure_text(model::OnlineFailure::password_locked)));
         return;
     }
+    if (impl.host_options.game_type == galactic_game_type && !impl.galactic_humans_defaulted) fill_host_seats(); // the list is known now
     match_->configure_seats(impl.human_owners);
     match_->configure_staging_capacity(impl.host_options.game_type != galactic_game_type);
-    match_->set_port_mapping(state_->port_mapping && state_->port_mapping->is_pressed());
+    impl.host_port_mapping = state_->port_mapping && state_->port_mapping->is_pressed();
+    match_->set_port_mapping(impl.host_port_mapping);
     configure_staging();
     if (online) match_->set_public_invitation(impl.host_password.empty());
     match_->host(options_.game_port);
@@ -126,6 +150,34 @@ void EawrLanLobby::begin_hosting() {
 bool EawrLanLobby::publish_staging_selection() {
     if (!impl_->host || !match_->lobby_state()) return true;
     return match_->lobby_game(staging_options(impl_->selection));
+}
+
+std::uint32_t EawrLanLobby::galactic_wanted_humans(const sim::galactic::MpLobbyCampaign& campaign) const {
+    const Impl& impl = *impl_;
+    const auto limit = net::galactic_lobby_max_humans(campaign, impl.galactic_seat_limit);
+    if (!impl.galactic_humans_chosen) return net::galactic_lobby_default_humans(campaign, impl.galactic_seat_limit);
+    return std::clamp(impl.galactic_humans, 2U, limit);
+}
+
+void EawrLanLobby::reopen_galactic_room(net::GalacticLobbyOptions options, const std::uint32_t humans) {
+    Impl& impl = *impl_;
+    const std::string game = impl.game;
+    impl.galactic_humans = humans;
+    impl.human_owners.resize(humans);
+    std::iota(impl.human_owners.begin(), impl.human_owners.end(), 1U);
+    // The same steps as a fresh host (begin_hosting): host() closes the old room first.
+    match_->configure_seats(impl.human_owners);
+    match_->configure_staging_capacity(false);
+    match_->set_port_mapping(impl.host_port_mapping);
+    configure_staging();
+    match_->host(options_.game_port);
+    if (const auto refusal = host_galactic_game(&options)) {
+        match_->cancel();
+        show_failure(*refusal);
+        return;
+    }
+    open_staging(true, game, {});
+    note_chat(model::ChatKind::normal, "The room was opened again for this campaign: it waits for " + std::to_string(humans) + " players.");
 }
 
 void EawrLanLobby::configure_staging() {
@@ -200,6 +252,8 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     }
     // Both peers can review the selected map before accepting the setup (#3759).
     if (const BuiltGadget* image = find_gadget(dialog, "IDC_IMAGE"); image != nullptr) {
+        state.preview_role = preview_font_role(image->statement, image->class_name);
+        state.preview_variation = image->variation;
         state.preview = memnew(TextureRect);
         state.preview->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
         state.preview->set_stretch_mode(TextureRect::STRETCH_SCALE);

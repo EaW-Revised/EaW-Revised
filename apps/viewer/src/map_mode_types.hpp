@@ -227,6 +227,7 @@ struct MapMode::State final {
     std::array<float, 3> attract_first_eye{};
     std::array<float, 3> attract_last_eye{};
     std::size_t attract_camera_updates{};
+    double attract_movie_wait{}; // #8105: seconds until the next try to start the attract's movie mode
     // attract_status(): each unit's first-sampled position (raw Q24 x, y, z) and hull.
     struct AttractSample final {
         std::array<std::int64_t, 3> position{};
@@ -287,6 +288,8 @@ struct MapMode::State final {
     // #453, #459: hands the live battle's time panel and outcome to the HUD. Called right after
     // each live frame, so a capture of that frame shows them.
     void sync_battle_hud();
+    // #8182: a spectating battle view hides every order control again after a sync shows them (see sync_* in map_mode_hud.cpp).
+    void apply_view_only();
     // #1923 (docs/behaviour/loading-screen.md): the battle loading screen, the host's or one built
     // here under the battle's host, the honest progress behind its bar, and the Begin that
     // dismisses it and starts the battle (BLD-10 to BLD-13).

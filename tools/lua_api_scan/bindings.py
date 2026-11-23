@@ -5,6 +5,7 @@ import dataclasses
 from pathlib import Path
 
 from . import cxx
+from tools.inventory.lua_calls import LuaError, lex_lua
 
 
 @dataclasses.dataclass
@@ -56,6 +57,25 @@ def read_host(root: Path, host: dict, follow: dict[str, dict] | None = None) -> 
                 queue.append(follow[callee])
         except ValueError as error:
             out.problems.append(str(error))
+    # Some hosts install a Lua prelude instead of registering a C++ method.
+    for source in host.get("lua_preludes", []):
+        rel = source["file"]
+        try:
+            tokens = cxx.tokenize(_read(root, rel))
+            matches = [tokens[i + 2] for i in range(len(tokens) - 2)
+                       if tokens[i].value == source["variable"] and tokens[i + 1].value == "="
+                       and tokens[i + 2].kind == "str"]
+            if len(matches) != 1:
+                raise ValueError(f"{rel}: expected one prelude {source['variable']}")
+            prelude = matches[0]
+            lua = lex_lua(prelude.value)
+            for i in range(len(lua) - 4):
+                a, dot, name, equals, function = lua[i:i + 5]
+                if (a.value == source["receiver"] and dot.value == "." and name.kind == "name"
+                        and equals.value == "=" and function.value == "function"):
+                    out.members.setdefault(name.value, []).append(f"{rel}:{prelude.line + name.line - 1}")
+        except (OSError, ValueError, LuaError) as error:
+            out.problems.append(f"prelude: {error}")
     infra = host.get("infrastructure")
     if infra:
         try:

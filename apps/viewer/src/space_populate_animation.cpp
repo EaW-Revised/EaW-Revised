@@ -960,6 +960,18 @@ void SpacePopulation::set_live_opacity(GodotRenderer& renderer, const std::size_
     for (const sim::EntityId entity : piece_index_.entities(ship)) renderer.set_unit_opacity(entity, opacity);
 }
 
+void SpacePopulation::set_live_colour(GodotRenderer& renderer, const std::size_t ship,
+                                      const std::optional<std::array<std::uint8_t, 3>>& colour) {
+    for (const auto index : piece_index_.pieces(ship)) {
+        auto& piece = pieces_[index];
+        if (!piece.colorizable) continue;
+        piece.colour = colour;
+        if (colour) renderer.set_unit_colorization(piece.instance.entity_id,
+            {(*colour)[0] / 255.0F, (*colour)[1] / 255.0F, (*colour)[2] / 255.0F});
+        else renderer.clear_unit_colorization(piece.instance.entity_id);
+    }
+}
+
 void SpacePopulation::prepare_fog_model_capture() {
     fog_drawn_entities_.clear();
     fog_drawn_entities_.reserve(instances_.size());

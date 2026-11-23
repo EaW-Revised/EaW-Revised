@@ -337,6 +337,7 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
     if (auto serviced = impl_->service_concentrate(moving, tick, executor); !serviced) return serviced;
     if (auto serviced = impl_->service_beams(moving, tick, executor); !serviced) return serviced;
     if (auto serviced = impl_->service_weaken(moving, tick, executor); !serviced) return serviced;
+    impl_->service_combat_mods(moving, tick);
     if (auto refreshed = impl_->refresh_concentrate_bonuses(moving, impl_->command_ledger, impl_->ledgers, executor); !refreshed) return refreshed;
     replans.insert(replans.end(), impl_->beam_replans.begin(), impl_->beam_replans.end());
     for (const auto id : impl_->concentrate_changed_targets) {
@@ -873,6 +874,68 @@ core::Result<void> session_detail::Tick::commands() {
         }
         if (const auto* change = std::get_if<ScriptChangeOwnerPayload>(&command.payload)) {
             if (auto applied = lanes.scripted_change_owner(*change, command.units); !applied) return applied;
+            continue;
+        }
+        if (const auto* hide = std::get_if<ScriptHidePayload>(&command.payload)) {
+            // Lua Hide(flag): boolean, idempotent, presentation only. A dead or unknown unit is skipped silently; a
+            // squadron applies the flag to each live member (the retail wrapper hides the object's own model, and a
+            // team's members are the objects that carry one).
+            const auto apply = [&](const EntityId id) {
+                const auto found = staged.find(id);
+                if (found == staged.end()) return;
+                auto view = found->second.script_view.value_or(ScriptViewState{});
+                view.hidden = hide->hidden;
+                found->second.script_view = (view.hidden || view.unselectable) ? std::optional(view) : std::nullopt;
+            };
+            const auto& born_squadrons = staging_->arrived_squadrons.value();
+            for (const auto id : command.units) {
+                apply(id);
+                const auto group = std::lower_bound(impl_->squadrons.begin(), impl_->squadrons.end(), id,
+                    [](const auto& row, const EntityId value) { return row.container < value; });
+                if (group != impl_->squadrons.end() && group->container == id)
+                    for (const auto member : group->members) apply(member);
+                for (const auto& arrival : born_squadrons)
+                    if (arrival.container == id) for (const auto member : arrival.members) apply(member);
+            }
+            continue;
+        }
+        if (const auto* selectable = std::get_if<ScriptSelectablePayload>(&command.payload)) {
+            // Lua Set_Selectable(flag): the unit refuses player selection while it is false. Same group rules as Hide.
+            const auto apply = [&](const EntityId id) {
+                const auto found = staged.find(id);
+                if (found == staged.end()) return;
+                auto view = found->second.script_view.value_or(ScriptViewState{});
+                view.unselectable = !selectable->selectable;
+                found->second.script_view = (view.hidden || view.unselectable) ? std::optional(view) : std::nullopt;
+            };
+            const auto& born_squadrons = staging_->arrived_squadrons.value();
+            for (const auto id : command.units) {
+                apply(id);
+                const auto group = std::lower_bound(impl_->squadrons.begin(), impl_->squadrons.end(), id,
+                    [](const auto& row, const EntityId value) { return row.container < value; });
+                if (group != impl_->squadrons.end() && group->container == id)
+                    for (const auto member : group->members) apply(member);
+                for (const auto& arrival : born_squadrons)
+                    if (arrival.container == id) for (const auto member : arrival.members) apply(member);
+            }
+            continue;
+        }
+        if (const auto* to_point = std::get_if<ScriptTeleportPositionPayload>(&command.payload)) {
+            for (const auto id : command.units) {
+                if (auto moved = lanes.scripted_teleport_position(*to_point, id); !moved) return moved;
+            }
+            continue;
+        }
+        if (const auto* hyperspace = std::get_if<ScriptHyperspaceInPayload>(&command.payload)) {
+            for (const auto id : command.units) {
+                if (auto started = lanes.scripted_hyperspace_in(*hyperspace, id); !started) return started;
+            }
+            continue;
+        }
+        if (std::holds_alternative<ScriptCancelHyperspacePayload>(command.payload)) {
+            for (const auto id : command.units) {
+                if (auto cancelled = lanes.scripted_cancel_hyperspace(id); !cancelled) return cancelled;
+            }
             continue;
         }
         if (const auto* teleport = std::get_if<ScriptTeleportPayload>(&command.payload)) {

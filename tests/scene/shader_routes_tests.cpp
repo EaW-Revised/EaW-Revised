@@ -123,9 +123,10 @@ void route_contracts() {
     expect(route("AnythingNew.fx", false, true) == ShaderRoute::translated, "a natively translated program");
     expect(route("AnythingNew.fx") == ShaderRoute::unhandled, "a program nothing handles is unhandled");
     // The pinned gap list: these families have no route yet. A family that gains one must move out of this list.
-    for (const char* name : {"MeshBumpReflectColorize.fx", "RSkinBumpReflectColorize.fx", "MeshGlow.fx", "MeshHeat.fx",
-                             "MeshBumpLight.fx", "MeshAlphaScroll.fx", "RSkinAlphaGloss.fx"})
+    for (const char* name : {"MeshBumpReflectColorize.fx", "RSkinBumpReflectColorize.fx", "MeshHeat.fx"})
         expect(route(name) == ShaderRoute::unhandled, std::string(name) + " has no route yet");
+    for (const char* name : {"MeshGlow.fx", "MeshBumpLight.fx", "MeshAlphaScroll.fx", "RSkinAlphaGloss.fx"})
+        expect(route(name) == ShaderRoute::hand_adapter, std::string(name) + " has an adapter");
 }
 
 eawr::scene::Placement placement(const std::uint64_t ordinal, const std::string& object, const std::string& model,
@@ -148,7 +149,7 @@ void dropped_layer_contracts() {
                                 {{"MeshBumpReflectColorize.fx", false}, {"MeshGloss.fx", true}, {"MeshShadowVolume.fx", false}});
     const auto twin = placement(2, "VV_DREAD", "data/art/models/vv_dread.alo",
                                 {{"MeshBumpReflectColorize.fx", false}, {"MeshBumpReflectColorize.fx", false}});
-    const auto frigate = placement(3, "VV_FRIGATE", "data/art/models/vv_frigate.alo", {{"meshglow.fx", false}});
+    const auto frigate = placement(3, "VV_FRIGATE", "data/art/models/vv_frigate.alo", {{"meshheat.fx", false}});
     const std::array<const eawr::scene::Placement*, 4> drawn{&ship, &twin, &frigate, nullptr};
     const auto dropped = eawr::scene::dropped_layers(drawn);
     expect(dropped.surfaces == 5 && dropped.unhandled_surfaces == 4, "supported surfaces are not dropped; shadow volumes are not a gap");
@@ -159,7 +160,7 @@ void dropped_layer_contracts() {
                    && reflect.route == ShaderRoute::unhandled && reflect.object_type == "VV_DREAD"
                    && reflect.model_path == "data/art/models/vv_dread.alo",
                "the largest group first, counting surfaces and placements separately");
-        expect(dropped.by_shader[1].shader == "meshglow.fx" && dropped.by_shader[2].shader == "MeshShadowVolume.fx"
+        expect(dropped.by_shader[1].shader == "meshheat.fx" && dropped.by_shader[2].shader == "MeshShadowVolume.fx"
                    && dropped.by_shader[2].route == ShaderRoute::intentional_skip,
                "ties order by name; the shadow volume keeps its intentional route");
     }
@@ -186,15 +187,15 @@ void audit_contracts() {
     // The effect files the base and mod ship: a name with a file is a real effect; a name without one is the built-in route.
     write_file(base / "art/shaders/MeshGloss.fxo", Bytes(4, std::byte{1}));
     write_file(base / "art/shaders/MeshBumpReflectColorize.fxo", Bytes(4, std::byte{1}));
-    write_file(base / "art/shaders/MeshGlow.fxo", Bytes(4, std::byte{1}));
+    write_file(base / "art/shaders/MeshHeat.fxo", Bytes(4, std::byte{1}));
     write_file(base / "art/shaders/MeshAdditive.fxo", Bytes(4, std::byte{1}));
     // The mod's ship hides one glow layer and names an effect with no file; its sibling repeats the reflect shader.
     write_file(mod / "art/models/vong_ship.alo",
                model({mesh("Hull", true, {"MeshGloss.fx", "MeshBumpReflectColorize.fx"}),
-                      mesh("Lamps", true, {"MeshGlow.fx", "NoFileEffect.fx"}), mesh("Hidden", false, {"MeshGlow.fx"})}));
+                      mesh("Lamps", true, {"MeshHeat.fx", "NoFileEffect.fx"}), mesh("Hidden", false, {"MeshHeat.fx"})}));
     write_file(mod / "art/models/vong_ship_b.alo", model({mesh("Hull", true, {"MeshBumpReflectColorize.fx"})}));
     // A base model shadows nothing; its own unhandled name is attributed to the base layer.
-    write_file(base / "art/models/rock.alo", model({mesh("Rock", true, {"MeshGlow.fx", "MeshAdditive.fx"})}));
+    write_file(base / "art/models/rock.alo", model({mesh("Rock", true, {"MeshHeat.fx", "MeshAdditive.fx"})}));
     // A model cut short: the header scan stops, the model counts as unreadable and is never decoded whole.
     {
         Bytes whole = model({mesh("Rock", true, {"MeshGlow.fx"})});
@@ -216,18 +217,18 @@ void audit_contracts() {
     expect(audit.unhandled.size() == 3, "reflect and glow in the mod, glow in the base");
     if (audit.unhandled.size() == 3) {
         const auto& first = audit.unhandled[0];
-        expect(first.layer == "base" && first.shader == "MeshGlow.fx" && first.meshes == 1 && first.models == 1,
+        expect(first.layer == "base" && first.shader == "MeshHeat.fx" && first.meshes == 1 && first.models == 1,
                "layers sort by name; the base glow layer is attributed to the base");
         const auto& reflect = audit.unhandled[1];
         expect(reflect.layer == "the-mod" && reflect.shader == "MeshBumpReflectColorize.fx" && reflect.meshes == 2
                    && reflect.models == 2 && reflect.example_model.find("vong_ship") != std::string::npos,
                "the mod's reflect layers count meshes and models separately");
-        expect(audit.unhandled[2].shader == "MeshGlow.fx" && audit.unhandled[2].layer == "the-mod"
+        expect(audit.unhandled[2].shader == "MeshHeat.fx" && audit.unhandled[2].layer == "the-mod"
                    && audit.unhandled[2].meshes == 1, "a hidden layer does not count");
     }
 
     const auto translated = eawr::scene::audit_model_shaders(
-        mounted.value(), [](const std::string_view shader) { return shader == "MeshGlow.fx"; });
+        mounted.value(), [](const std::string_view shader) { return shader == "MeshHeat.fx"; });
     expect(translated.unhandled.size() == 1 && translated.unhandled[0].shader == "MeshBumpReflectColorize.fx",
            "a translated program is no longer unhandled");
 

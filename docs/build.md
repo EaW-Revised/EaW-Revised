@@ -110,9 +110,21 @@ The root C++ build never touches Godot. Anything that runs the game viewer does,
 patched Godot**, not on the official download: the fork [Thom-Ernst/godot](https://github.com/Thom-Ernst/godot), branch
 `eawr/4.7.2-stable` (4.7.2-stable plus our patches: Separate-render-thread fixes and a memory fix; patch list and licence notes in
 [third_party/godot/README.md](../third_party/godot/README.md)). The Windows x64 exe is on the fork's releases
-(`eawr-4.7.2-5b733a90f`, with `SHA256-SUMS.txt`); its SHA-256 is pinned in `tools/engine_pins.json` and
-`tools/release/package_release.py` (`fetch_pinned_godot.ps1` pins the SHA-512 of the release zip). There is no patched Linux, ARM64 or macOS build yet; build the fork yourself from the branch
-(`BUILD_NAME=eawr`) if you need one.
+(`eawr-4.7.2-5b733a90f`, with `SHA256SUMS.txt`); its SHA-256 is pinned in `tools/engine_pins.json` and
+`tools/release/package_release.py` (`fetch_pinned_godot.ps1` pins the SHA-512 of the release zip). Builds of the same commit for the other platforms are on the same fork release (`eawr-4.7.2-5b733a90f`), together with `SHA256SUMS.txt` and `SHA512SUMS.txt` covering every asset. They are
+the editor binary (what the player folder ships on Windows), built with `production=yes` and `BUILD_NAME=eawr`.
+`--version` reports `4.7.2.stable.eawr.5b733a90f`. To build one yourself, use the fork branch with the same options
+(`python tools/offload/godot_linux_build.py` is our Linux builder); the checksums below are for comparing.
+
+| Platform | Built | Checked | SHA-256 |
+|---|---|---|---|
+| Windows x64 | MSVC, `lto=full` (on the fork release) | shipped | `96c03783011f197aff146e92c1e33e0000e8975b3a873fbfcc52cd86dff12b7f` |
+| Linux x64 | GCC 13.3, `lto=full`, glibc 2.38 or newer | started headless, rendered a scene in software | `3faca5ebc469ee3c2bcee1da59337233660df0c2a644699f04c139da891f0c50` |
+| Linux arm64 | GCC 13.3 cross-compiled, `lto=full`, glibc 2.38 or newer | built only, not run | `bca3f78546488af3b62851772f7d12a998054e8d69da0f1413aeeb479d0b87df` |
+| macOS (universal) | Apple clang 17, `lto=thin`, unsigned | built only, not run | `8bb66ecb051180aec755dcb4d80e9c82cf589d569fe43a2887924658b3f33208` |
+
+The macOS and arm64 binaries have never been started; treat them as experimental. The macOS binary is unsigned, so
+Gatekeeper warns. `lto=full` does not finish on the free hosted macOS runner, so macOS uses `lto=thin`.
 
 What the official 4.7.2 download does, so you are not surprised ([engine guard](engine-guard.md)):
 

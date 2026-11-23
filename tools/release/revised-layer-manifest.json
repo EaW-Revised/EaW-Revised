@@ -145,6 +145,10 @@
       "size": 985,
       "sha256": "29ff3bf55e44d831f9da07c212b7c2253921f494cf718a8bcfebfb4f00533059"
     },
+    "Data/XML/RevisedTweaks.xml": {
+      "size": 261,
+      "sha256": "2ecb4ac94bb077ab638920098ecbb84d7d38107d415f49f4bdd0092021b81449"
+    },
     "Data/XML/RevisedSelectionSFX.xml": {
       "size": 3476,
       "sha256": "adcb7e3bc82647a4c7e825bd96398e252bc1aa5727e1aedecd79d3b9727990f1"

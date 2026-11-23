@@ -12,8 +12,8 @@ aim to acknowledge a report within a week and will keep you updated until it is 
 ## Scope
 
 In scope: the code in this repository, for example the parsers for game and mod files
-(MEG archives, XML, models, textures, maps), the Lua sandbox, replay files, and the build
-and CI configuration.
+(MEG archives, XML, models, textures, maps), the Lua sandbox, replay files, the online
+relay, launcher and updater, and the build and CI configuration.
 
 Out of scope: the original game and its files, third-party mods, and the upstream
 projects we depend on (report those to their maintainers; tell us too if it affects this
@@ -21,4 +21,4 @@ project).
 
 ## Supported versions
 
-The project has no releases yet; fixes go into `main`.
+The latest release and `main` are supported; fixes go into `main`.

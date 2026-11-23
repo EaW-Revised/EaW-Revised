@@ -123,6 +123,7 @@ void GraphSaver::write_object(persist::ByteWriter& out, ::std::uint32_t id) {
             const auto& payload = *reinterpret_cast<const HandlePayload*>(userdata + 1);
             out.u32(payload.kind);
             out.u64(payload.id);
+            out.u32(payload.aux);
             return;
         }
         case kind_thread: {

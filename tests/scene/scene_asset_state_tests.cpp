@@ -776,7 +776,7 @@ void selector_contracts() {
     planet_effect_contracts();
     shield_source_name_surface_contracts();
     asset_name_contracts();
-    expect(eawr::scene::legacy_selectors().size() == 24, "the selector table matches the accepted legacy list");
+    expect(eawr::scene::legacy_selectors().size() == 28, "the selector table matches the accepted legacy list");
     const auto* alpha = eawr::scene::find_legacy_selector("MeshAlpha.fx");
     expect(alpha != nullptr && alpha->transparent && alpha->technique == "sph_t1",
            "MeshAlpha is the fixed transparent-phase pass");

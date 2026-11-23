@@ -606,7 +606,7 @@ struct NativeIsolationFixture {
     eawr::platform::CampaignServiceConfiguration configuration;
     std::vector<std::shared_ptr<Instance>> instances;
     std::shared_ptr<std::array<std::uint64_t, 3>> fault_ticks = std::make_shared<std::array<std::uint64_t, 3>>();
-    NativeIsolationFixture(std::size_t workers, std::set<galactic::PlayerId> faults, bool throws, bool after, bool published = false, bool late = false, bool infrastructure = false, bool staggered = false)
+    NativeIsolationFixture(std::size_t workers, std::set<galactic::PlayerId> faults, bool throws, bool after, bool published = false, bool late = false, bool infrastructure = false, bool staggered = false, bool body_write = false)
         : executor(std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers)),
           layout(galactic::synthetic_galaxy({.seed = 42, .planets = 3, .players = 3, .fleets_per_player = 0})),
           setup(std::make_shared<cp::GalacticAiRuntimeSetup>()) {
@@ -651,7 +651,7 @@ struct NativeIsolationFixture {
                 "function main() while true do NativeLateFixture(); coroutine.yield(true) end end\n";
         }
         const auto late_faults = faults;
-        must(cp::configure_galactic_ai_runtime(configuration, setup, [this, faults = std::move(faults), throws, after, published, late, infrastructure] {
+        must(cp::configure_galactic_ai_runtime(configuration, setup, [this, faults = std::move(faults), throws, after, published, late, infrastructure, body_write] {
             auto instance = std::make_shared<Instance>(); cp::GalacticAiRuntimeProviders providers;
             providers.execution_writers_tracked = true; // This fixture has no external execution writers.
             providers.execution_input = [](auto player, const auto& snapshot, const auto&, const auto&, const auto*) {
@@ -673,7 +673,7 @@ struct NativeIsolationFixture {
                 instance->world = &world;
                 return eawr::core::Result<void>::success();
             };
-            providers.initialize_freestore = [instance, faults, throws, after, published, late, infrastructure](auto player, auto& actions, const auto&, const auto&) -> eawr::core::Result<void> {
+            providers.initialize_freestore = [instance, faults, throws, after, published, late, infrastructure, body_write](auto player, auto& actions, const auto&, const auto&) -> eawr::core::Result<void> {
                 ++instance->calls[player];
                 const auto fault = [&]() -> eawr::core::Result<void> {
                     if (published) (void)must(instance->world->set_technology({player, 2, false, false}));
@@ -685,9 +685,14 @@ struct NativeIsolationFixture {
                 if (!late && faults.contains(player) && !after) return fault();
                 must(actions.qualified_freestore().initialize(player, {}));
                 std::int64_t delta = 10;
-                if (player > 1) for (const auto& account : instance->world->snapshot()->player_economy()->players)
+                if (player > 1) for (const auto& account : actions.snapshot()->player_economy()->players)
                     if (account.player == player - 1) delta += account.credits.raw() / eawr::sim::math::Fixed::scale - 100;
-                (void)must(instance->world->add_credits(player, must(eawr::sim::math::Fixed::from_integer(delta)), must(eawr::sim::math::Fixed::from_integer(1))));
+                ga::ActionRequest cash; cash.kind = ga::ActionKind::give_money; cash.player = player;
+                cash.amount = eawr::script::foc::ai::real(delta);
+                (void)must(actions.admit(cash));
+                // Negative control for the runtime's byte comparison of the live world (check_body_world): a body that completes
+                // without a fault but wrote the live world through the world handle instead of its shell.
+                if (body_write && player == 1) (void)must(instance->world->set_technology({player, 2, false, false}));
                 return !late && faults.contains(player) ? fault() : eawr::core::Result<void>::success();
             };
             if (late) providers.publish_freestore = [](const auto& actions, auto& input, const auto&, const auto& admitted) {
@@ -957,6 +962,14 @@ void native_provider_isolation_contracts() {
             expect(!failed && attempted->calls.at(1) == 1 && attempted->calls.at(2) == 1 && !attempted->calls.contains(3)
                 && refused.galaxy().native_post_publication_faults() == 1 && !attempted->view.manager.lock()->provider_retired(2),
                 "fault after live output preserves refusal, does not roll back/retire/retry, and does not repeat callbacks");
+            if (!throws) {
+                NativeIsolationFixture written(workers, {}, false, false, false, false, false, false, true);
+                auto written_game = written.create(written.layout); const auto written_attempt = written.instances.back();
+                const auto stepped = written_game.step(*written.executor);
+                const auto tally = written_attempt->view.apply_tally;
+                expect(!stepped && tally && tally->body_live_writes >= 1 && written_game.galaxy().native_post_publication_faults() == 1,
+                    "a window body that completes after writing the live world is counted by the cut's byte comparison and refused");
+            }
         }
         if (reference.empty()) reference = trace; else expect(trace == reference, "whole native provider isolation, checkpoint and input replay equal on 1/2/4/8 workers");
     }

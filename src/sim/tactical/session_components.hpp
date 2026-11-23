@@ -17,6 +17,9 @@ struct ScriptInvulnerable { bool value{true}; };
 // Lua Prevent_All_Fire flag: presence retains it through gather and commit.
 struct HoldFire { bool value{true}; };
 
+// Lua Hide / Set_Selectable flags: presence retains them through gather and commit.
+struct ScriptView { ScriptViewState value; };
+
 struct Identity {
     TypeId type_id{};
     PlayerId owner{};

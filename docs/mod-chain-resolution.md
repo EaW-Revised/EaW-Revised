@@ -84,7 +84,7 @@ ordering constraints between siblings are not dependency edges in that list.
 | --- | --- |
 | EAWR-MODS-0003 | Required layer is not installed |
 | EAWR-MODS-0010 | Steam download unfinished |
-| EAWR-MODS-0011 | Malformed or unreadable modinfo |
+| EAWR-MODS-0011 | Malformed or unreadable modinfo. One line per problem file, in plain words ("its modinfo.json could not be read: <reason>; the mod still loads; ask the mod author"); reading the records again never repeats it. A top-level Steam Workshop upload descriptor (`publishedfileid` and/or `contentfolder` plus a `title`, with no `name`, `steamdata` or `dependencies`) is not an eaw.modinfo: it raises no 0011 and does not close the shader-translation policy. |
 | EAWR-MODS-0012 | Malformed or unsupported known-chains input |
 | EAWR-MODS-0013 | Dependency cycle or contradictory order |
 | EAWR-MODS-0014 | Repeated parent within one dependency list removed |

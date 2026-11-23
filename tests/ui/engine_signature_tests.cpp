@@ -70,8 +70,17 @@ void test_launcher_unverified_flag() {
 void test_hash_line_names_found_and_expected() {
     const auto signature = pres::check_engine_signature("official", "ed1daf0bf", "4.7.2.stable.official.ed1daf0bf");
     const std::string line = pres::unpatched_engine_hash_line(signature, "ab1824f85bfd");
-    expect(line.starts_with("EAWR-ENGINE-UNPATCHED: UNPATCHED ENGINE: found sha256 ab1824f85bfd expected 96c03783"),
-           "one line names the found and the pinned hash");
+    const std::string expected_prefix = "EAWR-ENGINE-UNPATCHED: UNPATCHED ENGINE: found sha256 ab1824f85bfd expected "
+        + std::string(pres::pinned_player_engine_sha256.substr(0, 8));
+    expect(line.starts_with(expected_prefix), "one line names the found and the pinned hash");
+#if defined(__linux__)
+    expect(pres::pinned_player_engine_sha256 == pres::pinned_player_engine_sha256_linux_x64
+               && pres::pinned_player_engine_sha256_linux_x64 != pres::pinned_player_engine_sha256_windows_x64,
+           "a Linux viewer expects the Linux engine hash, not the Windows one");
+#else
+    expect(pres::pinned_player_engine_sha256 == pres::pinned_player_engine_sha256_windows_x64,
+           "a Windows viewer expects the Windows engine hash");
+#endif
     expect(line.find("(tools/engine_pins.json); 4.7.2.stable.official.ed1daf0bf") != std::string::npos,
            "the version text follows the hashes");
     expect(pres::unpatched_engine_hash_line(signature, "").find("found sha256 unreadable") != std::string::npos,

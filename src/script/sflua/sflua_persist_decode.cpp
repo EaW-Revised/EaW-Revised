@@ -87,6 +87,7 @@ bool read_graph(persist::ByteReader& in, IrGraph& graph) {
         case kind_handle:
             object.handle_kind = in.u32();
             object.handle_id = in.u64();
+            object.handle_aux = in.u32();
             break;
         case kind_thread: {
             object.flag = in.u8() != 0;
@@ -261,7 +262,7 @@ private:
                 break;
             case kind_handle: {
                 Udata* userdata = luaS_newudata(state_, sizeof(HandlePayload));
-                *reinterpret_cast<HandlePayload*>(userdata + 1) = HandlePayload{object.handle_kind, 0, object.handle_id};
+                *reinterpret_cast<HandlePayload*>(userdata + 1) = HandlePayload{object.handle_kind, object.handle_aux, object.handle_id};
                 object.built = userdata;
                 break;
             }

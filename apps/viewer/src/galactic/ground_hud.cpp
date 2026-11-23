@@ -209,6 +209,7 @@ bool GalacticMode::State::build_ground_hud() {
     input->drag_art->receiver({}, {}, {});
     input->drag_art->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
     input->hit = [this](Vector2 point) {
+        if (build_tray && build_tray->holds(point)) return false; // #8029: the tray's own controls take the pointer
         if (advanced_map_shell && advanced_map_shell->is_visible_in_tree()) return detail_hit(point);
         if (!fleet_organize->is_visible_in_tree() || dragged_fleet) return false;
         if (map_input.box_start) return true;

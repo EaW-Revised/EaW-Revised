@@ -425,7 +425,7 @@ core::Result<void> parse_seat_control_extension(sim::detail::Reader& input, Gala
     };
     setup.seat_control.emplace(); auto& control = *setup.seat_control;
     std::uint32_t teams{}, controllers{};
-    if (!count(teams, 9) || teams > 2) return malformed("bad team policy count");
+    if (!count(teams, 9) || teams > galactic_max_human_sides) return malformed("bad team policy count");
     for (std::uint32_t i = 0; i < teams; ++i) {
         TeamLead team; std::uint8_t perspective{};
         if (!input.read_u32(team.side) || !input.read_u32(team.lead.value)

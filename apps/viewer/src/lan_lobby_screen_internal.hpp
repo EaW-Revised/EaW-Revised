@@ -387,6 +387,8 @@ struct EawrLanLobby::PageState final {
     EawrLobbyGameList* game_list{};
     TextureRect* preview{};
     StagingPreview start_icons;
+    std::string preview_variation{"EawrUi"};
+    std::string preview_role{"Global_Default"}; // the font role the dialog authors for the preview gadget
     std::map<std::string, ColorRect*> accept_icons;
     std::size_t chat_drawn{};
     // New chat lines were added: the list scrolls to the end once its layout has caught up.
@@ -452,9 +454,14 @@ struct EawrLanLobby::Impl final {
     model::HostOptions host_options;
     std::vector<sim::tactical::PlayerId> human_owners{1, 2};
     std::uint32_t direct_seats{2};
-    // Campaign rooms open the mesh only once every configured human has joined, so the default stays
-    // at two; the skirmish transport capacity (human_owners) must not leak into it.
+    // Campaign rooms open the mesh only once every configured human has joined. Until the host chooses a number, the room opens for
+    // every playable faction of its campaign (net::galactic_lobby_default_humans), so no joiner finds it full (D8); two until the
+    // campaign list is known. The skirmish transport capacity (human_owners) must not leak into it.
     std::uint32_t galactic_humans{2};
+    bool galactic_humans_chosen{};      // the host picked a number in the dropdown: it stays while the campaign can start with it
+    bool galactic_humans_defaulted{};   // the default was fitted to the campaign list on the host options page
+    std::uint32_t galactic_seat_limit{}; // the transport's seats of the room (the map's rows) when the room was opened
+    bool host_port_mapping{};           // the router mapping the host asked for, kept for a re-opened room
     skirmish::SetupSelection selection;
     bool custom_maps{};
     int map_index{-1};                  // into resources.maps

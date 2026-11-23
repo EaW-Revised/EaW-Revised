@@ -8,6 +8,9 @@
 #include "ui/hud_icon_text.hpp"
 #include "ui/tactical_hud_internal.hpp"
 
+#include <godot_cpp/classes/font.hpp>
+#include <godot_cpp/classes/input_event_mouse_button.hpp>
+#include <godot_cpp/classes/input_event_mouse_motion.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/texture2d.hpp>
@@ -33,6 +36,38 @@ void set_text_if_changed(EawrHudText& label, const String& value) {
 }
 
 } // namespace
+
+// The tray's own layer (#8029): the planet menu (a second HUD shell) sits under an input mask of its own that is a LATER
+// child of the HUD than the command bar's mask, and Godot picks a pointer target subtree by subtree in tree order, so a
+// tray inside the command bar sat below the planet menu's buttons: they hovered, opened their popup and took clicks
+// through the tray. The layer is a child of the HUD placed right after the last of the two shell masks: over every HUD
+// shell, and under what the HUD adds after them (the modal menus). The encyclopedia and queue popups are built before the
+// shell masks, so in pointer order they have always been under the shells (they draw over them by z, and follow the
+// pointer); the layer keeps the tray's place relative to them. The tray's controls keep the command bar's coordinates: the
+// layer takes its position and size.
+Control* GalacticBuildTray::tray_layer(GalacticMode::State& state) {
+    Node* parent = state.hud;
+    if (!layer_) {
+        layer_ = memnew(Control);
+        layer_->set_name("GalacticBuildTrayLayer");
+        layer_->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        layer_->set_z_index(1); // the shells' masks draw at z 1 of the HUD; a later sibling at that z draws over them
+        parent->add_child(layer_);
+    }
+    int last_shell = -1;
+    for (const Control* shell : {static_cast<const Control*>(state.command_bar), static_cast<const Control*>(state.fleet_organize)})
+        if (const Node* mask = shell ? shell->get_parent() : nullptr; mask && mask->get_parent() == parent)
+            last_shell = std::max(last_shell, mask->get_index());
+    if (last_shell >= 0) {
+        // Removing the layer first shifts every later child down by one: a layer before the shell lands ON its index.
+        const int target = layer_->get_index() < last_shell ? last_shell : last_shell + 1;
+        if (layer_->get_index() != target) parent->move_child(layer_, target);
+    }
+    if (layer_->get_global_position() != state.command_bar->get_global_position())
+        layer_->set_global_position(state.command_bar->get_global_position());
+    if (layer_->get_size() != state.command_bar->get_size()) layer_->set_size(state.command_bar->get_size());
+    return layer_;
+}
 
 GalacticBuildTray::GalacticBuildTray() = default;
 GalacticBuildTray::~GalacticBuildTray() { clear_backdrop(); }
@@ -77,6 +112,24 @@ const viewer::galactic::BuildChoiceComponent* GalacticBuildTray::choice_under(co
     for (const auto& entry : entries_)
         if (entry.shown && entry.button == control) return &entry.choice;
     return nullptr;
+}
+
+void GalacticBuildTray::note_world_event(const Ref<InputEvent>& event) {
+    // Every mouse button, wheel and held-button motion event the planet view receives over the tray's controls: the tray
+    // takes them all, so the count stays 0 (reported for the GPU case; #8029).
+    Vector2 position;
+    if (const auto* button = Object::cast_to<InputEventMouseButton>(event.ptr())) position = button->get_position();
+    else if (const auto* motion = Object::cast_to<InputEventMouseMotion>(event.ptr());
+             motion && static_cast<std::int64_t>(motion->get_button_mask()) != 0) position = motion->get_position();
+    else return;
+    if (holds(position)) ++world_events_over_tray_;
+}
+
+bool GalacticBuildTray::holds(const Vector2 point) const {
+    for (const Control* control : {static_cast<const Control*>(panel_), static_cast<const Control*>(close_),
+             static_cast<const Control*>(handle_)})
+        if (control && control->is_visible_in_tree() && control->get_global_rect().has_point(point)) return true;
+    return false;
 }
 
 void GalacticBuildTray::load_layout(GalacticMode::State& state) {
@@ -146,6 +199,9 @@ void GalacticBuildTray::ensure_controls(GalacticMode::State& state) {
     panel_ = memnew(Control);
     panel_->set_name("GalacticBuildTray");
     panel_->set_mouse_filter(Control::MOUSE_FILTER_STOP);
+    // A tray control takes the wheel too: Godot passes scroll events through STOP controls by default, and the planet view
+    // behind the tray would zoom (#8029, owner: clicks on the tray must not reach the planet view).
+    panel_->set_force_pass_scroll_events(false);
     panel_back_ = memnew(TextureRect);
     panel_frame_ = memnew(TextureRect);
     for (auto* image : {panel_back_, panel_frame_}) {
@@ -161,12 +217,13 @@ void GalacticBuildTray::ensure_controls(GalacticMode::State& state) {
         if (!backs.empty()) panel_back_->set_texture(state.command_texture(backs.front()));
         if (!frames.empty()) panel_frame_->set_texture(state.command_texture(frames.front()));
     }
-    state.command_bar->add_child(panel_);
+    tray_layer(state)->add_child(panel_);
     panel_->hide();
     // GBT-07: the close icon, in the art of the first Art_Component the mod has (a mod's own small close icon); with
     // none, place_close gives it the bar's own button art, as the handle's.
     const auto& close = layout_->close;
     close_ = memnew(EawrHudButton);
+    close_->set_force_pass_scroll_events(false);
     close_->set_name("GalacticBuildTrayClose");
     close_->hide();
     close_->set_action([this] { open_ = false; ++close_presses_; });
@@ -190,15 +247,16 @@ void GalacticBuildTray::ensure_controls(GalacticMode::State& state) {
         close_art_ = name;
         break;
     }
-    state.command_bar->add_child(close_);
+    tray_layer(state)->add_child(close_);
     handle_ = memnew(EawrHudButton);
+    handle_->set_force_pass_scroll_events(false);
     handle_->set_name("GalacticBuildTrayHandle");
     handle_->hide();
     handle_->set_action([this] { open_ = !open_; ++handle_presses_; });
     handle_text_ = memnew(EawrHudText);
     handle_text_->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
     handle_->add_child(handle_text_);
-    state.command_bar->add_child(handle_);
+    tray_layer(state)->add_child(handle_);
 }
 
 void GalacticBuildTray::style_handle(GalacticMode::State& state, const data::ui::CommandBarComponent& component, const data::ui::ShellAnchor& anchor) {
@@ -539,7 +597,7 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
         auto* label = memnew(EawrHudText);
         label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         label->hide();
-        state.command_bar->add_child(label);
+        tray_layer(state)->add_child(label);
         headers_.push_back(label);
     }
     auto* probe = headers_.front();
@@ -547,11 +605,27 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
     const auto measure = [&](const std::string& text) {
         set_text_if_changed(*probe, String::utf8(text.c_str()));
         state.configure_command_bar_text(placement, *probe, *header_component, *header_anchor);
-        return probe->get_minimum_size() * header_scale;
+        // A HUD text's minimum height is 0 (its band is the authored one, hud_icon_text.hpp), so the header strip takes the
+        // height of the text itself: the font's line height at the glyph size the label draws with (#8159: a strip of height
+        // 0 put every label half over the icons below it).
+        const auto font = probe->font();
+        // No font yet: the glyph size itself, never 0 (a zero strip is the bug this fixes).
+        const float line = font.is_valid() ? font->get_height(probe->glyph_pixels())
+                                           : static_cast<float>(std::max(probe->glyph_pixels(), 1));
+        return Vector2(probe->get_minimum_size().x, line) * header_scale;
     };
     const float header_height = measure("Ag").y;
+    header_line_ = header_height;
     full.header_height = header_height;
-    compact.header_height = header_height * static_cast<float>(layout.compact_entry_scale / std::max(layout.entry_scale, 1e-6));
+    // The label draws the same line at either size step (it is not scaled with the entries), so the compact strip is the
+    // full line too: a shorter strip let the text run on over the icons below it.
+    compact.header_height = header_height;
+    // GBT-06: a header label rides a quarter of its own height above the icons below it, in a gap of its own; both are
+    // relative to the header's height, so every skin and mod font gets the same proportion (#8031).
+    for (auto* metrics : {&full, &compact}) {
+        metrics->header_lift = 0.25F * metrics->header_height;
+        metrics->category_gap = 3.0F * metrics->header_lift;
+    }
 
     const auto caption_key = [&](const tray::Group& group) {
         for (const auto& [name, key_text] : groups_.definition.captions)
@@ -559,6 +633,7 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
         return std::string{};
     };
     const auto caption_text = [&](const tray::Group& group) {
+        if (!group.label.empty()) return group.label; // a group split by encyclopedia class: the mod's own class text (GBT-05)
         const auto key_text = !group.caption_key.empty() ? group.caption_key : caption_key(group);
         if (!key_text.empty() && state.battle_text) {
             auto resolved = state.battle_text(key_text);
@@ -571,13 +646,19 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
     std::vector<std::string> types;
     types.reserve(choices.size());
     for (const auto& choice : choices) types.push_back(choice.type);
-    auto groups = tray::classify(types, types_, categories_, groups_.definition);
+    // The headers of whole category groups, as the labels will read them: the model merges a class group into a category
+    // group that reads the same (GBT-05), in tray order.
+    std::vector<std::pair<std::string, std::string>> category_headers;
+    category_headers.reserve(categories_.names.size());
+    for (const auto& name : categories_.names)
+        category_headers.emplace_back(name, caption_text(tray::Group{tray::GroupKind::category, name, {}, {}, 0.0F, {}}));
+    auto groups = tray::classify(types, types_, categories_, groups_.definition, category_headers);
     for (auto& group : groups) group.min_width = measure(caption_text(group)).x;
     tray::PackOptions options;
     options.max_rows = layout.max_rows;
     options.fold_single_choice_groups = layout.fold_single_choice_groups;
-    options.misc_min_width = measure(caption_text(tray::Group{tray::GroupKind::misc, "Misc", {}, {}, 0.0F})).x;
-    if (const auto misc_key = caption_key(tray::Group{tray::GroupKind::misc, "Misc", {}, {}, 0.0F}); !misc_key.empty())
+    options.misc_min_width = measure(caption_text(tray::Group{tray::GroupKind::misc, "Misc", {}, {}, 0.0F, {}})).x;
+    if (const auto misc_key = caption_key(tray::Group{tray::GroupKind::misc, "Misc", {}, {}, 0.0F, {}}); !misc_key.empty())
         options.misc_caption_key = misc_key;
     // GBT-07: a close icon whose first candidate sits inside the panel's top keeps a strip of its height (plus its
     // offset from the edge) free above the first row, so it never covers a header or an entry.
@@ -632,6 +713,7 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
     while (entries_.size() < geometry.entries.size()) {
         Entry entry;
         entry.button = memnew(EawrHudButton);
+        entry.button->set_force_pass_scroll_events(false);
         entry.button->set_name("build_tray_entry");
         entry.button->hide();
         entry.button->set_order_icon({}, component->flag(data::ui::Field::click_shift));
@@ -649,7 +731,7 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
             if (index >= entries_.size() || !entries_[index].shown || !open_ || !state_) return;
             state_->submit_build_choice(entries_[index].choice);
         });
-        state.command_bar->add_child(entry.button);
+        tray_layer(state)->add_child(entry.button);
         entries_.push_back(entry);
     }
     for (std::size_t index = 0; index < entries_.size(); ++index) {
@@ -663,7 +745,7 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
         auto* label = memnew(EawrHudText);
         label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         label->hide();
-        state.command_bar->add_child(label);
+        tray_layer(state)->add_child(label);
         headers_.push_back(label);
     }
     probe->hide();
@@ -686,7 +768,7 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
         divider->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         divider->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
         divider->hide();
-        state.command_bar->add_child(divider);
+        tray_layer(state)->add_child(divider);
         dividers_.push_back(divider);
     }
     for (std::size_t index = 0; index < dividers_.size(); ++index) {
@@ -705,6 +787,7 @@ void GalacticBuildTray::service(GalacticMode::State& state) {
     state_ = &state;
     if (!state.command_bar || !state.hud) return;
     update(state);
+    if (layer_) static_cast<void>(tray_layer(state)); // every frame: the HUD may have gained a sibling, the bar may have moved
     lift_queue_strips(state);
 }
 
@@ -825,7 +908,8 @@ std::string GalacticBuildTray::report_json() const {
         << ",\"compact\":" << (compact_ ? "true" : "false")
         << ",\"handle_presses\":" << handle_presses_
         << ",\"queue_lift\":[" << lifts_[0] << ',' << lifts_[1] << ']'
-        << ",\"key_presses\":" << key_presses_;
+        << ",\"key_presses\":" << key_presses_
+        << ",\"world_events_over_tray\":" << world_events_over_tray_;
     const auto rect_json = [&out](const Rect2& rect) {
         out << '[' << rect.position.x << ',' << rect.position.y << ',' << rect.size.x << ',' << rect.size.y << ']';
     };
@@ -834,6 +918,29 @@ std::string GalacticBuildTray::report_json() const {
     const bool panel_shown = panel_ && panel_->is_visible_in_tree();
     out << ",\"panel_rect\":";
     rect_json(panel_shown ? panel_->get_global_rect() : Rect2());
+    // The shown header labels (global pixels, the label's scale applied): #8031 keeps each off every icon frame.
+    // The text the labels draw: the glyph pixels at the header scale, the least height a label strip can have.
+    out << ",\"header_line_pixels\":" << header_line_;
+    out << ",\"header_text_pixels\":";
+    out << (headers_.empty() || !layout_ ? 0.0F : static_cast<float>(headers_.front()->glyph_pixels()) * static_cast<float>(layout_->header_scale));
+    out << ",\"header_rects\":[";
+    std::size_t headers_written{};
+    for (std::size_t index = 1; index < headers_.size(); ++index) {
+        const auto* label = headers_[index];
+        if (!panel_shown || !label->is_visible_in_tree()) continue;
+        out << (headers_written++ ? "," : "");
+        rect_json(Rect2(label->get_global_position(), label->get_size() * label->get_scale()));
+    }
+    out << ']';
+    // The text of each shown header, in the order of the rects (a tray never shows two identical headers, GBT-05).
+    out << ",\"header_texts\":[";
+    headers_written = 0;
+    for (std::size_t index = 1; index < headers_.size(); ++index) {
+        const auto* label = headers_[index];
+        if (!panel_shown || !label->is_visible_in_tree()) continue;
+        out << (headers_written++ ? "," : "") << '"' << escaped(std::string(label->get_text().utf8().get_data())) << '"';
+    }
+    out << ']';
     out << ",\"bar_rect\":";
     rect_json(bar_ ? Rect2(state_ && state_->command_bar ? state_->command_bar->get_global_position() + bar_->position : bar_->position, bar_->size) : Rect2());
     const char* width_mode = !layout_ ? "" : layout_->width_mode == tray::WidthMode::fixed ? "fixed"

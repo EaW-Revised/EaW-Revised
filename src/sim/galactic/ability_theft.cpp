@@ -124,11 +124,20 @@ void GalacticSession::Impl::execute_siphon(const GameCommand& command, const Cen
     const auto& ability = *profile.siphon;
     const auto* original = find(setup.ability_host->profiles, actor.original_type, [](const auto& row) { return row.type; });
     if (!original) return reject();
+    // WGCH-70/40: a consumed bearer is scheduled with the ability's own absence. An authored pair with a nonpositive
+    // endpoint, or none, selects the default hero absence (WGCH-21); equal endpoints are that value and take no draw; a wider
+    // pair is sampled after the percentage draw below (that draw order is unverified: no stock siphon authors a wider pair).
+    const bool absence_authored = ability.respawn_minimum.raw() > 0 && ability.respawn_maximum.raw() > 0;
+    const bool absence_sampled = absence_authored && ability.respawn_minimum != ability.respawn_maximum;
     std::optional<HeroDefeat> defeat;
     if (ability.causes_despawn) {
         if (!ability_consumption_handler) return reject();
-        defeat = prepare_ability_defeat(actor, {}, false);
+        defeat = prepare_ability_defeat(actor, absence_authored ? ability.respawn_minimum : math::Fixed{}, false);
         if (!defeat) return reject();
+        // WGCH-70/210: the consumption schedules the return with the force flag, which skips the living-companion check of
+        // WGM-79 (a teammate in the same carrier does not block it). The removal stays the hero and, as before, an emptied
+        // carrier; whether the teammate leaves with the hero is unverified.
+        defeat->bypass_companions = true;
         // A consumed last passenger leaves no transport or fleet to fight. Include its empty carrier in the ordinary
         // loss commit; retain non-empty carriers.
         if (movement_inputs) {
@@ -164,6 +173,17 @@ void GalacticSession::Impl::execute_siphon(const GameCommand& command, const Cen
     if (!scaled) { failed = true; return; }
     auto fraction = math::add(ability.minimum, scaled.value());
     if (!fraction) { failed = true; return; }
+    if (defeat && absence_sampled) {
+        auto second = economy_draw(*economy_corruption, setup.seed);
+        if (!second) { failed = true; return; }
+        auto span = math::subtract(ability.respawn_maximum, ability.respawn_minimum);
+        if (!span) { failed = true; return; }
+        auto scaled_absence = math::multiply(span.value(), second.value());
+        if (!scaled_absence) { failed = true; return; }
+        auto sampled = math::add(ability.respawn_minimum, scaled_absence.value());
+        if (!sampled) { failed = true; return; }
+        defeat->seconds = sampled.value();
+    }
     if (ground_ability_story_handler) {
         const auto told = ground_ability_story_handler(actor.owner, target, ability.text_identity, ability.hero);
         if (!told) { failed = true; return; }

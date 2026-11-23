@@ -20,6 +20,7 @@ GalacticSetup synthetic_galaxy(const SyntheticGalaxyOptions& options) {
     const auto planets = std::max<std::uint32_t>(options.planets, 2);
     const auto players = std::max<std::uint32_t>(options.players, 1);
     const auto members = std::max<std::uint32_t>(options.members_per_fleet, 1);
+    const auto human_sides = std::min(std::max<std::uint32_t>(options.human_sides, 1), players);
 
     GalacticSetup setup;
     setup.seed = options.seed;
@@ -30,8 +31,9 @@ GalacticSetup synthetic_galaxy(const SyntheticGalaxyOptions& options) {
     }
     for (std::uint32_t player = 1; player <= players; ++player) {
         setup.players.push_back({player, player, 0});
-        // Versus has two human sides; coop seats player 1 against AI-controlled opponents.
-        const auto kind = player == 1 || (player == 2 && !options.coop_seat) ? SeatKind::human : SeatKind::ai;
+        // Versus has `human_sides` human sides, one per player; coop seats player 1 against AI-controlled opponents.
+        const auto kind = options.coop_seat ? (player == 1 ? SeatKind::human : SeatKind::ai)
+                                            : (player <= human_sides ? SeatKind::human : SeatKind::ai);
         setup.seats.push_back({SeatId{player}, player, kind, player - 1, true, kind == SeatKind::human ? player : 0U});
     }
     if (options.coop_seat) setup.seats.push_back({SeatId{players + 1}, 1, SeatKind::human, players, true, 1});

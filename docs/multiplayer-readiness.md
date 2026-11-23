@@ -562,8 +562,8 @@ when it differs the domain hashes both, so it differs from the host's and the se
 adapter is built or any shared step runs. A peer whose content cannot run the roster at all (campaign missing or not
 multiplayer, faction not playable, other batch quotas) fails the same way with a local-build refusal.
 
-Roster rules that need no content: up to eight human seats sharing one faction against AI, or exactly two human sides
-holding distinct factions; a third side, duplicate or unlisted seats, a lead outside its side, an AI configuration on a human
+Roster rules that need no content: up to eight human seats sharing one faction against AI, or up to eight human sides
+holding distinct factions; a side beyond that cap, duplicate or unlisted seats, a lead outside its side, an AI configuration on a human
 faction and a missing one on a non-human faction are refused by the encoder and the decoder alike. The offer's peers must be
 exactly the active human seats of the roster. The tick-zero digest in the roster and in the identity must be the same claim.
 
@@ -591,15 +591,17 @@ dialog before the room opens.
   the data's faction order; player and faction IDs are the 1-based position in that list, so a mod that renames or adds
   factions needs no code change. Every peer builds its own list and the rows in the options must equal it.
 - **Seats.** A seat's `slot` is the faction row it plays, `faction` that row's name and `team` the human side (the row's rank
-  among the host's human rows; at most two human rows, so at most two human sides). Several seats may share a row (up to eight
-  humans on one side against AI). A planned human row nobody takes is an AI faction; both players on one row is a co-op
-  game. A new peer is seated on the human row with the fewest seats and then edits its own pick.
+  among the host's human rows; at most `galactic_max_human_sides` human rows, so at most eight human sides). Several seats may
+  share a row (eight humans in all). A planned human row nobody takes is an AI faction; both players on one row is a co-op
+  game. The room shows a row for every playable faction and plans only the host's row at first: a new peer takes a planned row
+  nobody holds, else claims the first playable AI faction (the row becomes a human side), else shares the emptiest row; a
+  leaver's row goes back to the AI (LLB-19 to LLB-21 in [the lobby rules](ui/lan-lobby.md)).
 - **Options.** Custom credits, starting and maximum tech and heroes (WGS-13/14) travel in the options and the roster; custom
   tech is checked against the campaign's `Minimum_Custom_Tech`/`Maximum_Custom_Tech`. `MP_Default_Allow_Auto_Resolve` (0
   always, 1 never, 2 ask, 3 overwhelming odds; stock 2) is agreed in the options, but the setup offer does not carry it yet:
   the arbitration slice (GCMP-06) applies it. Difficulty is `Normal_Default` until the lobby has a control for it.
 - **Validation.** `validate_galactic_lobby` runs on the lobby's validate hook on every peer: campaign not in the local
-  multiplayer list, rows that differ from local content, a human row on an unplayable or neutral faction, a third human side,
+  multiplayer list, rows that differ from local content, a human row on an unplayable or neutral faction, more human sides than the ceiling,
   seats outside the planned rows, and (at Ready and Start) everything the setup offer refuses: `validate_mp_roster` (two to
   eight human seats, a lead per side).
 - **Offer.** At Start the host seals the roster from the agreed choices (`campaign::seal_mp_roster`), derives its own

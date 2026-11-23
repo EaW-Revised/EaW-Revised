@@ -133,6 +133,9 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
             if (special.kind == SpecialAbilityKind::concentrate_fire || special.kind == SpecialAbilityKind::tractor_beam)
                 bonus_categories.push_back(special.concentrate_stacking_category);
         }
+        for (const auto& profile : combat.profiles) for (const auto& weapon : profile.weapons)
+            for (const auto* shot : {&weapon.shot, &weapon.ability_shot, &weapon.barrage_shot})
+                if (*shot && (*shot)->combat_mod.enabled) bonus_categories.push_back((*shot)->combat_mod.key);
         std::sort(types.begin(), types.end());
         for (const auto& profile : abilities.profiles) for (const auto& ability : profile.abilities)
             if (ability.spawned && ability.spawned->weaken.on_detonation) bonus_categories.push_back(0);

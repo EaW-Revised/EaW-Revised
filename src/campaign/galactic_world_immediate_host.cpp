@@ -152,6 +152,7 @@ struct WorldBatch final : auth::ImmediateEffectState, GalacticWorldBatch {
     // write on an actor that survives the batch.
     std::size_t journal_entries() const {
         std::size_t entries = batch.script_journal_entries();
+        if (!batch.has_script_removals()) return entries + batch.script_usage_entries();
         for (const auto& change : batch.actor_changes())
             if (!batch.script_removed(change.actor) && (change.prevent_ai_usage || change.prefer_ground)) ++entries;
         return entries;

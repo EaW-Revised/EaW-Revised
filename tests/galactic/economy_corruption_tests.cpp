@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <span>
@@ -107,6 +108,11 @@ gc::GalacticSetup setup() {
 }
 gc::GameCommand prepare(std::uint64_t tick = 0) { return {{tick, {2}, tick + 1}, gc::PrepareBlackMarket{10000, 1}}; }
 gc::GameCommand buy(std::uint64_t tick = 1) { return {{tick, {2}, tick + 1}, gc::BuyBlackMarket{10000, 0}}; }
+// #8157: the reason a rejected command carries, none when nothing was rejected.
+gc::GalacticRejectReason refusal_reason(const gc::GalacticTick& t) {
+    for (const auto& e : t.snapshot->events()) if (e.kind == gc::GalacticEventKind::command_rejected) return e.reason;
+    return gc::GalacticRejectReason::none;
+}
 bool rejected(const gc::GalacticTick& t) { return std::any_of(t.snapshot->events().begin(), t.snapshot->events().end(), [](const auto& e) { return e.kind == gc::GalacticEventKind::command_rejected; }); }
 std::string technology_price_owner(const eawr::sim::PartitionExecutor& pool) {
     auto config = setup(); config.rules.fiscal_cycle_frames = 1000;
@@ -275,13 +281,42 @@ void market_contracts(const eawr::sim::PartitionExecutor& pool) {
     tutorial.economy_corruption->items[0].tutorial_tech = 3;
     game = take(gc::GalacticSession::create(tutorial)); take(game.submit(prepare())); (void)take(game.step(pool));
     expect(game.economy_corruption()->menus[0].offers[0].price == d("38.5"), "tutorial still applies uncommon multiplier");
-    for (int gate = 0; gate < 3; ++gate) {
+    // #8157: each gate refuses with its own reason, in the order the offer predicate tests them. This setup authors no
+    // corruption content, so a planet without the market corruption cannot host one (the authored-slot split is in
+    // ability_corruption_tests).
+    const std::array<gc::GalacticRejectReason, 5> gate_reasons{gc::GalacticRejectReason::market_not_opposing_planet,
+        gc::GalacticRejectReason::market_owner_not_playable, gc::GalacticRejectReason::market_cannot_host,
+        gc::GalacticRejectReason::market_nothing_to_offer, gc::GalacticRejectReason::market_cannot_price};
+    for (int gate = 0; gate < 5; ++gate) {
         auto invalid = s;
         if (gate == 0) invalid.economy_corruption->buyers[0].opposing_planet = false;
         if (gate == 1) invalid.economy_corruption->players[0].playable = false;
         if (gate == 2) invalid.economy_corruption->planets[0].corruption = cf::Type::none;
+        if (gate == 3) for (auto& item : invalid.economy_corruption->items) item.faction = 20; // none for the owner's faction
+        if (gate == 4) { // the displayed tech (internal tech plus the faction adjustment) leaves the int range
+            invalid.economy_corruption->players[0].displayed_tech_adjustment = std::numeric_limits<int>::max();
+            invalid.player_economy->players[0].current_tech = 5;
+        }
         game = take(gc::GalacticSession::create(invalid)); take(game.submit(prepare())); tick = take(game.step(pool));
         expect(rejected(tick) && game.economy_corruption()->random_draws == 0, "market target admission before RNG/debit");
+        expect(refusal_reason(tick) == gate_reasons[static_cast<std::size_t>(gate)], "each market refusal names its own cause");
+    }
+    // WGEP-139: a story grant joins the independent unlock list without debit, despawn, queue or purchase feedback.
+    {
+        auto granted = take(gc::GalacticSession::create(s));
+        notes.clear();
+        granted.set_credit_notification_handler([&](const auto& n) { notes.push_back(n); return eawr::core::Result<void>::success(); });
+        const auto before = granted.snapshot()->player_economy()->players[1].credits;
+        expect(take(granted.grant_black_market_item(2, 50)) && granted.economy_corruption()->players[1].unlocks.contains(50),
+            "a story grant adds the item to the player's unlocks");
+        expect(take(granted.grant_black_market_item(2, 50)) && granted.economy_corruption()->players[1].unlocks.size() == 1,
+            "a repeated grant keeps one unlock");
+        expect(!take(granted.grant_black_market_item(2, 999)) && !take(granted.grant_black_market_item(77, 50))
+            && granted.economy_corruption()->players[1].unlocks.size() == 1, "an unknown item or player changes nothing");
+        expect(granted.snapshot()->player_economy()->players[1].credits == before && notes.empty()
+            && !granted.economy_corruption()->buyers[0].despawn_requested, "a grant debits nothing and despawns no buyer");
+        take(granted.submit(prepare())); (void)take(granted.step(pool));
+        expect(granted.economy_corruption()->menus[0].offers[0].owned, "the next preparation shows the granted item as owned");
     }
     gc::ProductionOffer offer; offer.price = f(100); offer.seconds = f(10);
     auto adjusted = take(gc::prepared_production_offer(offer, nullptr, s.planets, 1, 1, &state));

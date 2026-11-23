@@ -55,6 +55,7 @@ void test_diminishing_gates();
 void test_out_of_combat();
 void test_arrival_vulnerability();
 void test_recharge();
+void test_recharge_limits();
 void test_energy();
 void test_arrival_in_battle();
 void test_shield_loss();

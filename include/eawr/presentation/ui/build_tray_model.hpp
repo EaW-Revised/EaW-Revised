@@ -58,6 +58,15 @@ struct TypeFacts final {
     std::vector<std::string> categories;  // authored CategoryMask names
     std::vector<std::string> members;     // squadron and company member type names
     bool building_role{};                 // has_building_behavior
+    std::string encyclopedia_class{};     // authored Encyclopedia_Unit_Class text key (GBT-05); empty when none
+    std::string class_text{};             // that key's localized text (the header of a split group); may be empty
+};
+
+// A type's encyclopedia class: its own, else the first member's that has one (a squadron or company authors none of its
+// own, PL-13), to a bounded depth. Empty key: the type has none.
+struct ClassFacts final {
+    std::string key;
+    std::string text;
 };
 
 // Case-insensitive by type name. The category names of a squadron or company are the union of its
@@ -69,6 +78,7 @@ public:
     [[nodiscard]] const TypeFacts* find(std::string_view name) const noexcept;
     [[nodiscard]] bool any_with_prefix(std::string_view prefix) const noexcept;
     [[nodiscard]] std::vector<std::string> categories_of(std::string_view name) const;
+    [[nodiscard]] ClassFacts class_of(std::string_view name) const;
 
 private:
     std::unordered_map<std::string, TypeFacts> types_;
@@ -104,6 +114,7 @@ struct Group final {
     std::string caption_key;          // empty: the caller shows derived_caption(name)
     std::vector<std::size_t> choices; // indices into the choice list, in tray order
     float min_width{};                // the header's width, set by the caller before packing
+    std::string label{};              // a category group split by encyclopedia class (GBT-05): that class's header text
 };
 
 // GBT-04, GBT-05, GBT-12: every choice lands in exactly one group. Order of rules: a type assignment
@@ -111,8 +122,13 @@ struct Group final {
 // category, then misc. Unit groups come first (category groups in enum order with extra groups at
 // their positions, misc last), buildings last. Empty groups are dropped. Inside a group the entries
 // keep the choice list order, except that those with a sort key come first in ascending key order.
+// GBT-05: of the category groups, a class group (see Group::label) whose header reads the same as another category group's
+// is merged with it (never two identical headers in one tray), the merged choices in tray order. The headers of whole
+// category groups are the caller's resolved captions (`category_headers`: category name, header text; a name it lacks reads
+// derived_caption(name)); a class group's header is its label.
 [[nodiscard]] std::vector<Group> classify(std::span<const std::string> choice_types, const TypeIndex& types,
-    const CategoryEnum& categories, const GroupDefinition& definition);
+    const CategoryEnum& categories, const GroupDefinition& definition,
+    std::span<const std::pair<std::string, std::string>> category_headers = {});
 
 // ---- Row packing (GBT-06) -------------------------------------------------------------------------
 
@@ -126,6 +142,8 @@ struct Metrics final {
     float padding{};
     float panel_width{};
     float top_reserve{};  // a strip kept free above the first row (the close icon's, GBT-07)
+    float header_lift{};   // a header label is drawn this much above its row's icons (GBT-06); never onto a frame
+    float category_gap{};  // extra space above a row that starts a new category, so the lifted label has its own gap
     [[nodiscard]] float row_height() const noexcept { return header_height + entry_height; }
 };
 
@@ -161,6 +179,16 @@ struct Packed final {
 };
 
 [[nodiscard]] std::size_t entries_per_line(const Metrics& metrics) noexcept;
+
+// GBT-06: the extra space above every row that starts with a header, except the first row (a wrapped group's later lines
+// have none). Taken whole from Metrics::category_gap: the tray grows by it once per category row, and the height fit
+// (fit_to_height) answers when that no longer fits.
+[[nodiscard]] bool has_header(const Row& row) noexcept;
+[[nodiscard]] float category_gap_of(const Metrics& metrics, const std::vector<Row>& rows) noexcept;
+// The lift of a header on this row: its Metrics value, never more than the space above the row that the lifted label may
+// use (the row gap and the category gap below the previous row; above the first row the row gap under the close icon's
+// strip when one is kept, else the padding).
+[[nodiscard]] float header_lift_of(const Metrics& metrics, float category_gap, bool first_row) noexcept;
 
 // GBT-06: place groups in order on the current row when they fit, else start a new row; never
 // backfill earlier rows. Buildings take their own rows at the bottom and are always kept. When the unit

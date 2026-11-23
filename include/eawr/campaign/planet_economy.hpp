@@ -13,6 +13,9 @@ namespace eawr::campaign {
 [[nodiscard]] core::Result<sim::galactic::EconomyCorruptionState> prepare_corruption_economy(
     const data::XmlDocument& constants, const data::XmlDocument& market,
     const data::Catalog&, const CampaignSetupPlan&, const sim::galactic::GalacticSetup&, core::LoadNoteBuffer* notes = nullptr);
+// WGEP-138/139: the registered black-market item names in registration order; the item with ordinal N (1-based, skipped
+// items included) has the id prepare_corruption_economy gives it.
+[[nodiscard]] core::Result<std::vector<std::string>> load_black_market_item_names(const vfs::Vfs&);
 [[nodiscard]] core::Result<sim::galactic::BlackMarketBuyer> prepare_black_market_buyer(
     const data::Catalog&, std::string_view original_type, sim::EntityId, sim::galactic::PlayerId,
     bool opposing_planet, core::LoadNoteBuffer* notes = nullptr);

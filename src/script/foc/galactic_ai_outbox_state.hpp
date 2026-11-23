@@ -20,7 +20,7 @@ namespace eawr::script::foc::galactic_ai {
 //
 // The state is a function of the tick alone, never of timing: the inline batch driver has no work in
 // flight between ticks, and the threaded lane joins before a save.
-inline constexpr std::uint32_t outbox_state_version = 2;
+inline constexpr std::uint32_t outbox_state_version = 3;
 
 struct DecodedOutboxState {
     AsyncSchedule schedule;

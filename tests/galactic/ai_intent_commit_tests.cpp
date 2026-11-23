@@ -1410,6 +1410,81 @@ std::vector<std::uint8_t> run_lane_script(gc::GalacticSession& lane, const std::
     return take(ga::encode_outbox_state(outbox, 0));
 }
 
+void native_actions_lane_isolation() {
+    for (const std::size_t workers : {1, 2, 4, 8}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto live = take(gc::GalacticSession::create(native_control_fixture()));
+        ga::NativeActions actions(live, std::make_shared<eawr::script::foc::ai::GalacticFunding>(), {}, {});
+        bool pending{}; std::size_t gate_reads{};
+        actions.bind_admission_gate([&] { ++gate_reads; return pending; });
+        actions.capture_conflict_inputs(); pending = true;
+        const auto before_cut = live.canonical_state_bytes();
+        ga::OutboxBatch batch(ga::standard_async_schedule);
+        const ga::LaneIdentities before{live.next_entity_id(), live.next_native_invasion_id()};
+        const auto start = batch.begin(1, {}, 0, before);
+        const auto end = batch.contents().frontier;
+        take(live.reserve_native_frontiers(before.id, end.id, before.invasion, end.invasion));
+        const auto after_cut = live.canonical_state_bytes();
+        expect(after_cut != before_cut, "the sim cut reserves the world identity blocks before the body");
+        auto shell = take(gc::GalacticSession::create_lane_shell(live)); take(shell.refresh_lane(live));
+        struct Reader final : ga::NativeActions::WorldReader {
+            const gc::GalacticSession& session;
+            explicit Reader(const gc::GalacticSession& value) : session(value) {}
+            std::shared_ptr<const gc::GalacticSnapshot> snapshot() const override { return session.snapshot(); }
+            const gc::PlanetGraph* graph() const override { return session.graph(); }
+            const gc::GalacticSetup& setup() const override { return session.setup(); }
+            std::uint64_t completed_tick() const override { return session.completed_tick(); }
+            eawr::sim::EntityId next_entity_id() const override { return session.next_entity_id(); }
+            std::uint64_t pause_depth() const override { return session.clock().pause_depth; }
+        } reader(shell);
+        actions.bind_world_reader(&reader); actions.bind_lane_session(&shell);
+        auto output = take(shell.begin_native_output_phase());
+        gc::GalacticSession::NativeBarrierOptions options;
+        options.first_id = start.id; options.first_invasion = start.invasion;
+        options.id_end = end.id; options.invasion_end = end.invasion;
+        options.lane = true; options.intent_sink = batch.sink();
+        const std::array<gc::PlayerId, 1> players{1};
+        auto barrier = take(shell.begin_native_barrier(players, gc::galactic_max_commands, std::move(options)));
+        batch.begin_virtual_tick(1); take(barrier->select_player(1));
+        ga::ActionRequest request; request.kind = ga::ActionKind::land; request.player = 1; request.object = 10;
+        expect(take(actions.admit(request)).admitted, "lane admission uses the conflict predicate frozen before the live predicate changed");
+        expect(gate_reads == 1, "the body never calls the live conflict reader");
+        take(barrier->discard()); barrier.reset(); batch.end();
+        actions.bind_world_reader(nullptr); actions.bind_lane_session(nullptr);
+        const auto bypasses = actions.take_body_live_accesses();
+        expect(!bypasses.reads && !bypasses.writes && live.canonical_state_bytes() == after_cut,
+            "NativeActions reads and writes only its shell after the one sim-cut reservation");
+        // Negative control: dropping the runtime's binding must be visible even when live and shell happen to agree.
+        actions.bind_lane_session(&shell);
+        (void)actions.snapshot();
+        const auto missing_bind = actions.take_body_live_accesses();
+        expect(missing_bind.reads == 1 && !missing_bind.window_reads,
+            "a missing NativeActions window binding fails the body-live-read and native-input gates");
+        actions.bind_world_reader(&reader);
+        (void)actions.snapshot();
+        const auto bound_read = actions.take_body_live_accesses();
+        expect(!bound_read.reads && bound_read.window_reads == 1,
+            "the native-input gate counts only reads through the bound window input");
+        actions.bind_world_reader(nullptr); actions.bind_lane_session(nullptr);
+        ga::IntentOutbox outbox(ga::standard_async_schedule); outbox.adopt(batch.take());
+        const auto due_tick = ga::apply_tick(ga::standard_async_schedule, 1, 1);
+        for (std::uint64_t tick = 1; tick < due_tick; ++tick)
+            expect(outbox.take_due(tick).empty() && live.canonical_state_bytes() == after_cut,
+                "finished output cannot mutate the world before its ordered apply tick");
+        auto due = outbox.take_due(due_tick);
+        expect(due.size() == 1 && !due.front().intents.empty(), "the lane retained its native action for ordered readmission");
+        for (auto& slice : due) static_cast<void>(take(ga::commit_ordered_intents(live, std::move(slice.intents), executor)));
+        expect(live.canonical_state_bytes() != after_cut, "ordered readmission applies the retained action to the world");
+        // Write-side negative control: an admission with the window input bound but no lane shell reaches the live session through
+        // its one write door, and the gate must count it (the same gate that stays 0 above).
+        (void)actions.take_body_live_accesses();
+        actions.bind_world_reader(&reader);
+        (void)actions.admit(request);
+        actions.bind_world_reader(nullptr);
+        const auto live_write = actions.take_body_live_accesses();
+        expect(live_write.writes >= 1, "a live admission outside the lane shell fails the body-live-write gate");
+    }
+}
 void lane_isolation() {
     auto live = take(gc::GalacticSession::create(native_control_fixture()));
     auto shell = take(gc::GalacticSession::create_lane_shell(live));
@@ -1570,6 +1645,7 @@ int case_galactic_ai_intent_commit_tests() {
         overlay_stale_fleet();
         overlay_projection_equals_applied();
         lane_isolation();
+        native_actions_lane_isolation();
         lane_immediate_effects();
         readmit_keeps_losses();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

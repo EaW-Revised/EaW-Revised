@@ -73,6 +73,25 @@ const std::string* usable_name(const J& json) {
     const auto* title = steamdata && steamdata->kind == J::Kind::object ? steamdata->string_member("title") : nullptr;
     return title && !title->empty() ? title : nullptr;
 }
+// The file Steam's Workshop uploader writes next to a published item. Recognised by structure, and only when
+// EVERY top-level key is one the uploader itself writes: any other key (name, version, dependencies, steamdata, a
+// custom field, a typo of a real key) means someone wrote an eaw.modinfo, which must be read (and warned about).
+bool is_workshop_upload_descriptor(const J& j) {
+    if (j.kind != J::Kind::object || !j.member("publishedfileid")) return false;
+    static constexpr std::string_view known[] = {"publishedfileid", "contentfolder", "previewfile", "visibility",
+                                                 "title", "description", "metadata", "tags", "changenote"};
+    for (const auto& key : j.keys)
+        if (std::find(std::begin(known), std::end(known), key) == std::end(known)) return false;
+    const auto* title = j.string_member("title");
+    return title && !title->empty();
+}
+// The warning reads "<mod name>: <text>". A second read of the same record may know a different name, so the
+// same code with the same text counts as the same warning.
+void add_unique_warning(ModRecord& record, std::string code, const std::string& text) {
+    const std::string suffix = ": " + text;
+    for (const auto& w : record.warnings) if (w.code == code && w.message.ends_with(suffix)) return;
+    record.warnings.push_back({std::move(code), record.name + suffix});
+}
 std::optional<ModInfo> info_from_value(const J& j) {
     if (j.kind != J::Kind::object) return std::nullopt;
     const auto* name = usable_name(j);
@@ -254,12 +273,22 @@ void read_mod_metadata(Catalog& catalog) {
             }
             if (is_main) has_main = true;
             const auto json = text ? mod_json(*text) : std::nullopt;
+            // A Steam Workshop upload descriptor is not an eaw.modinfo: nothing to read, nothing to warn about.
+            if (is_main && json && is_workshop_upload_descriptor(*json)) continue;
             if (!json || json->kind != J::Kind::object || !usable_name(*json)) {
-                record.warnings.push_back({std::string(codes::malformed_modinfo), "a modinfo file could not be read"}); continue;
+                const char* reason = !text ? "the file could not be opened or is too large"
+                    : !json ? "it is not valid JSON"
+                    : json->kind != J::Kind::object ? "it is not a JSON object"
+                    : "it has neither a name nor a steamdata title";
+                add_unique_warning(record, std::string(codes::malformed_modinfo),
+                    "its " + steam::path_to_utf8(file.filename()) + " could not be read: " + reason
+                        + "; the mod still loads; ask the mod author");
+                continue;
             }
             if (is_main) {
                 main = info_from_value(*json);
-                if (!main) record.warnings.push_back({std::string(codes::malformed_modinfo), "main modinfo has malformed fields"});
+                if (!main) add_unique_warning(record, std::string(codes::malformed_modinfo),
+                    "its modinfo.json could not be read: a field has the wrong type or value; the mod still loads; ask the mod author");
             } else variants.emplace_back(steam::path_to_utf8(file.filename()), *json);
         }
         if (incomplete) record.warnings.push_back({std::string(codes::scan_incomplete), "top-level metadata scan was incomplete"});
@@ -272,7 +301,9 @@ void read_mod_metadata(Catalog& catalog) {
             for (std::size_t i = 0; i < json.keys.size(); ++i) put(merged, json.keys[i], json.values[i]);
             auto info = info_from_value(merged);
             if (!info) {
-                record.warnings.push_back({std::string(codes::malformed_modinfo), "variant modinfo has malformed fields"}); continue;
+                add_unique_warning(record, std::string(codes::malformed_modinfo),
+                    "its " + filename + " could not be read: a field has the wrong type or value; the mod still loads; ask the mod author");
+                continue;
             }
             // A variant supplies its own identity/name while other fields inherit.
             info->name = *usable_name(json);

@@ -29,25 +29,43 @@ struct AbilityPreviewPolicy {
     std::function<bool(ObjectId, ObjectId)> space_override;
     std::function<bool(ObjectId, sim::galactic::AbilityKind)> kind_restricted;
 };
-// #6120: the notice for a refused hero ability. Neutralize Hero says which test failed; every other refusal keeps the
-// general text.
-[[nodiscard]] inline std::string_view ability_refusal_text(sim::galactic::GalacticRejectReason reason) noexcept {
+// The text key of the notice for a refused hero ability (#6120, #8157). Each cause has its own key in the project's own text
+// table (builtin_texts, a mounted language database overrides it); no refusal falls to a line that guesses the cause. The
+// original's string table authors none of these, so the wording is the project's.
+[[nodiscard]] inline std::string_view ability_refusal_key(sim::galactic::GalacticRejectReason reason) noexcept {
     using sim::galactic::GalacticRejectReason;
     switch (reason) {
-    case GalacticRejectReason::incompatible_location: return "This hero must be in orbit of that planet to use its ability.";
-    case GalacticRejectReason::neutralize_no_hero: return "There is no enemy hero on that planet to neutralize.";
-    case GalacticRejectReason::neutralize_allied_hero: return "The only heroes on that planet belong to an ally.";
-    case GalacticRejectReason::neutralize_not_targetable: return "The enemy heroes on that planet cannot be neutralized by this hero.";
-    case GalacticRejectReason::neutralize_unavailable: return "Neutralize Hero cannot be used on that planet right now.";
-    case GalacticRejectReason::ability_target_undiscovered: return "That planet has not been explored yet.";
-    case GalacticRejectReason::insufficient_credits: return "You cannot afford that.";
+    case GalacticRejectReason::incompatible_location: return "TEXT_EAWR_ABILITY_MUST_BE_IN_ORBIT";
+    case GalacticRejectReason::neutralize_no_hero: return "TEXT_EAWR_ABILITY_NO_ENEMY_HERO";
+    case GalacticRejectReason::neutralize_allied_hero: return "TEXT_EAWR_ABILITY_ALLIED_HERO";
+    case GalacticRejectReason::neutralize_not_targetable: return "TEXT_EAWR_ABILITY_NOT_TARGETABLE";
+    case GalacticRejectReason::neutralize_unavailable: return "TEXT_EAWR_ABILITY_NEUTRALIZE_UNAVAILABLE";
+    case GalacticRejectReason::ability_target_undiscovered: return "TEXT_EAWR_ABILITY_UNEXPLORED";
+    case GalacticRejectReason::insufficient_credits: return "TEXT_EAWR_ABILITY_NO_CREDITS";
     // A drop on a distant planet is a move first; its refusals are the movement owner's, not the ability's.
-    case GalacticRejectReason::invalid_path: return "There is no route for the hero to that planet.";
-    case GalacticRejectReason::cannot_depart: return "The hero cannot leave its planet right now.";
-    case GalacticRejectReason::movement_blocked: return "The hero's path to that planet is blocked.";
-    case GalacticRejectReason::movement_ability_required: return "This fleet cannot travel there.";
-    case GalacticRejectReason::invalid_membership: return "That order is not available for this fleet.";
-    default: return "This ability cannot be used on that planet (allied or unavailable target, or nothing left to offer).";
+    case GalacticRejectReason::invalid_path: return "TEXT_EAWR_ABILITY_NO_ROUTE";
+    case GalacticRejectReason::cannot_depart: return "TEXT_EAWR_ABILITY_CANNOT_DEPART";
+    case GalacticRejectReason::movement_blocked: return "TEXT_EAWR_ABILITY_PATH_BLOCKED";
+    case GalacticRejectReason::movement_ability_required: return "TEXT_EAWR_ABILITY_CANNOT_TRAVEL";
+    case GalacticRejectReason::invalid_membership: return "TEXT_EAWR_ABILITY_ORDER_UNAVAILABLE";
+    // A market hero's drop refuses for the first failed test of the offer predicate.
+    case GalacticRejectReason::market_not_opposing_planet: return "TEXT_EAWR_ABILITY_MARKET_OWN_PLANET";
+    case GalacticRejectReason::market_owner_not_playable: return "TEXT_EAWR_ABILITY_MARKET_NO_TRADERS";
+    case GalacticRejectReason::market_cannot_host: return "TEXT_EAWR_ABILITY_MARKET_CANNOT_HOST";
+    case GalacticRejectReason::market_other_corruption: return "TEXT_EAWR_ABILITY_MARKET_OTHER_CORRUPTION";
+    case GalacticRejectReason::market_not_established: return "TEXT_EAWR_ABILITY_MARKET_NOT_ESTABLISHED";
+    case GalacticRejectReason::market_nothing_to_offer: return "TEXT_EAWR_ABILITY_MARKET_NOTHING_OFFERED";
+    case GalacticRejectReason::market_cannot_price: return "TEXT_EAWR_ABILITY_MARKET_CANNOT_PRICE";
+    // Host-level refusals of any hero ability.
+    case GalacticRejectReason::inactive_seat: return "TEXT_EAWR_ABILITY_SEAT_INACTIVE";
+    case GalacticRejectReason::unknown_subject: return "TEXT_EAWR_ABILITY_TARGET_GONE";
+    case GalacticRejectReason::not_authorized: return "TEXT_EAWR_ABILITY_NOT_YOURS";
+    case GalacticRejectReason::resource_limit: return "TEXT_EAWR_ABILITY_LIMIT";
+    case GalacticRejectReason::ability_unavailable: return "TEXT_EAWR_ABILITY_UNAVAILABLE";
+    case GalacticRejectReason::ability_disabled: return "TEXT_EAWR_ABILITY_DISABLED";
+    case GalacticRejectReason::ability_not_usable_here: return "TEXT_EAWR_ABILITY_NOT_HERE";
+    // Nothing the sim names for an ability reaches this; the line claims no cause.
+    default: return "TEXT_EAWR_ABILITY_REFUSED";
     }
 }
 namespace ability_preview {

@@ -72,6 +72,79 @@ void production_domain() {
     expect(!eawr::units::built_on_ground(renamed), "omitted cost does not select ground");
 }
 
+// #8161, WGEP-158: the original's type-load fixup: a buildable non-base type that authors 0 on
+// both required levels reads ground level 1, so the build bar offers it on the ground tab; a named hero, a type without a
+// cost and a ground structure keep what they author; both levels nonzero clears the starbase level.
+void build_level_fixup() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("eawr-level-fixup-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root / "XML");
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{root};
+    write(root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>A.xml</File></Game_Object_Files>");
+    write(root / "XML/HardpointDataFiles.xml", "<Hard_Point_Files/>");
+    write(root / "XML/FactionFiles.xml", "<Faction_Files/>");
+    write(root / "XML/CampaignFiles.xml", "<Campaign_Files/>");
+    write(root / "XML/SFXEventFiles.xml", "<SFXEvent_Files/>");
+    write(root / "XML/A.xml", R"xml(<Types>
+      <GroundCompany Name="Zero_Company"><Behavior>DUMMY_GROUND_COMPANY</Behavior><Build_Cost_Credits>100</Build_Cost_Credits>
+        <Required_Ground_Base_Level>0</Required_Ground_Base_Level><Required_Star_Base_Level>0</Required_Star_Base_Level></GroundCompany>
+      <GroundCompany Name="Omitted_Company"><Behavior>DUMMY_GROUND_COMPANY</Behavior><Build_Cost_Credits>100</Build_Cost_Credits></GroundCompany>
+      <GroundCompany Name="Named_Hero_Company"><Behavior>DUMMY_GROUND_COMPANY</Behavior><Is_Named_Hero>Yes</Is_Named_Hero><Build_Cost_Credits>100</Build_Cost_Credits></GroundCompany>
+      <GroundCompany Name="Leveled_Parent"><Behavior>DUMMY_GROUND_COMPANY</Behavior><Build_Cost_Credits>100</Build_Cost_Credits><Required_Ground_Base_Level>2</Required_Ground_Base_Level></GroundCompany>
+      <GroundCompany Name="Leveled_Child"><Variant_Of_Existing_Type>Leveled_Parent</Variant_Of_Existing_Type></GroundCompany>
+      <GroundCompany Name="Omitted_Child"><Variant_Of_Existing_Type>Omitted_Company</Variant_Of_Existing_Type></GroundCompany>
+      <GroundCompany Name="Hero_Variant"><Variant_Of_Existing_Type>Named_Hero_Company</Variant_Of_Existing_Type></GroundCompany>
+      <GroundCompany Name="Free_Company"><Behavior>DUMMY_GROUND_COMPANY</Behavior><Build_Cost_Credits>0</Build_Cost_Credits></GroundCompany>
+      <GroundCompany Name="Unbuildable_Company"><Behavior>DUMMY_GROUND_COMPANY</Behavior><Build_Cost_Credits>-1</Build_Cost_Credits></GroundCompany>
+      <GroundCompany Name="Structure"><Behavior>DUMMY_GROUND_STRUCTURE</Behavior><Build_Cost_Credits>100</Build_Cost_Credits></GroundCompany>
+      <GroundCompany Name="Starship"><Behavior>DUMMY_STARSHIP</Behavior><Build_Cost_Credits>100</Build_Cost_Credits><Required_Star_Base_Level>2</Required_Star_Base_Level></GroundCompany>
+      <GroundCompany Name="Both_Levels"><Behavior>DUMMY_GROUND_COMPANY</Behavior><Build_Cost_Credits>100</Build_Cost_Credits>
+        <Required_Ground_Base_Level>2</Required_Ground_Base_Level><Required_Star_Base_Level>3</Required_Star_Base_Level></GroundCompany>
+    </Types>)xml");
+    const std::array mounts{eawr::vfs::MountSpec{"test", root, "data", {}}};
+    const auto filesystem = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(filesystem), "level fixup mounts");
+    if (!filesystem) return;
+    const auto loaded = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+    expect(static_cast<bool>(loaded), "level fixup loads");
+    if (!loaded) return;
+    const auto table = eawr::units::galactic_type_table(loaded.value().catalog);
+    const auto level = [&](const std::string_view name) -> const eawr::units::GalacticType* {
+        const auto* type = table.find(name);
+        expect(type != nullptr, name);
+        return type;
+    };
+    if (const auto* type = level("Zero_Company")) {
+        expect(type->required_ground_base_level == 1 && type->required_star_base_level.value_or(0) == 0,
+            "a buildable company authoring 0 on both levels reads ground level 1");
+        expect(eawr::units::built_on_ground(*type), "the promoted company is built on the ground tab");
+    }
+    if (const auto* type = level("Omitted_Company")) {
+        expect(type->required_ground_base_level == 1, "omitted levels read as 0 on both, so ground level 1");
+        expect(eawr::units::built_on_ground(*type), "the company with omitted levels is built on the ground tab");
+    }
+    if (const auto* type = level("Named_Hero_Company")) {
+        expect(type->required_ground_base_level.value_or(0) == 0 && !eawr::units::built_on_ground(*type),
+            "a named hero keeps its authored levels (the original's fixup skips it)");
+    }
+    if (const auto* type = level("Leveled_Child")) expect(type->required_ground_base_level == 2,
+        "a variant with no level tag of its own inherits its parent's authored level and is not promoted");
+    if (const auto* type = level("Omitted_Child")) expect(type->required_ground_base_level == 1 && eawr::units::built_on_ground(*type),
+        "a variant whose whole chain authors no level reads ground level 1 (absent is 0)");
+    if (const auto* type = level("Hero_Variant")) {
+        expect(type->named_hero.value_or(false) && type->required_ground_base_level.value_or(0) == 0 && !eawr::units::built_on_ground(*type),
+            "a variant of a named hero inherits the flag, so the fixup skips it as well");
+    }
+    if (const auto* type = level("Free_Company")) expect(type->required_ground_base_level.value_or(0) == 0, "a type without a cost is not promoted");
+    if (const auto* type = level("Unbuildable_Company")) expect(type->required_ground_base_level == 1, "cost -1 is promoted like a positive cost");
+    if (const auto* type = level("Structure")) expect(type->required_ground_base_level.value_or(0) == 0 && eawr::units::built_on_ground(*type),
+        "a ground structure keeps level 0 and builds by its role");
+    if (const auto* type = level("Starship")) expect(type->required_ground_base_level.value_or(0) == 0 && type->required_star_base_level == 2,
+        "a type that authors a starbase level keeps it");
+    if (const auto* type = level("Both_Levels")) expect(type->required_ground_base_level == 2 && type->required_star_base_level == 0,
+        "both levels nonzero clears the starbase level");
+}
+
 void member_timeline() {
     const auto root = std::filesystem::temp_directory_path() /
         ("eawr-member-timeline-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -779,7 +852,7 @@ int main(const int argc, char** argv) {
         if (!root || root->empty()) return 77;
         installed();
     } else if (argc == 1) {
-        override_free_identity(); production_domain(); retail_numeric_families(); synthetic(); member_timeline(); member_timeline_cross_layer();
+        override_free_identity(); production_domain(); build_level_fixup(); retail_numeric_families(); synthetic(); member_timeline(); member_timeline_cross_layer();
         credit_halt_authoring(); technology_price_authoring(); gambling_authoring();
     } else return 2;
     return failures == 0 ? 0 : 1;

@@ -671,10 +671,12 @@ core::Result<void> GalacticSession::NativeActionShadow::stage_script_removal(Ent
     data_->script_removed.insert(id);
     Data::ScriptStep step; step.kind = Data::ScriptStep::Kind::despawn; step.actor = id;
     data_->script_steps.push_back(std::move(step));
+    ++data_->script_journal_count;
     ++data_->work.requests;
     return core::Result<void>::success();
 }
 bool GalacticSession::NativeActionShadow::script_removed(EntityId id) const noexcept {
+    if (data_->script_removed.empty()) return false;
     std::size_t remaining = data_->base->actor_records().size() + data_->actor_changes.size() + 1;
     while (id && remaining--) {
         if (data_->script_removed.contains(id)) return true;
@@ -685,16 +687,14 @@ bool GalacticSession::NativeActionShadow::script_removed(EntityId id) const noex
     return false;
 }
 bool GalacticSession::NativeActionShadow::has_script_removals() const noexcept { return !data_->script_removed.empty(); }
-std::size_t GalacticSession::NativeActionShadow::script_journal_entries() const noexcept {
-    using Kind = Data::ScriptStep::Kind;
-    return static_cast<std::size_t>(std::count_if(data_->script_steps.begin(), data_->script_steps.end(),
-        [](const auto& step) { return step.kind == Kind::journal || step.kind == Kind::despawn; }));
-}
+std::size_t GalacticSession::NativeActionShadow::script_journal_entries() const noexcept { return data_->script_journal_count; }
+std::size_t GalacticSession::NativeActionShadow::script_usage_entries() const noexcept { return data_->script_usage_count; }
 void GalacticSession::NativeActionShadow::stage_script_journal(NativeEffectKind kind, std::vector<std::uint8_t> payload) {
     if (data_->player) return;
     detach();
     Data::ScriptStep step; step.kind = Data::ScriptStep::Kind::journal; step.effect = kind; step.payload = std::move(payload);
     data_->script_steps.push_back(std::move(step));
+    ++data_->script_journal_count;
 }
 core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionShadow::admit_fleet(
     PlayerId player, const CommandPayload& payload, bool pending_local_conflict) {
@@ -975,6 +975,7 @@ core::Result<void> GalacticSession::NativeActionShadow::stage_actor_ai_usage(Ent
     if ((!prevent && !prefer_ground) || !row) return invalid<void>("an AI-usage write needs an actor of this batch's view");
     detach();
     data_->actor_changes.push_back({NativeActorChange::Kind::changed, id, 0, {}, {}, {}, prevent, prefer_ground});
+    ++data_->script_usage_count;
     return core::Result<void>::success();
 }
 const Planet* GalacticSession::NativeActionShadow::planet(PlanetId id) const {

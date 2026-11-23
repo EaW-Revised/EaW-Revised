@@ -147,8 +147,8 @@ void test_names_and_validation() {
     stalled.profiles[0].abilities[0].modifiers.speed = units(-1);
     expect(!tactical::validate_abilities(stalled), "a negative speed multiplier is rejected");
     auto huge = table;
-    huge.profiles[0].abilities[0].modifiers.shield_regen = units(65);
-    expect(!tactical::validate_abilities(huge), "a multiplier beyond 64 is rejected");
+    huge.profiles[0].abilities[0].modifiers.shield_regen = units(2049);
+    expect(!tactical::validate_abilities(huge), "a multiplier beyond the WAB-65 limit is rejected");
     // AB-22/AB-23 (#4868): an interval multiplier of 0 loads; a negative one and a too-large one still do not.
     auto interval_zero = table;
     interval_zero.profiles[0].abilities[0].modifiers.shield_regen_interval = Fixed{};
@@ -161,8 +161,8 @@ void test_names_and_validation() {
     interval_negative.profiles[0].abilities[0].modifiers.energy_regen_interval = Fixed::from_raw(-1);
     expect(!tactical::validate_abilities(interval_negative), "a negative energy interval multiplier is rejected");
     auto interval_huge = table;
-    interval_huge.profiles[0].abilities[0].modifiers.energy_regen_interval = units(65);
-    expect(!tactical::validate_abilities(interval_huge), "an interval multiplier beyond 64 is rejected");
+    interval_huge.profiles[0].abilities[0].modifiers.energy_regen_interval = units(2049);
+    expect(!tactical::validate_abilities(interval_huge), "an interval multiplier beyond the WAB-65 limit is rejected");
     expect(tactical::scaled_interval(90, Fixed{}) == 1, "AB-22: a zero interval multiplier floors at one frame");
     // WAB-70 (#4868): the buzz activation range has no ceiling in the debug build; a negative one is still refused.
     tactical::AbilityProfile buzz_ability;
@@ -435,6 +435,95 @@ void test_multipliers() {
         }
         expect(tactical::ability_multiplier(large, active, M::speed) == units(expected),
             "WAB-24: every subset of three speed modes has the exact product of the first two (AB-20)");
+    }
+
+    // WAB-65: the seven ordinary non-speed modifiers share a representation-derived limit and a per-modifier
+    // combination envelope (the speed rule's method), instead of the old 64 ceiling.
+    {
+        struct Ordinary { Fixed tactical::AbilityModifiers::* member; M modifier; bool positive; };
+        const std::array<Ordinary, 7> ordinary{{
+            {&tactical::AbilityModifiers::weapon_delay, M::weapon_delay, true},
+            {&tactical::AbilityModifiers::shield_regen, M::shield_regen, false},
+            {&tactical::AbilityModifiers::shield_regen_interval, M::shield_regen_interval, false},
+            {&tactical::AbilityModifiers::energy_regen, M::energy_regen, false},
+            {&tactical::AbilityModifiers::energy_regen_interval, M::energy_regen_interval, false},
+            {&tactical::AbilityModifiers::scatter_radius, M::scatter_radius, true},
+            {&tactical::AbilityModifiers::fire_rate, M::fire_rate, false}}};
+        const auto edge = tactical::max_ability_value_raw;
+        expect(edge == std::numeric_limits<std::int64_t>::max() / (std::int64_t{1} << 28) && edge > 64 * one,
+            "WAB-65: the limit is derived from the health bound and is above the old 64");
+        for (const auto& row : ordinary) {
+            tactical::UnitAbilityProfile wide{9, {turbo(), spoiler_lock()}, false};
+            for (auto& ability : wide.abilities) ability.modifiers = tactical::AbilityModifiers{};
+            wide.abilities[0].modifiers.*row.member = Fixed::from_raw(edge);
+            expect(static_cast<bool>(tactical::validate_ability_profile(wide)), "WAB-65: the limit itself validates");
+            auto active = tactical::initial_abilities(wide);
+            active.slots[0].active = true;
+            expect(tactical::ability_multiplier(wide, active, row.modifier).raw() == edge, "WAB-65: the limit is applied exactly");
+            wide.abilities[0].modifiers.*row.member = Fixed::from_raw(edge + 1);
+            expect(!tactical::validate_ability_profile(wide), "WAB-65: one raw step above the limit is refused");
+            wide.abilities[0].modifiers.*row.member = units(45);
+            wide.abilities[1].modifiers.*row.member = units(45);
+            expect(static_cast<bool>(tactical::validate_ability_profile(wide)), "WAB-65: 45 x 45 is inside the limit");
+            auto both_active = tactical::initial_abilities(wide);
+            both_active.slots[0].active = both_active.slots[1].active = true;
+            expect(tactical::ability_multiplier(wide, both_active, row.modifier) == units(2025),
+                "WAB-65: the two-mode product is exact");
+            wide.abilities[1].modifiers.*row.member = units(46);
+            expect(!tactical::validate_ability_profile(wide), "WAB-65: 45 x 46 combination overflows the limit and is refused");
+            // A later reduction or zero cannot hide an unsafe product (every active subset counts).
+            wide.abilities[1].modifiers.*row.member = units(45);
+            auto reduction = defend();
+            reduction.modifiers = tactical::AbilityModifiers{};
+            // The two positive-only rows refuse a zero by themselves, so a half keeps the product the only reason.
+            reduction.modifiers.*row.member = row.positive ? Fixed::from_raw(one / 2) : Fixed{};
+            wide.abilities.insert(wide.abilities.begin() + 1, reduction);
+            wide.abilities[0].modifiers.*row.member = units(46);
+            expect(!tactical::validate_ability_profile(wide), "WAB-65: a zero between two large factors does not hide the product");
+        }
+        // Negative regeneration keeps its sign and rounds ties away from zero, like the positive path.
+        tactical::UnitAbilityProfile signed_profile{9, {turbo(), spoiler_lock()}, false};
+        for (auto& ability : signed_profile.abilities) ability.modifiers = tactical::AbilityModifiers{};
+        signed_profile.abilities[0].modifiers.shield_regen = units(-45);
+        signed_profile.abilities[1].modifiers.shield_regen = units(45);
+        expect(static_cast<bool>(tactical::validate_ability_profile(signed_profile)), "WAB-65: mixed-sign factors validate by magnitude");
+        auto signed_active = tactical::initial_abilities(signed_profile);
+        signed_active.slots[0].active = signed_active.slots[1].active = true;
+        expect(tactical::ability_multiplier(signed_profile, signed_active, M::shield_regen) == units(-2025),
+            "WAB-65: a negative factor keeps its sign in the product");
+        signed_profile.abilities[0].modifiers.shield_regen = Fixed::from_raw(-(one + 1));
+        signed_profile.abilities[1].modifiers.shield_regen = Fixed::from_raw(one / 2);
+        expect(tactical::ability_multiplier(signed_profile, signed_active, M::shield_regen).raw() == -(one / 2 + 1),
+            "WAB-65: negative half ties round away from zero");
+        // The checked product the combat service uses for the full-salvo delay.
+        expect(tactical::ability_product(Fixed::from_raw(edge), units(64)).has_value(), "WAB-65: the salvo product fits at both limits");
+        // A two-factor product exactly at the limit is accepted, one raw step over is refused.
+        {
+            tactical::UnitAbilityProfile boundary{9, {turbo(), spoiler_lock()}, false};
+            for (auto& ability : boundary.abilities) ability.modifiers = tactical::AbilityModifiers{};
+            boundary.abilities[0].modifiers.shield_regen = units(2);
+            boundary.abilities[1].modifiers.shield_regen = Fixed::from_raw(edge / 2);
+            expect(static_cast<bool>(tactical::validate_ability_profile(boundary)), "WAB-65: 2 x half the limit validates");
+            boundary.abilities[1].modifiers.shield_regen = Fixed::from_raw(edge / 2 + 1);
+            const auto over = tactical::validate_ability_profile(boundary);
+            expect(!over && over.error().message.find("SHIELD_REGEN_MULTIPLIER") != std::string::npos,
+                "WAB-65: one raw step over the limit is refused and the message names the tag");
+        }
+        // The frame consumers saturate instead of wrapping or overflowing (frame edges).
+        constexpr auto frame_max = std::numeric_limits<std::uint32_t>::max();
+        expect(tactical::scaled_interval(frame_max, Fixed::from_raw(edge)) == frame_max, "WAB-65: a saturated frame count times the limit saturates");
+        expect(tactical::scaled_interval(2'097'152, Fixed::from_raw(edge)) == frame_max, "WAB-65: 2^21 frames at the limit saturates, never wraps to zero");
+        expect(tactical::scaled_interval(268'435'457, units(2047)) == frame_max, "WAB-65: the first int64-overflowing frame count saturates");
+        expect(tactical::scaled_interval(90, units(3)) == 270 && tactical::scaled_interval(90, decimal("0.5")) == 45,
+            "WAB-65: ordinary intervals are unchanged");
+        expect(tactical::scaled_interval(3, decimal("0.5")) == 2 && tactical::scaled_interval(1, decimal("0.5")) == 1,
+            "WAB-65: halves round up as before");
+        expect(tactical::scaled_weapon_delay(360'000, units(131'072), false) == frame_max,
+            "WAB-65: a pulse gap at the delay and salvo limits saturates");
+        expect(tactical::scaled_weapon_delay(32'768, units(131'072), false) == frame_max,
+            "WAB-65: 2^15 frames at 2^17 whole saturates (the exact 2^32 never wraps to zero)");
+        expect(!tactical::ability_product(Fixed::from_raw(std::numeric_limits<std::int64_t>::max()), units(2)).has_value(),
+            "WAB-65: an overflowing product is reported, never wrapped");
     }
 
     // AB-21: the weapon delay lengthens a burst's gap; the recharge after it only shortens.

@@ -23,6 +23,9 @@ namespace {
 // FD-10: frames a craft flies straight on after steering away from a ship.
 constexpr std::uint32_t avoidance_relaxation = 15;
 
+// WSQ-05: the debug build's Space_Idle_Movement_Speed initializer, for a craft idling outside a squadron.
+constexpr Fixed space_idle_movement_speed = Fixed::from_raw(Fixed::scale);
+
 // --- The locomotor of one craft for one frame (FM, FA rules) ------------------------------------
 
 class Locomotor final {
@@ -418,6 +421,16 @@ private:
     // FM-20, FM-22: hold a point; the leader circles it, the others trail the leader.
     void idle() {
         const Calc::Site site(calc_, "FM-20 idle");
+        if (frame_.teamless) {
+            // WSQ-05 (debug build, the idle service for a craft without a team): a craft outside any squadron idles by
+            // itself: no turn, pitch back to level, speed toward Space_Idle_Movement_Speed (default 1,
+            // no FoC or BFC data sets it). It never circles a hold point.
+            Budget limits = budget();
+            adjust_turn(Fixed{}, limits.turn);
+            adjust_pitch(calc_.neg(clamp180(state_.pitch)), limits.lift);
+            adjust_speed(space_idle_movement_speed, limits.thrust);
+            return;
+        }
         const Vec3 hold = frame_.hold;
         Fixed speed = profile_.min_speed;
         Vec3 away = sub(position_, hold);

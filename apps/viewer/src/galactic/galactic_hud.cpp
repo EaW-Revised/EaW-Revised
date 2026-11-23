@@ -400,6 +400,14 @@ void cover_input_below(Node* node, const galactic_view::PlanetUiDepthPlan::Hidde
 }
 }
 
+float GalacticMode::State::planet_body_radius(const galactic_view::PlanetView& planet) const {
+    const auto drawn = planet_models.find(planet.id);
+    // A drawn model whose bounds could not be read (body_radius 0) falls back to the placeholder sphere's radius: the disc is
+    // then the size the placeholder planet would have, never zero and never the click radius.
+    const float radius = drawn != planet_models.end() && drawn->second ? models[*drawn->second].body_radius : 0.0F;
+    return galactic_view::planet_ui_body_radius(radius, planet.scale, galactic_view::skeleton_planet_radius);
+}
+
 void GalacticMode::State::stack_planet_ui(const galactic_view::PlanetUiDepthPlan& plan) {
     for (const auto id : plan.order) (void)planet_ui_group(id);
     if (planet_ui_order != plan.order && planet_ui_layer) {
@@ -428,7 +436,9 @@ void GalacticMode::State::stack_planet_ui(const galactic_view::PlanetUiDepthPlan
         PackedVector4Array discs;
         discs.resize(static_cast<std::int64_t>(galactic_view::max_planet_ui_occluders));
         for (std::size_t slot = 0; slot < hidden.count; ++slot)
-            discs.set(static_cast<std::int64_t>(slot), Vector4(hidden.discs[slot].x, hidden.discs[slot].y, hidden.discs[slot].radius, 0.0F));
+            // w carries the planet the disc stands for (the shader reads xyz only; the GPU contract reads w).
+            discs.set(static_cast<std::int64_t>(slot), Vector4(hidden.discs[slot].x, hidden.discs[slot].y, hidden.discs[slot].radius,
+                                                                static_cast<float>(hidden.discs[slot].id)));
         material->set_shader_parameter("discs", discs);
         material->set_shader_parameter("disc_count", static_cast<std::int32_t>(hidden.count));
         use_parent_material_below(group); // badges create their ship picture after they are added
@@ -562,9 +572,8 @@ void GalacticMode::State::update_planet_labels() {
             const float body_scale = static_cast<float>(camera.height) / (2.0F * depth * tangent);
             const float x = static_cast<float>(camera.width) * 0.5F + offset.dot(right) * body_scale;
             const float y = static_cast<float>(camera.height) * 0.5F - offset.dot(up) * body_scale;
-            const float world_radius = art && art->pick_radius > 0.0F ? art->pick_radius
-                : galactic_view::skeleton_planet_radius * planet->scale;
-            const float body_radius = planet_layer(planet->id) == 0 ? world_radius * body_scale : 0.0F;
+            // #8158: the drawn body decides what hides, not the click radius (art->pick_radius): that one is bigger.
+            const float body_radius = planet_layer(planet->id) == 0 ? planet_body_radius(*planet) * body_scale : 0.0F;
             // A body bigger than its controls' reach (close zoom) covers rear controls from off the screen edge.
             const float margin = planet_ui_reach + body_radius;
             if (x > -margin && y > -margin && x < static_cast<float>(camera.width) + margin
@@ -770,7 +779,11 @@ void GalacticMode::State::update_planet_labels() {
     for (const auto& [id, label] : planet_corruption_labels) { static_cast<void>(label); retire(id); }
     for (auto& [id, record] : planet_label_records) if (record.pass != planet_label_pass) { static_cast<void>(id); record.placed = false; }
     // The GPU contract reads the camera the stacking used, to check the group order against depth on its own.
-    if (planet_ui_layer) { planet_ui_layer->set_meta("camera_eye", eye); planet_ui_layer->set_meta("camera_forward", forward); }
+    if (planet_ui_layer) { planet_ui_layer->set_meta("camera_eye", eye); planet_ui_layer->set_meta("camera_forward", forward);
+        if (const float body_scale = static_cast<float>(camera.height) / (2.0F * tangent); body_scale != planet_ui_body_scale) {
+            planet_ui_body_scale = body_scale;
+            planet_ui_layer->set_meta("body_scale", body_scale);
+        } }
     stack_planet_ui(galactic_view::plan_planet_ui_depth(std::move(depth_entries), planet_ui_reach));
     std::sort(visible_labels.begin(), visible_labels.end());
     hide_unused_labels();

@@ -86,7 +86,8 @@ struct Owner {
     auth::ScriptScheduler scripts;
     std::unique_ptr<ga::NativeActions> actions;
     std::uint64_t sequence{};
-    Owner(gc::GalacticSession& session, const eawr::sim::PartitionExecutor& executor, bool ordinary_enemy = false) : scripts(must(auth::ScriptScheduler::create({}, {}))) {
+    Owner(gc::GalacticSession& session, const eawr::sim::PartitionExecutor& executor, bool ordinary_enemy = false,
+        ai::AiData ai_data = data()) : scripts(must(auth::ScriptScheduler::create({}, {}))) {
         ai::GalacticPerceptionSetup perception; perception.seed = 42;
         perception.players = {{1, 1, "Empire", "Normal", false, true, false, 10}};
         perception.planets = {{10, "ALPHA", 1000, {}, {}, {}, {}, {}}};
@@ -103,7 +104,7 @@ struct Owner {
         host->players.emplace(1, &host->setup.players.front());
         for (const auto& row : host->setup.content.types) host->types.emplace(row.type_id, &row);
         world = std::make_shared<ai::GalacticWorld>(perception); host->ai_world = world;
-        engine = std::make_shared<ai::Engine>(host, data(), std::vector{definition()}); host->engine = engine.get();
+        engine = std::make_shared<ai::Engine>(host, std::move(ai_data), std::vector{definition()}); host->engine = engine.get();
         auth::ModuleManifest modules;
         must(modules.add("fixture.lua", "function Base_Definitions() end\nfunction Main_Thread() end\n"));
         scripts = must(auth::ScriptScheduler::create({}, std::move(modules)));

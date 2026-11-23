@@ -35,6 +35,9 @@ records what the engine runs today and the decisions it makes while rules are op
     sees the new level, so tech events follow in the same step). `SET_MAX_TECH_LEVEL` sets the maximum alone and is refused
     below the current level (unverified). The faction names the first active player of that faction.
   - `CREDITS` (amount): a whole-number windfall with multiplier one.
+  - `GIVE_BLACK_MARKET` (item name, WGEP-139): the first registered black-market item of that name joins the owning player's
+    unlock list, deduplicated. It debits nothing, queues no production, despawns no buyer and sends no purchase feedback; the
+    next market preparation shows the item as owned. An unregistered name, an unknown player or an open native barrier declines.
   - `PLANET_FACTION` (planet, faction; both required, WST-42): the named planet's structures and starbase are cleared, its previous
     owner's forces are sent away (the destroy-for-non-local-owner half is unverified, WST-U19), its political modifiers are
     removed and it goes to the faction's active player at full control. Planet and faction are read from the plot, so any
@@ -50,7 +53,7 @@ records what the engine runs today and the decisions it makes while rules are op
   setup refusal. Binding a unit with the slicer ability (the Rebel droids) turns the theft list on: a slicer-unlockable type
   without an authored `Slice_Cost_Credits` (some Underworld star bases) has no theft price and stays out of the list (unverified).
 - **Not applied, declined by name.** `DISABLE_BUILDABLE`, `ENABLE_BUILDABLE`, `REMOVE_UNIT`, `DESTROY_OBJECT`, `SET_HEALTH`,
-  `CHANGE_OWNER`, `FORCE_RESPAWN`, `STATISTIC_CHANGE`, `GIVE_BLACK_MARKET`, `NEW_POWER_FOR_ALL`, `REMOVE_POWER_FROM_ALL`, the
+  `CHANGE_OWNER`, `FORCE_RESPAWN`, `STATISTIC_CHANGE`, `NEW_POWER_FOR_ALL`, `REMOVE_POWER_FROM_ALL`, the
   victory, reveal, camera, dialog and sound rewards and every other type outside the list above: the record is published
   with `refused: this reward type has no live owner yet`. A save taken while a tactical child is active keeps rewards queued
   in the engine only in memory (they are not saved); the stock plots queue none then.

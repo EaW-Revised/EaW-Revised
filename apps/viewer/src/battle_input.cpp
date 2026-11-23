@@ -245,6 +245,8 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
         std::sort(boxed.begin(), boxed.end());
     }
     for (const LiveSessionView::VisibleUnit& visible : live.visible_units()) {
+        // TL-14 (unverified: whether the original still hit-tests a hidden model): a hidden unit is not pointable.
+        if (live.snapshot_index().is_script_hidden(visible.entity)) continue;
         const auto box = population.live_ship_box(visible.ship);
         if (!box) continue;  // no pick volume (not drawn, or effect-only like a projectile): nothing to point at
         // #6992: a land pad that carries a structure stays drawn under it; the click belongs to the structure (or its
@@ -277,9 +279,11 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
             if (const auto team_shape = pick_shapes_.find(container->type_id); team_shape != pick_shapes_.end())
                 unit.selection_denied = unit.selection_denied || team_shape->second.selection_denied;
         }
+        // TL-15: Set_Selectable(false) refuses the unit (its squadron's flag for a craft).
+        if (live.snapshot_index().script_unselectable_contains(unit.entity)) unit.selectable = false;
         unit.neutral = visible.neutral;
         // WSU-16: authored community stations are selectable by allies and retain their owner.
-        unit.own = !unit.neutral && (visible.own || (pick_shape != pick_shapes_.end()
+        unit.own = !unit.neutral && !live.view_only() && (visible.own || (pick_shape != pick_shapes_.end()
             && pick_shape->second.community_property && live.is_ally_of_local(visible.owner)));
         // WSU-16: community property is selectable by an ally without changing ownership.
         if (const auto* instance = live.snapshot_index().instance(visible.entity)) {
@@ -289,7 +293,7 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
         }
         unit.hostile = visible.hostile;
         if (const auto* point = live.economy().pads.point(visible.type);
-            point != nullptr && (point->build_pad || point->community_property) && !unit.neutral
+            point != nullptr && (point->build_pad || point->community_property) && !unit.neutral && !live.view_only()
                 && live.is_ally_of_local(visible.owner)) {
             unit.own = true; // WBP-08/09: allied pads enter the build UI before ordinary selection.
         }
@@ -323,6 +327,8 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
         selection_.replace(selected);
     }
     selection_.retain_sorted(live.alive_units());
+    // TL-15: the original deselects the object (and its team members) when the script clears Set_Selectable.
+    selection_.remove_sorted(live.snapshot_index().script_unselectable());
     // Also recover from missed event history; only stored memberships need probing.
     const auto& snapshot = live.battle_frame().latest;
     if (live.controller_policy_enabled() && snapshot

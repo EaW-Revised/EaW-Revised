@@ -934,6 +934,38 @@ void removal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>&
         }
     }
 }
+// #8157: a market hero's drop on a planet that holds no market is refused with the reason the player can be told. The
+// setup authors the Black Market choice (slot 2) on every planet or on none, and the planet carries no corruption or a
+// different one: "cannot host" when nothing authors the choice, "other corruption" when it is authored but the planet
+// already carries another type, "not established" when it is authored and the planet is clean.
+void market_refusals(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    using Type = gc::corruption_fixture::Type;
+    struct Row { const char* label; Type corruption; bool authored; gc::GalacticRejectReason reason; };
+    const Row rows[] = {
+        {"a clean planet that authors the choice is not established yet", Type::none, true, gc::GalacticRejectReason::market_not_established},
+        {"a planet with another corruption refuses as such", Type::racketeering, true, gc::GalacticRejectReason::market_other_corruption},
+        {"a clean planet that authors no choice cannot host", Type::none, false, gc::GalacticRejectReason::market_cannot_host},
+        {"another corruption without an authored choice still cannot host", Type::racketeering, false, gc::GalacticRejectReason::market_cannot_host},
+    };
+    for (const auto& row : rows) {
+        auto config = setup(); auto& host = *config.ability_host;
+        host.profiles[0].has_market = true;
+        config.economy_corruption->planets[0].corruption = row.corruption;
+        if (row.authored) for (auto& planet : host.corruption_planets) {
+            planet.slots[1].type = Type::black_market; planet.slots[1].price = f(1500);
+        }
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::PrepareGalacticAbility{buyer(config), config.planets[0].id, gc::AbilityKind::black_market});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        const auto snapshot = game.galaxy().snapshot();
+        const auto events = snapshot->events();
+        const auto refusal = std::find_if(events.begin(), events.end(), [](const auto& event) {
+            return event.kind == gc::GalacticEventKind::command_rejected; });
+        expect(refusal != events.end() && refusal->reason == row.reason, row.label);
+        expect(game.galaxy().ability_state()->preparations.empty()
+            && game.galaxy().snapshot()->player_economy()->players[1].credits == f(1000), "a refused market preparation opens nothing and costs nothing");
+    }
+}
 } // namespace
 // #7426: the corruption menu is published only for a planet the human player has discovered (WGUI-99), and a lone stealth hero
 // does not discover the planet it orbits (WGUI-01). The host refuses such a preparation with a reason the seat is told
@@ -988,7 +1020,7 @@ int case_galactic_ability_corruption_tests() {
     std::size_t phase_index = 0; // names the phase in a thrown failure
     try {
         using Phase = void (*)(const eawr::sim::PartitionExecutor&, std::vector<std::string>&);
-        const Phase phases[] = {information, information_admission, direct, direct_voice, ai_invocation, staged_ai_invocation, story_policy, story_policy_capture, human_refusal, undiscovered_target, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, stale_owned_target, startup, removal};
+        const Phase phases[] = {information, information_admission, direct, direct_voice, ai_invocation, staged_ai_invocation, story_policy, story_policy_capture, human_refusal, undiscovered_target, market_refusals, missions, land_timed, stale_units, representative, unsuccessful_missions, accepted_space_mission, stale_owned_target, startup, removal};
         std::vector<std::string> baseline;
         for (std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter workers(count); std::vector<std::string> hashes;

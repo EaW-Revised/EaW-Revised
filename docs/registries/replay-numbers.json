@@ -414,6 +414,36 @@
     "constant": "opcode_script_change_owner",
     "name": "script change owner",
     "documented": true
+   },
+   {
+    "value": 44,
+    "constant": "opcode_script_teleport_position",
+    "name": "script teleport position",
+    "documented": true
+   },
+   {
+    "value": 45,
+    "constant": "opcode_script_hide",
+    "name": "script hide",
+    "documented": true
+   },
+   {
+    "value": 46,
+    "constant": "opcode_script_cancel_hyperspace",
+    "name": "script cancel hyperspace",
+    "documented": true
+   },
+   {
+    "value": 47,
+    "constant": "opcode_script_hyperspace_in",
+    "name": "script hyperspace in",
+    "documented": true
+   },
+   {
+    "value": 48,
+    "constant": "opcode_script_selectable",
+    "name": "script selectable",
+    "documented": true
    }
   ]
  },
@@ -666,6 +696,11 @@
   {
    "tag": "SHFR",
    "constant": "hold_fire_tag",
+   "documented": true
+  },
+  {
+   "tag": "SVEW",
+   "constant": "script_view_tag",
    "documented": true
   },
   {

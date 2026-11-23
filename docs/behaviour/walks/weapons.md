@@ -51,7 +51,8 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
 - **WWP-02** (debug build, EWW-01) Before the recharge counts down, the service stops when weapon
   fire is off globally, when the hardpoint is destroyable and has no health, when the hardpoint is
   disabled, or when its parent is stunned, in limbo (not garrisoned), deploying or undeploying. So
-  a stunned parent's hardpoints keep their recharge where it was.
+  a stunned parent's hardpoints keep their recharge where it was. Plain stun is the ordinary
+  stun state with its own lifecycle, distinct from projectile ion stun (IS-01, IS-02; WHD-07).
 - **WWP-03** (debug build, EWW-01) The recharge counts down by the frames since the hardpoint's
   last service (one a frame); while it is still above zero the service stops.
 - **WWP-04** (debug build, EWW-01) A hardpoint with `Requires_Manual_Target_Assignment` fires only
@@ -72,7 +73,7 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
   `Allow_Opportunity_Fire_When_Idle` is off does nothing. With an ordered target and that flag off,
   it fires at it only while one check of its parent's targeting holds (not identified here) or the
   parent's formation (the squadron's, for a craft) has that same target as its attack target. In M2 only the bombers'
-  torpedo hardpoints (`HP_BOMBER_02`, `_03`) turn both opportunity flags off.
+  torpedo hardpoints (`HP_BOMBER_02`, `_03`) turn both opportunity flags off. Tartan and Corellian corvette hardpoints, and the Corellian gunship weapon hardpoints 03–08, also turn `Allow_Opportunity_Fire_When_Targeting` off (hardpoints XML, effective data).
 - **WWP-09** (debug build, EWW-01) A hardpoint holds fire at its ordered target when that target is
   its parent's special-ability attack target and the target's type sets
   `Should_Attacker_Hold_Fire_For_Special_Ability` (not in M2).
@@ -179,8 +180,7 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
   endpoint branch keeps its existing draw order.
 - **WWP-23** (debug build, EWW-03; space-weapon-fire W-10) The aim point is led from the muzzle at
   the projectile's `Max_Speed`.
-- **WWP-24** (debug build, EWW-03; W-07, W-11, W-12) A led point of zero length, or one the fixed
-  hardpoint cannot point at, fails the attempt.
+- **WWP-24** (debug build, EWW-03; W-07, W-11, W-12) A led point the fixed hardpoint cannot point at fails the attempt. The zero-length case conflicts with W-07 and remains **unverified**.
 - **WWP-25** (debug build, EWW-03; space-damage DG-24) The led point scatters with the planar
   distance of WWP-20 (before the lead).
 - **WWP-26** (debug build, EWW-03) The projectile is created at the muzzle facing the scattered point.
@@ -283,11 +283,11 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
   predicting the centre. The remake uses deterministic Q24 geometry and frame units; absent
   history keeps linear lead. The captured muzzle origin and member selection remain separate
   upstream inputs, so circular-lead parity alone does not establish ordinary battle parity.
-- **WWP-52** (debug build, EWW-09; space-damage DG-24) Scatter: a draw within the type's
+- **WWP-52** (debug build, EWW-09; space-damage DG-24) Scatter uses the type's
   `Targeting_Fire_Inaccuracy_Fixed_Radius` when it sets one; else a radius of the spatial distance
   times its `Targeting_Fire_Inaccuracy` row for the target (doubled in space) over its
   `Targeting_Max_Attack_Distance`. No M2 unit authors either tag, so no M2
-  unit weapon scatters; the fighters' `Fire_Inaccuracy_Distance` rows are hardpoint data and are
+  unit weapon scatters. Whether its draw is a cube as in DG-24 or a sphere is **unverified**; the fighters' `Fire_Inaccuracy_Distance` rows are hardpoint data and are
   not read for it. A laser flies at the scattered point; a missile keeps the scatter as its offset.
 - **WWP-53** (debug build, EWW-09; space-weapon-fire W-09) `Fires_Forward` yes: the shot leaves along
   the unit's facing, with no cone test. Otherwise the fired-at point must lie within
@@ -391,14 +391,14 @@ at.
 | W-04 | same (WWP-05, WWP-08, WWP-11) |
 | W-05 | differs for the unit weapon (its aim point is WWP-50, not the nearest hardpoint); for a hardpoint the range adds the soft radius (WWP-20) and a squadron target is a random craft (WWP-19) |
 | W-06, W-08 | same (WWP-22, WWP-31) |
-| W-07, W-10, W-11, W-12 | same (WWP-23, WWP-24) |
+| W-07, W-10, W-11, W-12 | same except zero-length aim remains unverified (WWP-23, WWP-24) |
 | W-09 | same for the cone and the omitted-tag defaults (G-W4 resolved); `Fires_Forward` yes fires along the facing (WWP-53), which the code does not do |
 | P-04 | type soft-radius computation shared by movement and combat (WWP-21), including craft without a movement layer; `Fire_Min_Range_Distance` is read (no M2 hardpoint authors it) |
 | P-06 | same (project choice kept) |
 | space-damage DG-21 | same for the unit weapon (WWP-54); for a hardpoint's projectile **unverified** (U-02) |
-| DG-22, DG-24 | same (WWP-63, WWP-25, WWP-52) |
+| DG-22, DG-24 | same for hardpoint scatter (WWP-63, WWP-25); unit scatter shape unverified (WWP-52) |
 | DG-23 | travel adds the target's soft radius and its squadron container's, with the melee exception (WWP-27) |
-| DG-25 | **wrong**: the MC80's weapon hardpoints author `Projectile_Damage` (20 on the lasers against the projectile's 15, 40 on the ion cannons against 20), and FoC uses it (WWP-26) |
+| DG-25 | same (WWP-26): the MC80 hardpoints author and use 20/40 damage |
 | DG-30 | same; the first eligible object in sorted hostile-player and persistent projectile ray-collection order is WWP-66; DG-30a to DG-30g specify the tree walk, lifecycle and continuing flight after target detach |
 | DG-32 | same, sharpened: only players the owner counts as enemies (WWP-66) |
 | DG-33, DG-34, DG-36 to DG-38 | same (WWP-66, WWP-68, WWP-70) |
@@ -419,12 +419,12 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | Rule | Ours | Verdict |
 |---|---|---|
 | WWP-01, WWP-03 | `service_weapon` | same |
-| WWP-02 | only the destroyed gate (`weapon_up`); stun and disable come with ion energy drain and hardpoint damage (legacy EAWR-561) | differs (G-07) |
+| WWP-02 | destroyed gate (`weapon_up`); the remaining recharge gates are not established | differs (G-08); plain stun is distinct from ion stun (IS-01, IS-02; WHD-07) |
 | WWP-04 | not loaded | missing (not in M2; G-08) |
 | WWP-05 | restriction and a dead target drop; mode flags not loaded | same for M2 |
 | WWP-06 | FT-07's `squadron_idle` | same |
 | WWP-07 | aim picks the nearest again each attempt | same |
-| WWP-08 | torpedoes fire at their direct (squadron) target only | same for M2 |
+| WWP-08 | opportunity flags are applied, including on torpedo, Tartan and corvette hardpoints | same for those flags |
 | WWP-09 | not modelled | missing (not in M2) |
 | WWP-10, WWP-11 | `service_weapon`; no signals | same (the signals are an interface) |
 | WWP-12 | `service_opportunity` | same |
@@ -437,8 +437,8 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-20 | planar upper range plus the target radius; independent signed minimum | applied to space hardpoints, including authored minima outside M2; absent defaults to zero |
 | WWP-21 | shared type-footprint conversion (AV-05), including no-layer types and ordinary space squadron containers | same for M2; specialized formation-team geometry has no ordinary space consumer |
 | WWP-22 | true-default world box, X/Y/Z draws; explicit false keeps the 50 % endpoint draw | applied; unavailable B uses A without a draw (project fallback) |
-| WWP-23 to WWP-25 | `lead`, `pointable`, `scatter` | same |
-| WWP-26 | the projectile's damage only | **differs (G-02)** |
+| WWP-23 to WWP-25 | `lead`, `pointable`, `scatter` | same except retail zero-length aim remains unverified |
+| WWP-26 | positive hardpoint damage and authored damage type take precedence | same (G-02 resolved) |
 | WWP-27 | range plus target radius, non-melee craft target's container radius, and height | same |
 | WWP-28 | not loaded | missing (not in M2; G-08) |
 | WWP-29 | `launch_projectile` | same |
@@ -465,22 +465,20 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-68 to WWP-70 | `step_projectile` | same; lifetime expiry missing (not in M2; G-08) |
 | WWP-72 | loaded for `SpaceUnit` and `SpaceStructure`; applied to launch fallback, nearest-hardpoint reference and homing | **same** for these classes |
 
-Counts, by rule (62 simulation rules; WWP-40 is presentation): **same 47**, **differs 8**
-(WWP-02, 26, 43, 47, 48, 50, 72, and the project choice of WWP-66), **missing 7**
-(WWP-04, 09, 14, 17, 28, 60, 61; none authored by an M2 object).
+The row verdicts above are authoritative; older aggregate counts predate subsequent implementations.
 
 ### The gaps, by impact on the M2 battle
 
 | Gap | Rules | What | Size |
 |---|---|---|---|
 | G-01 target soft-radius range adjustment (legacy EAWR-708) | WWP-20, WWP-21, WWP-27 (and R-11, A-07) | Resolved: shared scaled type geometry reaches hardpoint admission, aim selection, attack distance and partitioned projectile launches, including no-layer craft and their container radius. | resolved |
-| G-02 MC80 hardpoint damage overrides (legacy EAWR-709) | WWP-26 | A hardpoint's `Projectile_Damage` replaces the projectile's: the MC80's lasers do 20 (not 15) and its ion cannons 40 (not 20). | S |
+| G-02 MC80 hardpoint damage overrides (legacy EAWR-709) | WWP-26 | Resolved: a positive hardpoint `Projectile_Damage` replaces the projectile's; the MC80's lasers use 20 and ions 40. | resolved |
 | G-03 fighter aim and muzzle bones (legacy EAWR-710) | WWP-47, WWP-48, WWP-49, WWP-50 | The unit's own weapon: aim at its attached hardpoint (ordered, else the nearest the targeting attached), else a random target bone, else the height-adjusted centre; fire from the muzzle bones in turn; travel `Targeting_Max_Attack_Distance`. | **Implemented** (legacy EAWR-710) for the unit's own weapon: keyed bone draw and height-adjusted centre when the target has no attached hardpoint; muzzle bones in turn; travel `Targeting_Max_Attack_Distance`. The aim at the nearest hardpoint stays: the debug build's targeting attaches it (G-W3), so the issue's "never the nearest hardpoint" did not hold (S-45 records no direct hull loss). The weapon's cone opens at the muzzle (WWP-53); its planar range test still measures from the unit (G-05). |
 | G-04 random craft selection by ordered hardpoints (legacy EAWR-711) | WWP-19 | **Resolved**: a hardpoint ordered at a squadron fires at a random craft each attempt (a keyed draw), not the nearest; FO-04 is corrected. | resolved |
 | G-05 fighter targeting-state fire gate (legacy EAWR-712) | WWP-43 | The unit's own weapon fires only in the "okay to attack" targeting state and tests no range; ours tests the planar attack distance. The state's inside (walk 1/2) decides when a fighter may fire; the retail dogfight outcome comparison shot log shows retail fighters never firing beyond 424 units. | M (after walk 1/2) |
 | G-06 height-adjusted target positions (legacy EAWR-713) | WWP-16, WWP-19, WWP-64, WWP-72 | **Implemented** for `SpaceUnit` and `SpaceStructure`: launch fallbacks, nearest-hardpoint reference and missile steering use `Ranged_Target_Z_Adjust` (Nebulon-B +35; resource container +30). | S |
-| G-07 ion weapons, energy drain and stun (legacy EAWR-561) | WWP-02 | A stunned, disabled or in-limbo parent's hardpoints freeze their recharge (ion energy drain and hardpoint damage (legacy EAWR-561)). | XS in ion weapons, energy drain and stun (legacy EAWR-561) |
-| G-08 unused M2 weapon-rule coverage (legacy EAWR-714) | WWP-04, 09, 14, 17, 28, 53 (`Fires_Forward` yes), 60, 61, 68 (lifetime) | Rules FoC reads that no M2 object authors. | M (nice-to-have) |
+| G-07 | WWP-02 | Recharge gates tracked under G-08; ion stun is a separate mechanic (IS-05, IS-06). | moved to G-08 |
+| G-08 unused M2 weapon-rule coverage (legacy EAWR-714) | WWP-02, 04, 09, 14, 17, 28, 53 (`Fires_Forward` yes), 60, 61, 68 (lifetime) | Remaining recharge gates and rules FoC reads that no M2 object authors. | M (nice-to-have) |
 
 WWP-20 minimum range is no longer part of G-08: effective authored values reach space hardpoint
 firing and manual admission. WWP-22 is also covered: omitted tags enable the random box by default
@@ -506,8 +504,7 @@ Projectile: `Projectile_Category`, `Max_Speed`, `Max_Rate_Of_Turn`, `Projectile_
 `Projectile_Does_Energy_Damage`, `Projectile_Does_Hitpoint_Damage`, `Projectile_Energy_Per_Shot`,
 `Projectile_Blast_Area_Damage`, `Projectile_Blast_Area_Range`, `Projectile_Ion_Stun_*`.
 
-In [statuses.json](../../tag-coverage/statuses.json) (M2 XML tag coverage audit), these rows are `todo` and belong to
-this walk: `HardPoint/Projectile_Damage` (G-02), `SpaceUnit/Ranged_Target_Z_Adjust` and
+The [tag coverage registry](../../tag-coverage/statuses.json) tracks this walk's tags. Historical todo rows included `SpaceUnit/Ranged_Target_Z_Adjust` and
 `SpaceStructure/Ranged_Target_Z_Adjust` (G-06), `SpaceUnit/Collidable_By_Projectile_Living`,
 and the same tag on `SpaceStructure`, `StarBase`, `SpaceBuildable` and `SecondaryStructure` (FoC
 reads it, WWP-66; every M2 unit sets yes, so loading it changes nothing in M2; G-08). `Projectile/Projectile_Width`

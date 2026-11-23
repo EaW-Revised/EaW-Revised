@@ -170,7 +170,7 @@ def orchestrator(repo: Path) -> dict:
 
 def build_plan(repo: Path, *, base: str, kit: str, label: str, kit_version: str, overlay: list[str],
                launcher_pin: dict, engine: tuple[str, dict], changes_sha256: str, route: dict,
-               operator: dict | None = None) -> dict:
+               operator: dict | None = None, linux_engine: tuple[str, dict] | None = None) -> dict:
     """The plan section for a kit commit. Everything in it is derived from git objects or the arguments."""
     for name, value in (("base", base), ("kit", kit)):
         if not HEX40.fullmatch(value):
@@ -199,7 +199,29 @@ def build_plan(repo: Path, *, base: str, kit: str, label: str, kit_version: str,
         "orchestrator": operator if operator is not None else orchestrator(repo),
         "route": route,
     }
+    if linux_engine is not None:
+        # The Linux x64 player ships its own pinned patched engine file; the plan pins it like the Windows one.
+        plan["inputs"]["linux_engine"] = {"label": linux_engine[0], "files": dict(sorted(linux_engine[1].items()))}
     return plan
+
+
+def linux_engine_identity(pins: dict) -> tuple[str, dict]:
+    """The patched Linux x64 engine entry of tools/engine_pins.json (the one whose label ends in linux-x64)."""
+    found = [(label, dict(entry["files"])) for label, entry in pins.get("engines", {}).items() if label.endswith("-linux-x64")]
+    if len(found) != 1:
+        raise ManifestError(f"tools/engine_pins.json must list exactly one linux-x64 engine, found {len(found)}")
+    return found[0]
+
+
+def _linux_engine_shape_problems(plan: dict) -> list[str]:
+    entry = plan.get("inputs", {}).get("linux_engine")
+    if entry is None:
+        return []
+    files = entry.get("files") if isinstance(entry, dict) else None
+    if not (isinstance(files, dict) and files and str(entry.get("label", "")).endswith("-linux-x64")
+            and all(isinstance(n, str) and "/" not in n and HEX64.fullmatch(str(h)) for n, h in files.items())):
+        return ["the plan's linux_engine pin is malformed (a *-linux-x64 label and one SHA-256 per file name)"]
+    return []
 
 
 def new_manifest(plan: dict, mode: str = "kit") -> dict:
@@ -457,6 +479,9 @@ def _receipt_input_problems(receipt: dict, plan: dict) -> list[str]:
     for name, want in sorted(engine.items()):
         if inputs.get(name) != want:
             problems.append(f"the host receipt's {name} is not the engine file the plan pinned")
+    for name, want in sorted(pinned.get("linux_engine", {}).get("files", {}).items()):
+        if inputs.get(name) != want:
+            problems.append(f"the host receipt's {name} is not the Linux engine file the plan pinned")
     if inputs.get("launcher.zip") != pinned.get("launcher", {}).get("sha256"):
         problems.append("the host receipt's launcher.zip is not the artifact the plan pinned")
     return problems
@@ -502,6 +527,7 @@ def verify(manifest: dict, *, zip_path: Path | None = None, folder: Path | None 
     if manifest.get("schema") != SCHEMA:
         return [f"schema is not {SCHEMA}"]
     problems += _shape(plan or {})
+    problems += _linux_engine_shape_problems(plan or {})
     if problems:
         return problems
     if digest(plan) != manifest.get("plan_sha256"):
@@ -580,6 +606,12 @@ def verify(manifest: dict, *, zip_path: Path | None = None, folder: Path | None 
                 found = blob_entry(repo, source["kit_sha"], entry["path"])
                 if found != entry:
                     problems.append(f"{entry['path']} differs from the kit commit")
+            pinned_linux = plan["inputs"].get("linux_engine")
+            if pinned_linux is not None:
+                pins = json.loads(git(repo, "show", source["kit_sha"] + ":tools/engine_pins.json"))
+                label, files = linux_engine_identity(pins)
+                if pinned_linux != {"label": label, "files": dict(sorted(files.items()))}:
+                    problems.append("the plan's linux_engine differs from the linux-x64 pin in the kit commit's engine_pins.json")
         except ManifestError as error:
             problems.append(str(error))
     return problems

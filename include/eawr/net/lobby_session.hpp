@@ -198,7 +198,12 @@ struct LobbyHooks {
     // was not planned for a player: the rows and every seat's side follow). Called with the room as it is, the candidate
     // room that holds the seat's new choice (which it may edit, game bytes and seats), and the peer. A failure refuses the
     // choice with its message. Runs before `validate`, which still checks the final candidate.
+    // The same hook also runs when the host admits a newcomer (the candidate holds the new seat), so a mode can plan the row the
+    // newcomer was seated on.
     std::function<core::Result<void>(const LobbySnapshot& before, LobbySnapshot& candidate, PeerIndex peer)> follow_choice;
+    // Optional, host side: after a seat was removed (left, kicked, link lost) during staging. `before` is the room with the seat,
+    // `after` the room without it, which the hook may edit (game bytes and seats); seats it changes are unreadied by the ready rule.
+    std::function<void(const LobbySnapshot& before, LobbySnapshot& after, PeerIndex peer)> follow_departure;
     // Build the EXACT frozen revision; returned seats must match the supplied
     // dense setup roster. Never reuse a previously built offer after an edit.
     // May answer start_pending_diagnostic while a worker builds it: Start stays pending and locked until all required

@@ -276,7 +276,7 @@ fleet order. Until campaign start builds the galaxy from data, the replay carrie
 tick-zero galaxy; the identities let a loader check it against the content it names.
 
 The seat roster has at most eight humans, including inactive humans. Their explicit nonzero
-human side IDs group them into one coop side or exactly two versus sides, independently of
+human side IDs group them into one coop side or up to eight versus sides, independently of
 owning player/faction. AI/script issuers have human side ID zero and do not count as human
 sides. The 256-seat limit bounds the whole table. Human side membership is canonical hashed
 session state; command authorization still uses the seat's owning player.

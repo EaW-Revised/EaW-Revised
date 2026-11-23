@@ -781,7 +781,8 @@ void EnvironmentView::movie(const bool on, const std::array<float, 3>& target) {
             bridge_->set_focus(true);
         }
     }
-    movie_ = on && bridge_ && bridge_->active();
+    // #8105: the attract's locked view has no tactical controller; its shots move the view through set_attract_pose.
+    movie_ = on && ((bridge_ && bridge_->active()) || (locked_view_ && !completed_));
     if (!movie_) { movie_fov_.reset(); movie_clip_.reset(); }
     movie_target_ = target;
 }

@@ -240,6 +240,41 @@ void missing_key_contracts() {
            "missing-key diagnostic names the key");
     // The retail executable's own defaults for the two mod-dialog keys the database lacks.
     expect(lookup.text("TEXT_EAWR_GIFT_UNITS") == u"Gift", "project gift caption uses the localised lookup fallback");
+    expect(lookup.text("TEXT_EAWR_GC_FACTION_UNITS") == u"Faction units, player icons", "GC faction colour option has a built-in caption");
+    expect(lookup.text("TEXT_EAWR_GC_PLAYER_UNITS") == u"Player-coloured units", "GC player colour option has a built-in caption");
+    expect(lookup.text("TEXT_EAWR_GC_COLOURS_TOOLTIP") == u"This choice applies only to your view.", "GC colour option has a built-in tooltip");
+    // #8157: the notices of a refused hero ability are project text: every key resolves to a sentence, never to itself.
+    for (const std::string_view key : {
+        "TEXT_EAWR_ABILITY_SEAT_INACTIVE",
+        "TEXT_EAWR_ABILITY_TARGET_GONE",
+        "TEXT_EAWR_ABILITY_NOT_YOURS",
+        "TEXT_EAWR_ABILITY_LIMIT",
+        "TEXT_EAWR_ABILITY_UNAVAILABLE",
+        "TEXT_EAWR_ABILITY_DISABLED",
+        "TEXT_EAWR_ABILITY_NOT_HERE",
+        "TEXT_EAWR_ABILITY_MUST_BE_IN_ORBIT",
+        "TEXT_EAWR_ABILITY_NO_ENEMY_HERO",
+        "TEXT_EAWR_ABILITY_ALLIED_HERO",
+        "TEXT_EAWR_ABILITY_NOT_TARGETABLE",
+        "TEXT_EAWR_ABILITY_NEUTRALIZE_UNAVAILABLE",
+        "TEXT_EAWR_ABILITY_UNEXPLORED",
+        "TEXT_EAWR_ABILITY_NO_CREDITS",
+        "TEXT_EAWR_ABILITY_NO_ROUTE",
+        "TEXT_EAWR_ABILITY_CANNOT_DEPART",
+        "TEXT_EAWR_ABILITY_PATH_BLOCKED",
+        "TEXT_EAWR_ABILITY_CANNOT_TRAVEL",
+        "TEXT_EAWR_ABILITY_ORDER_UNAVAILABLE",
+        "TEXT_EAWR_ABILITY_MARKET_OWN_PLANET",
+        "TEXT_EAWR_ABILITY_MARKET_NO_TRADERS",
+        "TEXT_EAWR_ABILITY_MARKET_CANNOT_HOST",
+        "TEXT_EAWR_ABILITY_MARKET_OTHER_CORRUPTION",
+        "TEXT_EAWR_ABILITY_MARKET_NOT_ESTABLISHED",
+        "TEXT_EAWR_ABILITY_MARKET_NOTHING_OFFERED",
+        "TEXT_EAWR_ABILITY_MARKET_CANNOT_PRICE",
+        "TEXT_EAWR_ABILITY_REFUSED"}) {
+        const auto text = lookup.text(key);
+        expect(!text.empty() && text != std::u16string(key.begin(), key.end()), "a hero ability notice key resolves in the project text table");
+    }
     expect(lookup.text("TEXT_EAWR_HIDDEN_PLANET") == u"Hidden planet", "hidden finder marker uses the text lookup fallback");
     auto hidden_marker = load(encode(sorted({{"TEXT_EAWR_HIDDEN_PLANET", u"Planète cachée"}})));
     expect(hidden_marker && ui::TextLookup(hidden_marker.value()).text("TEXT_EAWR_HIDDEN_PLANET") == u"Planète cachée",

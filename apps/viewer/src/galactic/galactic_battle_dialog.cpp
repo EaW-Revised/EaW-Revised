@@ -120,6 +120,14 @@ bool GalacticMode::State::build_battle_dialog() {
             [this](std::string_view name) { return shell_texture(name); }, text,
             [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
     };
+    style.pending_click_sound = [this](bool single, bool begin) {
+        const auto* component = command_catalog.find(begin ? (single ? "attack_button_single" : "choice_button_left")
+                                                        : "choice_button_right");
+        auto cue = component ? component->text(data::ui::Field::click_sfx) : std::string_view{};
+        if (cue.empty()) if (const auto* option_component = command_catalog.find("b_option_g"))
+            cue = option_component->text(data::ui::Field::click_sfx);
+        if (audio && !cue.empty()) audio->ui_sound(cue);
+    };
     battle_dialog_builder = style.dialog;
     battle_dialog = std::make_unique<BattleDialog>(*hud, std::move(style),
         [this](std::uint64_t id, galactic_view::BattleChoice choice) {

@@ -286,14 +286,13 @@ void build_command_buttons(HudState& state, const vfs::Vfs& filesystem, EawrTact
 }
 
 template <typename HudState>
-void build_planet_label(HudState& state, const vfs::Vfs& filesystem, const data::Catalog* objects, const std::optional<std::string>& context_name, const model::StandaloneTextures& standalone, EawrTacticalHud::Setup& setup, std::optional<data::ui::TextDatabase>& text_database) {
+void build_planet_label(HudState& state, const vfs::Vfs& filesystem, const data::Catalog* objects, const std::optional<std::string>& context_name, EawrTacticalHud::Setup& setup, std::optional<data::ui::TextDatabase>& text_database) {
     if (auto loaded_text = data::ui::load_language_text_database(filesystem, state.options.language)) {
         text_database.emplace(std::move(loaded_text.value()));
     } else {
         state.warn("EAWR-UI-0321", core::format_diagnostic(loaded_text.error()));
     }
     state.objects = objects;
-    state.standalone = standalone;
     state.planet = model::planet_name(context_name, objects, text_database ? &*text_database : nullptr);
     for (const auto& diagnostic : state.planet.diagnostics) state.diagnostics.push_back(diagnostic);
     if (state.shell.planet_name) {
@@ -436,7 +435,9 @@ void build_production_panel(HudState& state, const vfs::Vfs& filesystem, const d
             state.diagnostics.push_back(pane_anchors.error());
         }
         production.texture = [&state](const std::string& name) { return state.command_texture(name, "production"); };
-        production.optional_texture = [&state](const std::string& name) { return state.command_texture(name, "production", true); };
+        production.optional_texture = [&state](const std::string& name) {
+            return state.command_texture(name, "production", true, TacticalAssetRequirement::optional);
+        };
         production.icon = [&state](const std::string& type) { return state.card_type(type).first; };
         if (!state.fonts) state.fonts = std::make_shared<FontProvider>(std::move(state.options.font_cache));
         const model::ResolvedFont face = state.fonts->resolve({"EmpireAtWar-Medium", 6}, state.options.language);
@@ -809,6 +810,8 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
     state.faceplates = setup.view.faceplates.size();
 
     const model::StandaloneTextures standalone = model::vfs_standalone_textures(filesystem);
+    state.standalone = standalone;
+    state.quiet_standalone = model::vfs_standalone_textures(filesystem, false);
     build_shell_art(state, filesystem, standalone, setup);
     // The options button's state textures: the command bar's atlas, then files.
     state.atlas_path = model::command_bar_mega_texture(catalog);
@@ -852,7 +855,7 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
     build_command_buttons(state, filesystem, setup, button_texture, quad, layered_button);
     // The planet name: its component font through UI-F3, the text through the map.
     std::optional<data::ui::TextDatabase>& text_database = state.text_database;
-    build_planet_label(state, filesystem, objects, context_name, standalone, setup, text_database);
+    build_planet_label(state, filesystem, objects, context_name, setup, text_database);
     // Canvas layer -> hit mask (UI-I2) -> drawing surface -> button.
     auto* layer = memnew(CanvasLayer);
     layer->set_name("EawrTacticalHudLayer");

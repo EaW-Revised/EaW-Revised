@@ -335,6 +335,7 @@ void append_value(::std::string& out, lua_State* state, int index, int depth, ::
     if (type == LUA_TUSERDATA && instance.sandbox->to_handle(state, index, handle)) {
         append_u64(out, handle.kind);
         append_u64(out, handle.id);
+        append_u64(out, handle.aux);
         return;
     }
     if (type != LUA_TTABLE || depth > 64) return;
@@ -579,6 +580,10 @@ core::Result<void> ScriptScheduler::install_binding(::std::string_view name, Bin
     }
     impl_->shared->bindings.push_back(detail::BindingEntry{::std::string(name), ::std::move(binding)});
     return core::Result<void>::success();
+}
+
+bool ScriptScheduler::has_module(::std::string_view logical_path) const {
+    return impl_->shared->manifest.find(logical_path) != nullptr;
 }
 
 core::Result<void> ScriptScheduler::register_prelude(::std::string_view module) {
@@ -1391,7 +1396,7 @@ core::Result<::std::optional<Value>> ScriptScheduler::read_global(
         value = Value::text(::std::string(lua_tostring(state, -1), lua_strlen(state, -1)));
         break;
     case LUA_TUSERDATA:
-        if (target.sandbox->to_handle(state, -1, handle)) value = Value{Handle{handle.kind, handle.id}};
+        if (target.sandbox->to_handle(state, -1, handle)) value = Value{Handle{handle.kind, handle.id, handle.aux}};
         break;
     default:
         break;

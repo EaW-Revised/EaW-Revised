@@ -21,6 +21,9 @@ What detach itself does (stop the roots and drain, or release at once) is in
 
 ## Source rules
 
+FoC verification: V-01 to V-07 describe the reference; BP-48 separately
+establishes the debug-build hide/drain/reset rule, not every detail below.
+
 | Rule | Behaviour |
 |---|---|
 | V-01 | A bone's visibility at time `t` is the stored bit of animation frame `floor(t * fps) mod frames`. There is no interpolation and no parent inheritance: a proxy reads only its own bone. |
@@ -34,8 +37,9 @@ What detach itself does (stop the roots and drain, or release at once) is in
 The reappearance rule is therefore resolved by the reference (V-04, V-05): a
 bone that becomes visible again gets a new instance, and the previous
 instance's drain continues beside it. This is the reference implementation's
-rule. Whether the shipped game behaves the same way was not observed (gate
-A-04).
+rule. The FoC debug build instead establishes the reset on reappearance in
+[battle presentation](battle-presentation.md) BP-48; retail observation remains
+unverified. The MapMode respawn policy below retains the reference behaviour.
 
 ## EAWR contract
 
@@ -149,7 +153,7 @@ With `idle`:
   path and the report names `clip_absent`, `clip_decode_failed`,
   `clip_binding_failed` or `clip_rate_unsupported` (a frame rate that is not
   integral, which the exact clock below cannot sample). The clip choice is an
-  EAWR observation of the corpus naming, not a source rule; A-04 stays open.
+  EAWR observation of the corpus naming, not a source rule; see A-04.
 - **Admission.** Bind-pose admission (`plan_map_effects`) is unchanged. A
   bind-hidden proxy stays unadmitted and gets no capacity. When its bone is
   bind-hidden and the clip shows it, the report counts
@@ -233,6 +237,6 @@ With `idle`:
 | A-01 | The reference scans every animation frame in the update window (V-03, V-04). | EAWR reads the visibility of each presentation sample from `Player::sample` (EffectMode) or `Player::sample_tick` (MapMode, exact frame index). A hidden interval shorter than one sample step can be missed, and so can a visible one. Samples at 1/30 s over clips at 30 fps or slower cover every clip frame; on EffectMode's binary32 clock a loop whose duration is not exact can read a sample one frame early. |
 | A-02 | The reference advances an instance before it kills it, and back-dates a new spawn to the visible frame (V-02, V-04). | EAWR detaches before the advance, the same order as `--eawr-effect-detach-frame`, and starts a new generation with a zero-delta advance at the sample time. Timing differs by at most one sample. |
 | A-03 | Spawning also depends on the proxy's static visibility flag and its ALT/LOD selection (V-04, V-07). `ResetAnimation` kills proxies whose bind visibility is hidden. | Not modelled in the helper or in EffectMode. MapMode's admission already classifies hidden proxies; any ALT/LOD selection belongs to its owner. |
-| A-04 | The shipped game's proxy-visibility behaviour and reappearance rule were not observed. | Only the reference rule is implemented. No original-game fidelity is claimed. |
+| A-04 | BP-48 establishes the debug-build reset on reappearance; retail observation remains unverified. | MapMode retains the reference respawn policy; matching the reset there needs code. |
 | A-05 | The reference keeps any number of drains alive. | EAWR bounds drains per attachment (default 8). A drain cut short by the bound is released early and counted. |
 | A-06 | The reference's owner is `RenderObject`, and every attached proxy of a live object goes through V-02 to V-04. | EffectMode drives the helper, and MapMode does for admitted land attachments of placements with a bound idle clip, only under `--eawr-map-effect-animation idle`. The clip is an EAWR corpus-naming observation, not the original's clip selection. MapMode draws the mesh in bind pose. Hardpoint, death and proxy-replacement owners are not wired: MapMode has no event source for them (see G-02 in particle-system-detach.md). |

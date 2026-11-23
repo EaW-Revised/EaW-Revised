@@ -389,6 +389,94 @@ void siphon_generic_capture(const eawr::sim::PartitionExecutor& pool) {
     auto kept = take(Game::create(named)); submit(kept, move(named)); (void)take(kept.step(pool)); finish(kept, pool);
     expect(economy_row(kept.galaxy(), enemy_planet)->siphon.active, "a named hero is not captured by that planet flag");
 }
+// Counts every command refusal the seat is told about while the fleet is still travelling and on its arrival step.
+template <class Session> unsigned refusals_until_arrival(Session& game, const eawr::sim::PartitionExecutor& pool) {
+    unsigned count{};
+    const auto tally = [&] {
+        for (const auto& event : world(game).snapshot()->events()) if (event.kind == gc::GalacticEventKind::command_rejected) ++count;
+    };
+    tally();
+    for (unsigned tick = 0; tick < 100; ++tick) {
+        const auto rows = world(game).snapshot()->fleets();
+        if (std::none_of(rows.begin(), rows.end(), [](const auto& row) { return row.motion.transit.has_value(); })) return count;
+        (void)take(game.step(pool)); tally();
+    }
+    expect(false, "travel terminates within fixture bound");
+    return count;
+}
+// #8102: a hero that authors a corruption removal next to its siphon (both ground-activated, removal listed first) is refused
+// by the removal on an uncorrupted enemy planet before the siphon goes through. The seat must not be told about that
+// sibling refusal when the drop worked; a drop where nothing goes through still says so.
+void siphon_sibling_refusal(const eawr::sim::PartitionExecutor& pool) {
+    const auto with_removal = [](gc::GalacticSetup config) {
+        auto& profile = config.ability_host->profiles[0];
+        gc::RemovalAbilityProfile removal; removal.name = "MOD_REMOVAL"; removal.text_identity = "TEXT_MOD_REMOVAL"; removal.hero = true;
+        profile.removal = removal;
+        profile.ground_activated = {gc::AbilityKind::remove_corruption, gc::AbilityKind::credit_siphon};
+        config.ability_host->activated_removal_abilities = {"MOD_REMOVAL"};
+        return config;
+    };
+    for (const bool sibling : {false, true}) {
+        auto config = sibling ? with_removal(siphon_setup(false)) : siphon_setup(false);
+        if (!sibling) config.ability_host->profiles[0].named = false; // the vanilla smuggler company: a generic, siphon only
+        auto game = take(Game::create(config)); submit(game, move(config)); (void)take(game.step(pool));
+        const auto refusals = refusals_until_arrival(game, pool);
+        const auto row = economy_row(game.galaxy(), enemy_planet);
+        expect(row && row->siphon.active && row->siphon.recipient == 2 && !alive(game.galaxy(), first),
+            sibling ? "a hero with a sibling removal still deploys its siphon" : "the vanilla siphon company deploys and is consumed");
+        expect(refusals == 0, sibling ? "no refusal reaches the seat once the siphon went through (hero with a sibling removal)"
+            : "the vanilla siphon company is never refused");
+    }
+    auto taken = with_removal(siphon_setup(false));
+    taken.economy_corruption->planets[0].siphon = {true, 1, fraction(1, 2), 1000000};
+    auto refused = take(Game::create(taken)); submit(refused, move(taken)); (void)take(refused.step(pool));
+    expect(refusals_until_arrival(refused, pool) > 0 && alive(refused.galaxy(), first),
+        "a drop where no ability goes through is still refused to the seat");
+}
+// #8102 / WGCH-70/40: the consumed bearer is scheduled with the siphon's own authored absence; an unauthored (or nonpositive)
+// pair selects the default hero absence. The return is forced (WGCH-210): the second bearer in the carrier stays alive and
+// does not block it.
+void siphon_authored_respawn(const eawr::sim::PartitionExecutor& pool) {
+    struct Case { Fx low, high; };
+    const auto frames = [](Fx seconds) { return static_cast<std::uint64_t>(seconds.trunc_to_integer()) * 30U; };
+    for (const auto& c : {Case{ability_fixture::whole(300), ability_fixture::whole(300)}, Case{}, Case{ability_fixture::whole(0), ability_fixture::whole(300)},
+        Case{ability_fixture::whole(100), ability_fixture::whole(200)}}) {
+        auto config = siphon_setup(false);
+        auto& ability = *config.ability_host->profiles[0].siphon; ability.respawn_minimum = c.low; ability.respawn_maximum = c.high;
+        auto game = take(Game::create(config)); submit(game, move(config)); (void)take(game.step(pool)); finish(game, pool);
+        const auto& heroes = game.return_state().heroes;
+        expect(heroes.size() == 1 && heroes[0].defeated == first && !alive(game.galaxy(), first) && alive(game.galaxy(), second),
+            "a consumed siphon bearer is scheduled to return although its companion lives on");
+        if (heroes.size() != 1) continue;
+        const auto delay = heroes[0].deadline - heroes[0].start_frame;
+        const bool authored = c.low.raw() > 0 && c.high.raw() > 0;
+        if (!authored) expect(delay == frames(ability_fixture::whole(360)), "an unauthored or nonpositive absence selects the default hero absence");
+        else if (c.low == c.high) expect(delay == frames(c.low), "an authored fixed absence schedules the return after exactly that time");
+        else expect(delay >= frames(c.low) && delay <= frames(c.high), "an authored range samples the absence inside it");
+    }
+    // Leave and return: a short authored absence ends, the creation seam is asked for the hero, and the record is gone.
+    auto config = siphon_setup(false);
+    auto& ability = *config.ability_host->profiles[0].siphon; ability.respawn_minimum = ability.respawn_maximum = ability_fixture::whole(1);
+    auto game = take(Game::create(config));
+    unsigned placed = 0; eawr::sim::EntityId placed_hero{};
+    game.set_hero_placement([&](const auto& record, auto) { ++placed; placed_hero = record.defeated; return eawr::core::Result<bool>::success(true); });
+    submit(game, move(config)); (void)take(game.step(pool)); finish(game, pool);
+    expect(game.return_state().heroes.size() == 1 && placed == 0, "the consumed bearer waits out its absence");
+    for (unsigned tick = 0; tick < 200 && !game.return_state().heroes.empty(); ++tick) (void)take(game.step(pool));
+    expect(placed == 1 && placed_hero == first && game.return_state().heroes.empty(), "the bearer is returned when its absence ends");
+    // The wider pair draws a second synchronized value: identical on 1/2/4/8 workers.
+    std::vector<std::uint64_t> deadlines;
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter threads(workers);
+        auto wide = siphon_setup(false);
+        auto& range = *wide.ability_host->profiles[0].siphon;
+        range.respawn_minimum = ability_fixture::whole(100); range.respawn_maximum = ability_fixture::whole(200);
+        auto again = take(Game::create(wide)); submit(again, move(wide)); (void)take(again.step(threads)); finish(again, threads);
+        deadlines.push_back(again.return_state().heroes.empty() ? 0 : again.return_state().heroes[0].deadline);
+    }
+    expect(deadlines.front() != 0 && std::all_of(deadlines.begin(), deadlines.end(), [&](auto value) { return value == deadlines.front(); }),
+        "a sampled absence is identical on 1/2/4/8 workers");
+}
 void siphon_workers_and_validation() {
     const auto low = fraction(1, 4), high = fraction(3, 4);
     const auto config = siphon_setup(false, low, high);
@@ -423,6 +511,7 @@ int case_galactic_ability_travel_tests() {
         final_and_save(pool); clear_and_stale(pool); paths_launch_merge(pool); destruction_uses_qualified_bearer(pool);
         consumed_spy_arrival();
         siphon_viewer_admission(pool); siphon_arrival(pool); siphon_refusals(pool); siphon_generic_capture(pool);
+        siphon_sibling_refusal(pool); siphon_authored_respawn(pool);
         siphon_workers_and_validation();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

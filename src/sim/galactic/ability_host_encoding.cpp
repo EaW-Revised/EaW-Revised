@@ -119,7 +119,7 @@ std::optional<PreparedAbility> decode_prepared_ability(std::span<const std::uint
     p.absence = math::Fixed::from_raw(absence); p.owned = owned != 0; return p;
 }
 void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilitySetup& setup) {
-    put_u32(out, 13); put_i64(out, setup.default_hero_absence.raw()); // WGCH-200: per-planet policy replaces tutorial admission
+    put_u32(out, 14); put_i64(out, setup.default_hero_absence.raw()); // WGCH-200: per-planet policy replaces tutorial admission
     put_u32(out, static_cast<std::uint32_t>(setup.profiles.size()));
     for (const auto& p : setup.profiles) {
         put_u8(out, static_cast<std::uint8_t>(p.ground_activated.size()));
@@ -136,6 +136,7 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
             const auto& s = *p.siphon;
             text_value(out, s.name); text_value(out, s.text_identity);
             put_i64(out, s.minimum.raw()); put_i64(out, s.maximum.raw()); put_u32(out, s.cycles);
+            put_i64(out, s.respawn_minimum.raw()); put_i64(out, s.respawn_maximum.raw());
             put_u8(out, s.initially_enabled ? 1 : 0); put_u8(out, s.causes_despawn ? 1 : 0); put_u8(out, s.hero ? 1 : 0);
         }
         put_u8(out, p.spy ? 1 : 0);
@@ -226,7 +227,7 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
 }
 std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::uint8_t> bytes) {
     sim::detail::Reader in(bytes); GalacticAbilitySetup result; std::uint32_t version{}, count{}; std::int64_t value{};
-    if (!in.read_u32(version) || version != 13 || !in.read_i64(value)
+    if (!in.read_u32(version) || version != 14 || !in.read_i64(value)
         || !in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 32) return {};
     result.default_hero_absence = math::Fixed::from_raw(value); TypeId previous{};
     for (std::uint32_t i = 0; i < count; ++i) {
@@ -253,12 +254,14 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
         std::uint8_t has_siphon{};
         if (!in.read_u8(has_siphon) || has_siphon > 1) return {};
         if (has_siphon) {
-            auto& s = p.siphon.emplace(); std::int64_t low{}, high{}; std::uint8_t enabled{}, consumes{}, hero{};
+            auto& s = p.siphon.emplace(); std::int64_t low{}, high{}, absence_low{}, absence_high{}; std::uint8_t enabled{}, consumes{}, hero{};
             if (!text_value(in, s.name) || s.name.empty() || !text_value(in, s.text_identity) || s.text_identity.size() > 1024
                 || !in.read_i64(low) || low < 0 || !in.read_i64(high) || high > math::Fixed::scale || low > high
-                || !in.read_u32(s.cycles) || !in.read_u8(enabled) || enabled > 1
+                || !in.read_u32(s.cycles) || !in.read_i64(absence_low) || !in.read_i64(absence_high) || absence_low > absence_high
+                || !in.read_u8(enabled) || enabled > 1
                 || !in.read_u8(consumes) || consumes > 1 || !in.read_u8(hero) || hero > 1) return {};
             s.minimum = math::Fixed::from_raw(low); s.maximum = math::Fixed::from_raw(high);
+            s.respawn_minimum = math::Fixed::from_raw(absence_low); s.respawn_maximum = math::Fixed::from_raw(absence_high);
             s.initially_enabled = enabled != 0; s.causes_despawn = consumes != 0; s.hero = hero != 0;
         }
         std::uint8_t has_spy{};

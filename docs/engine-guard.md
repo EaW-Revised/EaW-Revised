@@ -27,7 +27,10 @@ branch eawr/4.7.2-stable, built with `BUILD_NAME=eawr`.
      player exe; update these at the same time:
      - `PINNED_GODOT_SHA256` in `tools/release/package_release.py`;
      - the zip pins in `tools/release/fetch_pinned_godot.ps1`;
-     - `pinned_player_engine_sha256` in `include/eawr/presentation/engine_signature.hpp` (the GUI exe's hash).
+     - `pinned_player_engine_sha256_windows_x64` in `include/eawr/presentation/engine_signature.hpp` (the GUI exe's hash);
+     - for the Linux player: `PINNED_GODOT_SHA256_LINUX` in `tools/release/package_release.py` and
+       `pinned_player_engine_sha256_linux_x64` in the same header (the `eawr-*-linux-x64` entry's `godot.linuxbsd.editor.x86_64`;
+       the viewer prints the one of its own platform as the expected hash).
   3. For a new fork commit, add its short hash to `patched_engine_commits` in `engine_signature.hpp`
      (`tests/ci/test_engine_signature_pins.py` keeps the two in sync), then run `ci_engine_guard`,
      `ci_engine_signature_pins` and `ui_engine_signature_contracts`.

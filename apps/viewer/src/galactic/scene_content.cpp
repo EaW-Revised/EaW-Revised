@@ -148,6 +148,7 @@ std::map<std::string, ProductionArt> load_production_art(
         // GBT-04, GBT-05: the facts the build tray groups by. A squadron's craft and a company's members count (PL-13).
         art.category_names = split_names(fields.text("CategoryMask"));
         art.behaviors = split_names(fields.text("Behavior"));
+        art.encyclopedia_class = fields.text("Encyclopedia_Unit_Class");
         for (const auto* member : fields.list("Squadron_Units", data::retail::ListRule::replace_by_variant_all))
             for (auto& name : split_names(member->raw_text)) art.members.push_back(std::move(name));
         for (const auto* member : fields.list("Company_Units", data::retail::ListRule::append))
@@ -173,6 +174,9 @@ presentation::ui::build_tray::TypeIndex build_tray_types(const std::map<std::str
         facts.categories = type.category_names;
         facts.members = type.members;
         facts.building_role = presentation::ui::build_tray::has_building_behavior(type.behaviors);
+        // GBT-05: the class key and the mod's own text for it (the card's class line), the header of a split group.
+        facts.encyclopedia_class = type.encyclopedia_class;
+        facts.class_text = type.encyclopedia_looks.unit_class;
         index.add(std::move(facts));
     }
     return index;

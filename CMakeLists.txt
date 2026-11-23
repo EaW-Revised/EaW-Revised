@@ -47,6 +47,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(EawrWarnings)
 include(EawrMsvcMp)
+# Debug configurations use the static release runtime unless EAWR_DEBUG_CRT is ON (cmake/EawrMsvcRuntime.cmake).
+include(EawrMsvcRuntime)
 # The owner's reserve switch: no local configure, build (of any target) or CTest while it is on.
 include(EawrReserveGuard)
 # An MSVC that drops the guard in front of a shift crashes the first Lua state (legacy #3930, #1287).

@@ -110,7 +110,8 @@ void register_story_plot_bindings(ScriptScheduler& scripts, StoryPlotAccess host
         add(scripts.register_method(handle_story_plot, name, [host, op](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
             const auto* self = arguments.empty() ? nullptr : as_handle(arguments[0], handle_story_plot);
             const auto* plot = self && host() ? plot_of(*host(), *self) : nullptr;
-            if (!plot || arguments.size() != 1) return fail("plot method expects a loaded plot and no arguments");
+            if (!plot || (op != Op::suspend && arguments.size() != 1))
+                return fail("plot method expects a loaded plot and no arguments");
             stage_plot(context, op, plot->name, {}, 0, {});
             return none();
         }));

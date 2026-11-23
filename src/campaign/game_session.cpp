@@ -924,6 +924,25 @@ core::Result<std::string> GameSession::Impl::hash() {
     return core::Result<std::string>::success(with_timeline(with_summary(story, interactive_seat, summary_conflict), *timelines, bool(native_ai.state)));
 }
 
+std::string GameSession::Impl::hash_components() {
+    const auto part = [](const char* name, const std::string& value) {
+        return std::string(" ") + name + "=" + (value.empty() ? std::string("none") : value.substr(0, 12));
+    };
+    const auto text = [](auto&& result) { return result ? std::string(result.value()) : std::string{}; };
+    std::string out;
+    if (child) {
+        out += part("child.galaxy", child->galaxy_hash) + part("parent.now", text(galaxy_hash())) + part("child.world", child->world_hash.get())
+            + part("child.script", child->script_hash) + part("child.context", child_context_hash());
+    } else {
+        out += part("galaxy", text(galaxy_hash()));
+    }
+    out += part("base", text(base_hash())) + part("native", text(native_hash())) + part("story", story_engine ? story_engine->digest() : std::string{})
+        + part("conflict_service", conflict_services ? "yes" : "");
+    out += std::string(" timeline.galaxy=") + std::to_string(timelines->galaxy.value) + " child_timeline=" + (timelines->child ? "1" : "0")
+        + " historical=" + (timelines->historical ? "1" : "0") + part("total", text(hash()));
+    return out;
+}
+
 BattleResult GameSession::Impl::result() const {
     BattleResult out;
     const auto& world = child->session.world();
@@ -1143,7 +1162,10 @@ core::Result<void> GameSession::configure_galactic_ai_services(GalacticAiFactory
 }
 core::Result<void> GameSession::restore_planet_access(std::span<const std::uint8_t> bytes) {
     if (impl_->failure || impl_->native_ai.state) return fail<void>("planet access must precede native AI reconstruction");
-    return impl_->world().restore_planet_access(bytes);
+    auto restored = impl_->world().restore_planet_access(bytes);
+    // Planet access is part of the parent's galaxy hash: a child kept the value from before it, so re-read it.
+    if (restored && impl_->child) impl_->child->galaxy_hash = impl_->galaxy_hash().value();
+    return restored;
 }
 core::Result<void> GameSession::configure_native_replay_owners(NativeReplayConfigurator configure) {
     if (impl_->failure || !configure) return fail<void>("native reconstruction requires a typed owner configurator");
@@ -1178,7 +1200,11 @@ core::Result<void> GameSession::restore_galactic_ai(const GalacticAiSave& save) 
     if (!save.state) return core::Result<void>::success();
     auto encoded = script::foc::galactic_ai::encode_native_state(*save.state);
     if (!encoded) return core::Result<void>::failure(encoded.error());
-    return impl_->native_ai.state->restore(*save.state);
+    auto restored = impl_->native_ai.state->restore(*save.state);
+    // The parent's galaxy hash covers the AI's synchronization digest, which the restore above just replaced: a child kept the
+    // value from before it, so re-read it (the other restore steps that move the parent do the same).
+    if (restored && impl_->child) impl_->child->galaxy_hash = impl_->galaxy_hash().value();
+    return restored;
 }
 core::Result<void> GameSession::install_galactic_scripts(authoritative::ScriptScheduler ai,
     authoritative::ScriptScheduler story, const std::optional<authoritative::GalacticScriptSave>& saved,
@@ -1283,6 +1309,8 @@ core::Result<void> GameSession::restore_return_state(const std::span<const std::
     if (!saved) return core::Result<void>::failure(saved.error());
     impl_->return_state = std::move(saved).value();
     impl_->world().sync_victory_hero_returns(impl_->return_state.heroes);
+    // The hero returns move the parent world: a child kept its galaxy hash from before them, so re-read it.
+    if (impl_->child) impl_->child->galaxy_hash = impl_->galaxy_hash().value();
     return core::Result<void>::success();
 }
 core::Result<void> GameSession::set_interactive_seat(galactic::SeatId observer) {
@@ -1407,6 +1435,7 @@ GalacticParentQueryFactory GameSession::conflict_parent_queries(BattleLayer laye
     };
 }
 void GameSession::set_auto_resolver(AutoResolver resolve) { impl_->auto_resolver = std::move(resolve); }
+bool GameSession::has_auto_resolver() const noexcept { return static_cast<bool>(impl_->auto_resolver); }
 void GameSession::set_auto_resolve_checkpoint_services(AutoResolveStateWriter writer, AutoResolveStateReader reader) {
     impl_->auto_state_writer = std::move(writer); impl_->auto_state_reader = std::move(reader);
 }
@@ -1502,6 +1531,7 @@ core::Result<void> GameSession::restore_actor_representations(std::span<const st
     if (restored && impl_->child) impl_->child->galaxy_hash = impl_->galaxy_hash().value();
     return restored;
 }
+std::string GameSession::hash_components() const { return impl_->hash_components(); }
 std::string GameSession::state_sha256() const { auto hash = impl_->hash(); return hash ? std::move(hash).value() : std::string{}; }
 core::Result<int> GameSession::timeline(ModeId id) const {
     if (id == ModeId{SessionMode::galaxy, 0}) return core::Result<int>::success(impl_->timelines->galaxy.value);

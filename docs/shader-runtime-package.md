@@ -7,9 +7,11 @@ The package uses separate unmodified vkd3d 2.1 and SPIRV-Cross
 ABI 0.61.0. No import library, private compiler representation or CLI output is
 an application interface. The package has no player-time downloader.
 
-`Runtime` starts disabled. Nothing currently calls it from renderer admission or
-mod activation. An explicit future activation job can call `open` with the
-package directory. Missing, replaced, incomplete, unsupported-platform,
+Shader translation is opt-in with `--eawr-shader-translation`; renderer admission
+and mod activation call the runtime when enabled. Mod shader bytes reach the
+third-party translators in process, so this is an untrusted-input parser path and
+requires a security review before any default-on decision. Missing, replaced,
+incomplete, unsupported-platform,
 missing-export and ABI-mismatched packages return a diagnostic and leave hand
 adapters available. Developer builds compile and run without the optional
 package or upstream development headers. The normal build never fetches it.

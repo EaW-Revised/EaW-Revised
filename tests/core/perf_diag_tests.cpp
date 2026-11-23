@@ -29,13 +29,26 @@ std::atomic<std::uint64_t> allocations{0};
 
 } // namespace
 
+namespace {
+
+// Out of line on purpose: GCC 14 flags std::free reached through an inlined replacement operator delete as a mismatched
+// new/delete pair even though the replacement operator new below allocates with std::malloc.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
+void release_memory(void* const memory) noexcept {
+    std::free(memory);
+}
+
+} // namespace
+
 void* operator new(const std::size_t size) {
     if (counting.load(std::memory_order_relaxed)) allocations.fetch_add(1, std::memory_order_relaxed);
     if (void* const memory = std::malloc(size == 0 ? 1 : size)) return memory;
     throw std::bad_alloc();
 }
-void operator delete(void* const memory) noexcept { std::free(memory); }
-void operator delete(void* const memory, std::size_t) noexcept { std::free(memory); }
+void operator delete(void* const memory) noexcept { release_memory(memory); }
+void operator delete(void* const memory, std::size_t) noexcept { ::operator delete(memory); }
 
 namespace {
 

@@ -34,7 +34,8 @@ if(EAWR_GODOT_CPP_LIBRARY)
         target_compile_options(godot-cpp INTERFACE /utf-8 /Zc:__cplusplus)
         target_compile_definitions(godot-cpp INTERFACE
             WINDOWS_ENABLED TYPED_METHOD_BIND NOMINMAX GDEXTENSION _HAS_EXCEPTIONS=0 THREADS_ENABLED)
-        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/EawrMsvcRuntime.cmake")
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "${EAWR_MSVC_RUNTIME}")
     else()
         target_compile_definitions(godot-cpp INTERFACE
             GDEXTENSION LINUX_ENABLED UNIX_ENABLED THREADS_ENABLED)

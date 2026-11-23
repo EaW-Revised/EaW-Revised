@@ -228,6 +228,8 @@ public:
     virtual void restore_live_ship(GodotRenderer& renderer, std::size_t ship) = 0;
     virtual void retire_live_ship(GodotRenderer& renderer, std::size_t ship, bool reusable = false) = 0;
     virtual void set_live_opacity(GodotRenderer& renderer, std::size_t ship, float opacity) = 0;
+    virtual void set_live_colour(GodotRenderer& renderer, std::size_t ship,
+        const std::optional<std::array<std::uint8_t, 3>>& colour) = 0;
     virtual void set_shield_time(GodotRenderer& renderer, float seconds) = 0;
     virtual void trace_frames(bool enabled) noexcept = 0;
 };

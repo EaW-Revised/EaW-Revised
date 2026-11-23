@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -166,7 +167,16 @@ void human_side_round_trip() {
         auto third_side = written.value();
         third_side[first_seat + (shape.count - 1) * 18 + 14] = 3;
         third_side[first_seat + (shape.count - 2) * 18 + 14] = 2;
-        expect(parse_fails(third_side, codes::invalid_setup), "a third explicit human side is refused on load");
+        // #8071: a third explicit human side is a valid setup now (one faction per side is the seat policy's rule).
+        auto three_sides = record;
+        three_sides.setup.seats[shape.count - 1].human_side_id = 3;
+        three_sides.setup.seats[shape.count - 2].human_side_id = 2;
+        const auto reparsed = galactic::parse_replay(third_side);
+        expect(reparsed && reparsed.value() == three_sides, "a third explicit human side parses on load");
+        if (reparsed) {
+            const auto rewritten = galactic::write_replay(reparsed.value());
+            expect(rewritten && rewritten.value() == third_side, "a third explicit human side round trips byte for byte");
+        }
         if (shape.count == 8) {
             auto ninth_human = written.value();
             ninth_human[first_seat + 8 * 18 + 8] = static_cast<std::uint8_t>(galactic::SeatKind::human);
@@ -174,6 +184,21 @@ void human_side_round_trip() {
             expect(parse_fails(ninth_human, codes::invalid_setup), "a ninth human is refused on load");
         }
     }
+}
+
+// Eight human versus sides, one faction each, and one AI faction: the largest versus roster (#8071).
+void eight_human_sides_round_trip() {
+    const auto setup = galactic::synthetic_galaxy({.players = galactic::galactic_max_human_sides + 1, .human_sides = galactic::galactic_max_human_sides});
+    std::set<galactic::HumanSideId> sides;
+    for (const auto& seat : setup.seats) if (seat.kind == galactic::SeatKind::human) sides.insert(seat.human_side_id);
+    expect(sides.size() == galactic::galactic_max_human_sides, "the synthetic galaxy seats the cap's worth of human sides");
+    const GalacticReplay record{setup, 1, {}};
+    const auto written = galactic::write_replay(record);
+    expect(static_cast<bool>(written), "an eight-side replay writes");
+    if (!written) return;
+    const auto parsed = galactic::parse_replay(written.value());
+    expect(parsed && parsed.value() == record && static_cast<bool>(GalacticSession::from_replay(parsed.value())),
+        "an eight-side replay round trips and starts a session");
 }
 
 void submission_order() {
@@ -343,9 +368,10 @@ void refusals() {
         copy.setup.seats.clear();
         for (std::uint32_t id = 1; id <= 9; ++id) copy.setup.seats.push_back({{id}, 1, galactic::SeatKind::human, id - 1, true, 1});
     });
-    invalid("three human sides in a replay", codes::invalid_setup, [](GalacticReplay& copy) {
-        copy.setup.seats.push_back({{3}, 1, galactic::SeatKind::human, 2, true, 3});
-    });
+    auto three_sides = replay;
+    three_sides.setup.seats.push_back({{3}, 1, galactic::SeatKind::human, 2, true, 3});
+    expect(static_cast<bool>(galactic::write_replay(three_sides)) && static_cast<bool>(GalacticSession::from_replay(three_sides)),
+        "three human sides in a replay are written and start a session (#8071)");
     // A tactical command with a conflict is a valid record; the galaxy itself refuses it.
     auto with_battle = replay;
     with_battle.commands.push_back({{5, {1}, 3}, galactic::TacticalLayerCommand{7, 3, {9, 9}}});
@@ -363,6 +389,7 @@ int case_galactic_replay_tests() {
     payloads();
     refusals();
     human_side_round_trip();
+    eight_human_sides_round_trip();
     submission_order();
     live_equals_replay();
     if (failures != 0) {

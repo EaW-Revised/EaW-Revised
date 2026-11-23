@@ -22,7 +22,7 @@ mod list is data: `scan_config.json` profiles, with layers from `docs/tag-covera
    and GameObject scripts only when an XML file names them (an upper bound for the galactic object host). A script's calls
    include its literal `require` closure.
 4. **Bindings** (`bindings.py`, `cxx.py`): what a host binds is read from the C++ registration sites listed in its row
-   (file, optional function, registrar lambdas, `follow` helpers, name lists, the scheduler's infrastructure table) and the
+   (file, optional function, registrar lambdas, `follow` helpers, name lists, the scheduler's infrastructure table, and configured Lua prelude method assignments) and the
    list of names the host registers as fault-by-name stubs. The four tactical rows (object, space plan, story, evaluators) share one scheduler and read the same sites; the ground row
    has no bindings and is parked, so its demand is reported only. Adding a host is adding a row.
 5. **Matrix** (`scan.py`): per host x function x profile: call sites, scripts that call it themselves and through a

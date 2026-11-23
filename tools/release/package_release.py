@@ -49,6 +49,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import symbol_store  # noqa: E402
 sys.path.insert(0, str(ROOT / "tools" / "release"))
 import godot_linux_import  # noqa: E402
+sys.path.insert(0, str(ROOT / "tools" / "offload"))
+import linux_glibc_floor  # noqa: E402
 import launcher_artifact  # noqa: E402
 import update_manifest  # noqa: E402
 from shader_runtime_package import package as shader_runtime_package  # noqa: E402
@@ -58,7 +60,7 @@ TOOLS = ("sim_headless", "sim_bench", "path_bench", "asset_scan", "asset_validat
 DOCS = ("LICENSE", "THIRD_PARTY_NOTICES.md")
 VIEWER_PROJECT = ROOT / "apps" / "viewer" / "project"
 PLATFORMS = {
-    "linux-x64": {"exe": "", "extension": "libeawr_viewer.linux.template_release.x86_64.so"},
+    "linux-x64": {"exe": "", "extension": "libeawr_viewer.linux.template_release.x86_64.so", "player_os": "linux"},
     "linux-arm64": {"exe": "", "extension": "libeawr_viewer.linux.template_release.arm64.so"},
     "windows-x64": {"exe": ".exe", "extension": "libeawr_viewer.windows.template_release.x86_64.dll"},
 }
@@ -67,6 +69,13 @@ PLATFORMS = {
 # The player folder (#3961): the launcher exe at its root, the pinned Godot beside it, the viewer project.
 PLAYER_LAUNCHER = "EAWR.exe"
 PLAYER_GODOT = "godot/Godot_v4.7.2-stable_win64.exe"
+# The Linux x64 player (same layout minus the launcher exe): the patched Linux editor build and play.sh at the root.
+PLAYER_GODOT_LINUX = "godot/godot.linuxbsd.editor.x86_64"
+PLAYER_LAUNCHER_LINUX = "play.sh"
+PLAYER_SCRIPT_LINUX = ROOT / "tools/release/play.sh"
+LINUX_README_BLOCK = ROOT / "tools/release/readme-linux-player.md"
+# Zip entries that must extract executable (a zip written on Windows has no mode bits otherwise).
+EXECUTABLE_MODE = 0o755
 PLAYER_SUMS = "SHA256SUMS"
 REVISED_LAYER_RELPATH = Path("Revised")
 REVISED_LAYER_MANIFEST = ROOT / "tools/release/revised-layer-manifest.json"
@@ -75,6 +84,8 @@ REVISED_LAYER_README = "The Revised voice and hotkey layer is included and enabl
 # third_party/godot/README.md), not only report its version. The maintainer-only remote-run tooling keeps pinning the
 # stock official exe for its probes, so the two pins differ on purpose.
 PINNED_GODOT_SHA256 = "96c03783011f197aff146e92c1e33e0000e8975b3a873fbfcc52cd86dff12b7f"
+# The same fork commit built for Linux x64 (tools/engine_pins.json eawr-5b733a90f-linux-x64, glibc 2.38 floor).
+PINNED_GODOT_SHA256_LINUX = "3faca5ebc469ee3c2bcee1da59337233660df0c2a644699f04c139da891f0c50"
 DEBUG_GUIDE = ROOT / "docs" / "debug-build.md"
 PLAYER_GUIDE = ROOT / "docs" / "player-guide.md"
 IMPORT_TIMEOUT_SECONDS = 180
@@ -200,8 +211,71 @@ def godot_import(godot: Path, project: Path) -> Optional[str]:
     return f"exit {result.returncode}: {(result.stdout + result.stderr)[-400:]}"
 
 
+def is_linux_player(spec: dict) -> bool:
+    return spec.get("player_os") == "linux"
+
+
+def player_engine(spec: dict) -> tuple[str, str]:
+    """(relative path in the player folder, pinned SHA-256) of the engine this platform's player ships."""
+    if is_linux_player(spec):
+        return PLAYER_GODOT_LINUX, PINNED_GODOT_SHA256_LINUX
+    return PLAYER_GODOT, PINNED_GODOT_SHA256
+
+
+LINUX_PLAYER_FLOOR = ROOT / "config" / "linux-player-floor.json"
+
+
+def validate_linux_viewer(source: Path, expect_commit: Optional[str], floor_file: Path = LINUX_PLAYER_FLOOR) -> None:
+    """Refuse a Linux viewer extension that is not the verified output of the native Linux viewer leg.
+
+    The leg writes manifest.json beside the .so (tools/offload/linux_viewer_manifest.py). Here: the manifest must exist and
+    name this file, the SHA-256 must match the bytes, the build commit must be the packaged commit, and the .so's own glibc and
+    GLIBCXX needs (read from the file, not trusted from the manifest) must be within config/linux-player-floor.json.
+    """
+    import json as _json
+    manifest_path = source.parent / "manifest.json"
+    try:
+        manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"the Linux viewer extension has no readable manifest.json beside it ({manifest_path}): {error}")
+    if manifest.get("file") != source.name:
+        raise ValueError(f"manifest.json describes {manifest.get('file')!r}, not {source.name}")
+    if manifest.get("sha256") != sha256_file(source):
+        raise ValueError(f"{source.name} does not match the sha256 in its manifest.json (changed after the viewer leg)")
+    if expect_commit is not None and manifest.get("commit") != expect_commit:
+        raise ValueError(f"{source.name} was built from {manifest.get('commit')}, not the packaged commit {expect_commit}")
+    floor = _json.loads(floor_file.read_text(encoding="utf-8"))
+    try:
+        info = linux_glibc_floor.inspect(source)
+    except linux_glibc_floor.ElfError as error:
+        raise ValueError(f"{source.name} is not a readable Linux library: {error}")
+    problems = linux_glibc_floor.check(info, floor["glibc"], floor["glibcxx"],
+                                       linux_glibc_floor.DEFAULT_NEEDED + tuple(floor.get("online_needed", ())))
+    if problems:
+        raise ValueError(f"{source.name} is outside the Linux player floor ({floor_file.name}): " + "; ".join(problems))
+
+
+def install_viewer_extension(spec: dict, source: Optional[Path], expect_commit: Optional[str] = None) -> None:
+    """Place a separately built viewer extension (the Linux .so from the native Linux viewer leg) in the project's bin/.
+
+    The Linux extension is not built by the cross route that packages the player, so it arrives as an input path. Its
+    build identity is then checked like any other shipped binary (identity_binaries).
+    """
+    if source is None:
+        return
+    if not source.is_file():
+        raise FileNotFoundError(f"--linux-viewer does not exist: {source}")
+    if source.name != spec["extension"]:
+        raise ValueError(f"the viewer extension for this platform must be named {spec['extension']}, not {source.name}")
+    validate_linux_viewer(source, expect_commit)
+    target = VIEWER_PROJECT / "bin" / spec["extension"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.resolve() != target.resolve():
+        shutil.copyfile(source, target)
+
+
 def pinned_runtime_identity(godot: Path) -> tuple[str, str]:
-    """The identity of the shipped Windows exe without running it (a Linux host cannot run it, and must not need Wine).
+    """The identity of the shipped exe without running it (a Linux host cannot run the Windows one, and must not need Wine).
 
     The caller has checked the exe's SHA-256 against the pin; the fork commit that pin was built from must also be embedded
     in the bytes, so a pin that moved without the identity constant (or the reverse) is refused.
@@ -291,12 +365,21 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
     if (VIEWER_PROJECT / "cross-build-rig-only.json").exists():
         raise ValueError("cross-built viewer artifacts are for rig runs only")
     debug = debug_build_dir is not None
-    if godot.name.casefold() != Path(PLAYER_GODOT).name.casefold():
-        raise ValueError(f"--godot must be the standard GUI executable {Path(PLAYER_GODOT).name} (no console companion)")
+    linux = is_linux_player(spec)
+    player_godot, pinned_sha = player_engine(spec)
+    if godot.name.casefold() != Path(player_godot).name.casefold():
+        raise ValueError(f"--godot must be the standard GUI executable {Path(player_godot).name} (no console companion)")
+    if linux and (debug or launcher is not None or with_mods_manager or shader_runtime is not None):
+        raise ValueError("the Linux x64 player has no launcher, mods manager, shader runtime or debug variant")
     observed = sha256_file(godot)
-    if observed != PINNED_GODOT_SHA256:
-        raise ValueError(f"{godot.name} sha256 {observed} is not the pinned patched build {PINNED_GODOT_SHA256}")
-    if import_godot is not None:
+    if observed != pinned_sha:
+        raise ValueError(f"{godot.name} sha256 {observed} is not the pinned patched build {pinned_sha}")
+    if linux:
+        # The shipped Linux engine runs on the packaging host, so it writes the project metadata itself (no official editor).
+        identity, _ = pinned_runtime_identity(godot)
+        if import_godot is not None:
+            importer = godot_linux_import.importer(import_godot)
+    elif import_godot is not None:
         identity, _ = pinned_runtime_identity(godot)
         importer = godot_linux_import.importer(import_godot)
     else:
@@ -327,9 +410,13 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
             (project / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, project / relative)
         (folder / "godot").mkdir()
-        shutil.copyfile(godot, folder / PLAYER_GODOT)
+        shutil.copyfile(godot, folder / player_godot)
         launcher_sha = None
-        if launcher is not None:
+        if linux:
+            shutil.copyfile(PLAYER_SCRIPT_LINUX, folder / PLAYER_LAUNCHER_LINUX)
+            for name in (player_godot, PLAYER_LAUNCHER_LINUX):  # copyfile drops the mode; the import below runs the engine
+                (folder / name).chmod(EXECUTABLE_MODE)
+        elif launcher is not None:
             shutil.copyfile(launcher, folder / PLAYER_LAUNCHER)
             launcher_sha = sha256_file(launcher)
         else:
@@ -337,10 +424,16 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
         if with_mods_manager:
             shutil.copyfile(launcher_artifact.require_start_stub(launcher.parent), folder / "EAWR Mods.exe")
             launcher_artifact.install_manager(folder, mods_service, manager_artifact, launcher_pin)
-        preimport_project(folder / PLAYER_GODOT, project, importer)
+        preimport_project(folder / player_godot, project, importer)
         for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
             shutil.copyfile(ROOT / name, folder / name)
-        shutil.copyfile(PLAYER_GUIDE, folder / "README.md")
+        if linux:
+            # The Linux block leads: the guide's Start section below it describes the Windows launcher.
+            guide = PLAYER_GUIDE.read_text(encoding="utf-8")
+            (folder / "README.md").write_text(LINUX_README_BLOCK.read_text(encoding="utf-8").strip() + "\n\n---\n\n" + guide,
+                                              encoding="utf-8", newline="\n")
+        else:
+            shutil.copyfile(PLAYER_GUIDE, folder / "README.md")
         if readme_note:
             with (folder / "README.md").open("a", encoding="utf-8", newline="\n") as readme:
                 readme.write(f"\n{readme_note}\n")
@@ -374,6 +467,8 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
             "launcher_sha256": launcher_sha,
             "extension_sha256": sha256_file(extension),
         }
+        if linux:
+            runtime["platform"] = "linux-x64"
         if shader_runtime is not None:
             runtime["shader_runtime_manifest_sha256"] = sha256_file(folder / "shader-runtime" / "manifest.json")
         if debug:
@@ -394,7 +489,15 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
         player_zip = out / f"{stem}-{variant}.zip"
         with zipfile.ZipFile(player_zip, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in files:
-                archive.write(path, f"{top}/{path.relative_to(folder).as_posix()}")
+                relative = path.relative_to(folder).as_posix()
+                if not linux:
+                    archive.write(path, f"{top}/{relative}")
+                    continue
+                # Explicit unix modes: the engine and play.sh run after a plain unzip, everything else is data.
+                info = zipfile.ZipInfo.from_file(path, f"{top}/{relative}")
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (EXECUTABLE_MODE if relative in (player_godot, PLAYER_LAUNCHER_LINUX) else 0o644) << 16
+                archive.writestr(info, path.read_bytes())
     return player_zip
 
 
@@ -405,18 +508,22 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
             launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False,
             expect_identity: Optional[str] = None, shader_runtime: Optional[Path] = None,
             revised_layer: Optional[Path] = None, allow_missing_revised_layer: bool = False,
-            public: bool = False, readme_note: str = "", import_godot: Optional[Path] = None) -> list[Path]:
+            public: bool = False, readme_note: str = "", import_godot: Optional[Path] = None,
+            linux_viewer: Optional[Path] = None) -> list[Path]:
     if (VIEWER_PROJECT / "cross-build-rig-only.json").exists():
         raise ValueError("cross-built viewer artifacts are for rig runs only")
     spec = PLATFORMS[platform]
+    if linux_viewer is not None and platform != "linux-x64":
+        raise ValueError("--linux-viewer is the Linux x64 viewer extension: it needs --platform linux-x64")
+    install_viewer_extension(spec, linux_viewer, expect_identity)
     if shader_runtime is not None:
         if platform != "windows-x64":
             raise ValueError("shader runtime package is qualified for Windows x64 only")
         shader_runtime_package.verify(shader_runtime)
     if with_mods_manager and godot is None:
         raise ValueError("manager packaging needs the player folder (--godot)")
-    if godot is not None and platform != "windows-x64":
-        raise ValueError("the player folder is Windows x64 only for now")
+    if godot is not None and platform not in ("windows-x64", "linux-x64"):
+        raise ValueError("the player folder is Windows x64 and Linux x64 only (arm64 and macOS are not shipped)")
     verify_identity(expect_identity, identity_binaries(spec, build_dir, "Release", launcher, mods_service))
     verify_kit_label(read_kit_label(), identity_binaries(spec, build_dir, "Release", launcher, mods_service))
     out.mkdir(parents=True, exist_ok=True)
@@ -569,6 +676,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--linux-import-godot", type=Path,
                         help="the pinned official Linux Godot editor (tools/release/godot_linux_import.py): on a Linux host it writes "
                              "the project's .godot metadata, and the shipped Windows exe is never run (no Wine)")
+    parser.add_argument("--linux-viewer", type=Path,
+                        help="the Linux x64 viewer extension (libeawr_viewer.linux.template_release.x86_64.so) built by the native "
+                             "Linux viewer leg; --platform linux-x64 only")
     parser.add_argument("--launcher", type=Path, help="the launcher exe to place at the player folder's root as EAWR.exe")
     parser.add_argument("--expect-identity", metavar="SHA",
                         help="the full commit hash every shipped binary must embed as its build identity "
@@ -617,8 +727,10 @@ def main(argv: list[str]) -> int:
                     cache = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix="eawr-manager-pin-")))
                     args.launcher_artifact = launcher_artifact.prepare(args.mods_service, args.launcher,
                         args.launcher_artifact, args.launcher_pin, cache)
-                elif args.godot and not args.launcher:
+                elif args.godot and not args.launcher and args.platform != "linux-x64":
                     parser.error("--godot needs --launcher")
+                if args.platform == "linux-x64" and (args.launcher or args.debug):
+                    parser.error("the Linux x64 player has no launcher or debug variant (play.sh is built in)")
                 if args.platform == "windows-x64":
                     if args.no_symbols:
                         print(f"package_release: {NO_SYMBOLS_NOTE}: private symbols are not retained", file=sys.stderr)
@@ -644,7 +756,8 @@ def main(argv: list[str]) -> int:
                                     launcher_pin=args.launcher_pin, with_mods_manager=args.with_mods_manager,
                                     expect_identity=args.expect_identity, shader_runtime=args.shader_runtime, revised_layer=args.revised_layer,
                                     allow_missing_revised_layer=args.allow_missing_revised_layer, public=args.public,
-                                    readme_note=note, import_godot=args.linux_import_godot)
+                                    readme_note=note, import_godot=args.linux_import_godot,
+                                    linux_viewer=args.linux_viewer)
             if not args.debug:
                 if not args.sums_only:
                     player = next((f for f in files if f.name.endswith("-windows-x64-player.zip")), None)

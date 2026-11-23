@@ -1,6 +1,7 @@
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/battle/start.hpp"
+#include "eawr/campaign/mp_lobby_catalog.hpp"
 #include "eawr/campaign/standalone_replay.hpp"
 #include "eawr/campaign/space_rules.hpp"
 #include "eawr/campaign/starting_forces.hpp"
@@ -66,6 +67,43 @@ std::string key(std::string_view value);
 core::LoadNote unresolved_name_note(const data::Catalog&, const core::Diagnostic&, const std::string&, std::string_view);
 }
 bool StockNameSkips::contains(const std::string_view name) const { return names.contains(key(name)); }
+namespace {
+constexpr std::array<sim::tactical::AiLevel, 3> mp_levels{
+    sim::tactical::AiLevel::easy, sim::tactical::AiLevel::normal, sim::tactical::AiLevel::hard};
+// The CGS-26 stock names of the three levels, the same fallback a single-player start uses.
+constexpr std::array<std::string_view, 3> mp_stock_entries{"Easy_Default", "Normal_Default", "Hard_Default"};
+bool same_entry(const std::string_view a, const std::string_view b) { return !a.empty() && key(a) == key(b); }
+// The entries a player type runs at per level, as the runtime finds them: an entry whose adjustment the mounted
+// difficulty data does not define is left out (the runtime would play it as the engine default).
+MpLevelEntries mp_type_entries(const script::foc::AiDifficultyTable* table, const std::string_view type) {
+    return table ? table->level_entries(type) : MpLevelEntries{};
+}
+std::size_t mp_level_index(const sim::tactical::AiLevel level) {
+    return level == sim::tactical::AiLevel::easy ? 0U : level == sim::tactical::AiLevel::hard ? 2U : 1U;
+}
+}
+MpAgreedLevel agreed_mp_level(const std::string_view agreed_entry, const MpLevelEntries& campaign_entries,
+    const std::span<const MpLevelEntries> type_entries) {
+    for (std::size_t i = 0; i < mp_levels.size(); ++i)
+        if (same_entry(campaign_entries[i], agreed_entry)) return {mp_levels[i], false};
+    std::optional<std::size_t> unique;
+    bool disagree = false;
+    for (const auto& entries : type_entries) for (std::size_t i = 0; i < mp_levels.size(); ++i) {
+        if (!same_entry(entries[i], agreed_entry)) continue;
+        if (unique && *unique != i) disagree = true;
+        unique = i;
+    }
+    if (unique && !disagree) return {mp_levels[*unique], false};
+    for (std::size_t i = 0; i < mp_levels.size(); ++i)
+        if (same_entry(mp_stock_entries[i], agreed_entry)) return {mp_levels[i], false};
+    return {sim::tactical::AiLevel::normal, true};
+}
+MpAiDifficulty choose_mp_ai_difficulty(const MpLevelEntries& type_entries, const sim::tactical::AiLevel agreed) {
+    const auto at = mp_level_index(agreed);
+    if (!type_entries[at].empty()) return {agreed, type_entries[at], MpAiDifficulty::Source::level_entry};
+    if (!type_entries[1].empty()) return {sim::tactical::AiLevel::normal, type_entries[1], MpAiDifficulty::Source::normal_entry};
+    return {agreed, {}, MpAiDifficulty::Source::engine_default};
+}
 core::Result<std::optional<data::EffectiveObject>> resolve_stock_name(const data::Catalog& catalog, const std::string_view name,
     const data::Category category, const std::string_view tag, StockNameSkips& skips) {
     using Out = core::Result<std::optional<data::EffectiveObject>>;
@@ -379,6 +417,7 @@ struct StockSpaceEntry::Impl {
     std::map<std::string, MapContent> maps;
     std::map<std::string, core::Diagnostic> type_refusals;
     std::map<gc::PlanetId, std::string> planet_maps;
+    std::vector<gc::PlanetId> planets; // every planet of the plan, ascending (FindPlanet.Get_All_Planets in a battle)
     std::map<gc::PlanetId, bool> planet_destroyable_by_tsw; // WGT-100, per planet of the plan
     struct Station { std::string faction, type; gc::TypeId galactic{}; std::uint32_t level{}; };
     std::vector<Station> stations;
@@ -387,6 +426,8 @@ struct StockSpaceEntry::Impl {
     std::vector<std::string> nonfirst_upgrades;
     std::map<std::string, std::string, std::less<>> ai_xml;
     std::string multiplayer_difficulty;
+    tt::AiLevel multiplayer_level{tt::AiLevel::normal}; // the agreed entry name as a level (#8171); set with the name
+    std::shared_ptr<const script::foc::AiDifficultyTable> multiplayer_difficulty_table; // the mounted adjustments, as the lobby reads them
     std::map<std::string, script::foc::ai::PlayerType, std::less<>> multiplayer_ai_players;
     std::map<std::string, std::string> ai_modules;
     std::map<std::string, core::Diagnostic> ai_module_refusals;
@@ -588,6 +629,7 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         const auto* planet = data.planet(location.original_type);
         if (!planet) return fail<std::shared_ptr<const StockSpaceEntry>>("missing authored planet");
         impl->planet_destroyable_by_tsw.emplace(location.planet->id, planet->planet_is_destroyable_by_tsw.value_or(true));
+        impl->planets.push_back(location.planet->id);
         auto path = map_path(planet->space_tactical_map);
         // Preserve a per-conflict refusal for generic maps without a selection producer; this must
         // not prevent an otherwise usable campaign's automatic/land paths from starting.
@@ -867,6 +909,23 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         if (!players) return Result::failure(players.error());
         impl->multiplayer_ai_players = std::move(players.value().players);
         impl->multiplayer_difficulty = key(multiplayer_difficulty);
+        // #8171: the agreed name becomes a level once, here, from the same frozen inputs on every peer. It is never required
+        // to equal an entry name of any AI player type.
+        impl->multiplayer_difficulty_table = skirmish::load_difficulty_table(filesystem);
+        const auto* table = impl->multiplayer_difficulty_table.get();
+        std::vector<MpLevelEntries> all_types;
+        for (const auto& [name, type] : impl->multiplayer_ai_players) { (void)type; all_types.push_back(mp_type_entries(table, name)); }
+        const LobbyAiLevels type_levels = [table](const std::string_view name) { return mp_type_entries(table, name); };
+        const auto agreed = agreed_mp_level(multiplayer_difficulty, campaign_difficulty_entries(data, plan.campaign_name(), type_levels),
+            all_types);
+        impl->multiplayer_level = agreed.level;
+        core::LoadNote note;
+        note.code = "campaign_mp_ai_difficulty_level";
+        note.message = "multiplayer AI difficulty '" + std::string(multiplayer_difficulty) + "' runs at level "
+            + std::string(tt::to_string(agreed.level)) + (agreed.assumed ? " (the name matches no authored entry: Normal assumed)" : "")
+            + "; each AI slot uses its own player type's entry for that level";
+        note.effective_value = std::string(tt::to_string(agreed.level));
+        if (agreed.assumed) impl->skips.notes.push_back(std::move(note));
     }
     // SOS-01/40/45: freeze candidate attachment bytes along with the campaign
     // tables. Each child selects only its reachable types below, including
@@ -1176,6 +1235,7 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
     input.map.tables = &selected.value();
     auto entry = build_space_entry(conflict, input, first_free, impl_->plan.galaxy().seed);
     if (!entry) return core::Result<ResolvedConflictEntry>::failure(entry.error());
+    std::vector<std::string> slot_infos; // one line per AI slot (#8171), published at info level
     if (!impl_->multiplayer_difficulty.empty() && entry.value().conflict.tactical.skirmish) {
         for (auto& slot : entry.value().conflict.tactical.skirmish->slots) {
             if (slot.human) continue;
@@ -1184,18 +1244,22 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
             const auto faction = std::find_if(input.map.factions.begin(), input.map.factions.end(),
                 [&](const auto& row) { return key(row.name) == key(side->faction); });
             if (faction == input.map.factions.end() || !faction->playable || faction->neutral) continue;
+            // #8171: the agreed LEVEL is looked up in this faction's OWN player type, never matched by entry name. A faction
+            // whose type is unknown, or authors no entry for the level, runs its Normal entry, else the engine default; the
+            // slot is never refused over its difficulty. The decision reads only frozen preparation data and the conflict,
+            // so every peer derives the same slot level (it enters the shared conflict record and its hash).
             const auto type = impl_->multiplayer_ai_players.find(key(faction->basic_ai));
-            if (type == impl_->multiplayer_ai_players.end()) return fail<ResolvedConflictEntry>("missing MP tactical AI player type");
-            std::optional<tt::AiLevel> level;
-            for (const auto candidate : {tt::AiLevel::easy, tt::AiLevel::normal, tt::AiLevel::hard}) {
-                const auto mapping = type->second.difficulty.find(key(tt::to_string(candidate)));
-                if (mapping != type->second.difficulty.end() && key(mapping->second) == impl_->multiplayer_difficulty) {
-                    if (level) return fail<ResolvedConflictEntry>("ambiguous MP tactical AI difficulty");
-                    level = candidate;
-                }
-            }
-            if (!level) return fail<ResolvedConflictEntry>("missing MP tactical AI difficulty");
-            slot.difficulty = *level;
+            const MpLevelEntries entries = type == impl_->multiplayer_ai_players.end() ? MpLevelEntries{}
+                : mp_type_entries(impl_->multiplayer_difficulty_table.get(), type->first);
+            const auto chosen = choose_mp_ai_difficulty(entries, impl_->multiplayer_level);
+            slot.difficulty = chosen.level;
+            slot_infos.push_back("multiplayer AI slot for player " + std::to_string(slot.player) + ": faction "
+                + faction->name + ", player type " + (type == impl_->multiplayer_ai_players.end() ? "(none: '" + faction->basic_ai + "' is not authored)" : type->first)
+                + ", agreed level " + std::string(tt::to_string(impl_->multiplayer_level)) + ", adjustment "
+                + (chosen.adjustment.empty() ? std::string("engine default") : chosen.adjustment)
+                + (chosen.source == MpAiDifficulty::Source::level_entry ? ""
+                    : chosen.source == MpAiDifficulty::Source::normal_entry ? " (the type has no entry for that level: its Normal entry)"
+                    : " (the type has no entry for that level or for Normal: engine default)"));
         }
     }
     entry.value().conflict.upgrades = record.upgrades;
@@ -1288,7 +1352,7 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
         impl_->presentation_start = entry.value().start;
     }
     return core::Result<ResolvedConflictEntry>::success({std::move(entry.value().conflict), std::move(entry.value().content),
-        std::move(entry.value().notes)});
+        std::move(entry.value().notes), std::move(slot_infos)});
 }
 
 core::Result<tt::TacticalContent> StockSpaceEntry::content(const ConflictRecord& record) const {
@@ -1411,6 +1475,8 @@ core::Result<script::foc::PreparedAiSession> StockSpaceEntry::prepare_ai(const C
     setup.journal = std::move(journal);
     setup.xml = impl_->ai_xml;
     setup.evaluate_in_galactic_context = std::move(parent_query);
+    setup.galactic_planets.assign(impl_->planets.begin(), impl_->planets.end());
+    std::sort(setup.galactic_planets.begin(), setup.galactic_planets.end());
     configure_space_ai(setup, record);
     setup.campaign_can_retreat = [](const tt::TacticalSnapshot& snapshot, tt::PlayerId player) {
         return std::any_of(snapshot.retreat_views().begin(), snapshot.retreat_views().end(), [&](const auto& view) {

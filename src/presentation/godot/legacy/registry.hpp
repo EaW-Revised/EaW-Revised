@@ -10,9 +10,12 @@
 #include "mesh_bump_spec_glow_colorize.hpp"
 #include "mesh_additive_offset.hpp"
 #include "mesh_additive_vcolor.hpp"
+#include "mesh_alpha_scroll.hpp"
+#include "mesh_bump_light.hpp"
+#include "mesh_glow.hpp"
 #include "mesh_gloss_colorize.hpp"
 #include "mesh_solid_color.hpp"
-#include "rskin.hpp"
+#include "rskin.hpp" // include-guard: keep
 #include "planet_deathstar.hpp"
 #include "mesh_shield.hpp"
 #include "missing_effect.hpp"
@@ -56,6 +59,10 @@ inline constexpr Family families[]{
     planet_deathstar::family,
     galactic_closeup::body_family,
     galactic_closeup::lights_family,
+    mesh_alpha_scroll::family,
+    rskin::alpha_gloss_family,
+    mesh_glow::family,
+    mesh_bump_light::family,
 };
 
 [[nodiscard]] inline std::span<const Family> registry() noexcept {
@@ -121,6 +128,10 @@ inline constexpr Family families[]{
         return false;
     }
     if (family->program == mesh_shield::family.program) return mesh_shield::reads_effect_time(material);
+    if (family->program == mesh_alpha_scroll::family.program) {
+        const auto scroll = bindings::vector_or(material, "UVScrollRate", {0.0F, 0.0F, 0.0F, 0.0F});
+        return scroll[0] != 0.0F || scroll[1] != 0.0F;
+    }
     if (family->program != mesh_additive::family.program && family->program != mesh_additive_vcolor::family.program
         && family->program != mesh_additive_2x::family.program && family->program != rskin::additive_family.program) {
         return false;

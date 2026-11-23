@@ -48,11 +48,13 @@ inline constexpr std::uint32_t handle_game_object = 1; // id: entity ID
 inline constexpr std::uint32_t handle_player = 2;      // id: player ID
 inline constexpr std::uint32_t handle_type = 3;        // id: type ID (object type CRC)
 inline constexpr std::uint32_t handle_type_list = 4;   // id: WeightedTypeList, setup only
+inline constexpr std::uint32_t handle_galactic_planet = 10; // id: galactic planet ID (FindPlanet.Get_All_Planets in a campaign battle)
 inline constexpr std::uint32_t handle_position = 9;    // id: binary32 bits of planar x (high word) and y (low word)
 inline constexpr std::uint64_t first_object_instance = std::uint64_t{1} << 36;
 
 // Script commands the bindings issue (ScriptCommand::verb), translated to tactical orders.
 inline constexpr std::string_view verb_move = "foc.move";     // issuer, unit, x, y, z
+inline constexpr std::string_view verb_face = "foc.face";     // issuer, unit, x, y, z
 inline constexpr std::string_view verb_attack = "foc.attack"; // issuer, unit, target
 // #452 orders (space-orders OR-12, OR-14): issuer, unit, then a target object or x, y, z.
 inline constexpr std::string_view verb_attack_move = "foc.attack_move";
@@ -70,6 +72,11 @@ inline constexpr std::string_view verb_tactical_superweapon = "foc.tsw_request";
 inline constexpr std::string_view verb_make_invulnerable = "foc.make_invulnerable"; // issuer, unit, enabled (TL-03)
 inline constexpr std::string_view verb_despawn = "foc.despawn"; // issuer, unit (#7886)
 inline constexpr std::string_view verb_teleport_and_face = "foc.teleport_and_face"; // issuer, unit, target unit
+inline constexpr std::string_view verb_teleport_position = "foc.teleport_position"; // issuer, unit, x, y, z (Lua Teleport)
+inline constexpr std::string_view verb_hide = "foc.hide"; // issuer, unit, hidden
+inline constexpr std::string_view verb_hyperspace_in = "foc.hyperspace_in"; // issuer, unit, frames (Lua Cinematic_Hyperspace_In)
+inline constexpr std::string_view verb_cancel_hyperspace = "foc.cancel_hyperspace"; // issuer, unit, zero placeholder (Lua Cancel_Hyperspace)
+inline constexpr std::string_view verb_selectable = "foc.selectable"; // issuer, unit, selectable (Lua Set_Selectable)
 inline constexpr std::string_view verb_prevent_all_fire = "foc.prevent_all_fire"; // issuer, unit, enabled
 inline constexpr std::string_view verb_change_owner = "foc.change_owner"; // issuer, unit, new owner player
 inline constexpr std::string_view verb_take_damage = "foc.take_damage"; // issuer, unit, amount[, HardPoints index] (HD-30)
@@ -115,6 +122,7 @@ struct AiType {
     bool point_defence_script{};
     bool corrupt_systems_script{};    // WHE-67: ObjectScript_IG2000 proximity/area activation
     bool locomotor{};                 // BEHAVIOR_LOCO: it has a motion profile or is a squadron
+    bool cancels_hyperspace{};        // TL-17: fighter or simple space locomotor
     bool star_base{};                 // BEHAVIOR_DUMMY_STAR_BASE
     bool selectable{};                // WSU-21: SELECTABLE behaviour in the battle domain (Is_Selectable)
     bool space_special_weapon{};     // WSW-47: existing planetary source, available for attachment
@@ -484,6 +492,10 @@ struct AiSetup {
     std::optional<sim::tactical::PlayerId> local_player;
     // The battle's hint objects in creation order (BHR-01); empty when the map declares none.
     std::vector<AiHintObject> hint_objects;
+    // The galactic planets of the campaign this battle belongs to, ascending (FindPlanet.Get_All_Planets reads the first game
+    // mode, the galaxy, in a campaign battle). Rebuilt from the campaign plan whenever the child is prepared; never saved, never
+    // part of the closure hash or a replay input. Empty in a skirmish, which has no planet objects.
+    std::vector<std::uint64_t> galactic_planets;
     // True once the host fills hint_objects from the map data. While false the lookups still answer from the list but
     // note per call that map hint objects are not hosted, so an empty answer is never silent.
     bool hint_objects_hosted{false};

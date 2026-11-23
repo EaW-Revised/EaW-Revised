@@ -61,6 +61,7 @@ void BattleInput::cancel_placement(LiveSessionView& live) {
 }
 
 void BattleInput::begin_placement(const sim::tactical::TypeId type, LiveSessionView& live) {
+    if (live.view_only()) return; // #8182: a watched battle places no reinforcement
     if (placing_) return; // WR-11: only one active drag
     const auto* ledger = live.local_economy();
     if (!live.reinforcement_allowed() || !ledger

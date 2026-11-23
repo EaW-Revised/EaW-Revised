@@ -666,6 +666,17 @@ void GodotRenderer::Impl::set_unit_colorization(const sim::EntityId entity_id, c
     batch_mark(entity_id);
 }
 
+void GodotRenderer::Impl::clear_unit_colorization(const sim::EntityId entity_id) {
+    if (colorizations_.erase(entity_id) == 0) return;
+    const auto instance = instances_.find(entity_id);
+    if (instance != instances_.end()) {
+        if (auto* rendering = RenderingServer::get_singleton())
+            rendering->instance_geometry_set_shader_parameter(instance->second.rid,
+                StringName("eawr_unit_colorization"), Vector4(0, 0, 0, -1.0F));
+    }
+    batch_mark(entity_id);
+}
+
 void GodotRenderer::Impl::apply_unit_colorization(
     RenderingServer& rendering, const sim::EntityId entity_id, const Instance& instance) const {
     const auto colour = colorizations_.find(entity_id);

@@ -82,7 +82,7 @@ bool Sandbox::push_canonical_keys(int index) {
 }
 
 void Sandbox::push_handle(lua_State* state, HostHandle handle) {
-    const HandlePayload payload{handle.kind, 0, handle.id};
+    const HandlePayload payload{handle.kind, handle.aux, handle.id};
     lua_pushstring(state, "eawr.handles");
     lua_rawget(state, LUA_REGISTRYINDEX);
     lua_pushlstring(state, reinterpret_cast<const char*>(&payload), sizeof(payload));
@@ -118,7 +118,7 @@ bool Sandbox::to_handle(lua_State* state, int index, HostHandle& handle) const {
     lua_pop(state, 1);
     if (!match) return false;
     const auto* payload = static_cast<const HandlePayload*>(lua_touserdata(state, index));
-    handle = HostHandle{payload->kind, payload->id};
+    handle = HostHandle{payload->kind, payload->id, payload->aux};
     return true;
 }
 

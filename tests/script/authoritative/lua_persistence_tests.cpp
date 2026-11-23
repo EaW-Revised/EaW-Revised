@@ -9,6 +9,7 @@
 //   lua_persistence_tests roundtrip | workers | corruption [trace] [seed rounds] | rejects
 //   lua_persistence_tests dump [tick file]
 
+#include "eawr/core/sha256.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/authoritative/clock_rng.hpp"
@@ -18,6 +19,8 @@
 #include "scenario.hpp"
 
 #include <algorithm>
+#include <array>
+#include <span>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -75,7 +78,7 @@ bool trace_attempts = false;
 // manifest digest, every instance's memory baseline (the new globals count toward the logical memory the save
 // records), the protected-name list and the saved globals (print, gcinfo and loadstring are plain C functions
 // now, newproxy is gone). No script of this scenario calls any of those names.
-constexpr std::string_view golden_final_hash = "0f21293b833d720a54c4ea686d91f1352a106f1e02198b30b30f7587f93349fe";
+constexpr std::string_view golden_final_hash = "b6c67326bff554b037ed06e9a5c09e347b7ce67f21b4d18be9d15b6c3551ac1e";
 
 auth::SessionConfig persistence_config() {
     auth::SessionConfig config = default_config();
@@ -237,7 +240,44 @@ void pinned_manifest_identity() {
     }
 }
 
+void framed_sha_equivalence() {
+    using namespace eawr::core;
+    const auto view = [](std::string_view text) {
+        return std::span(reinterpret_cast<const std::uint8_t*>(text.data()), text.size());
+    };
+    std::uint64_t random = 0x8218a6aU;
+    for (const std::size_t size : {0U, 1U, 31U, 42U, 43U, 44U, 63U, 64U, 65U, 127U, 128U, 129U, 4097U}) {
+        std::string bytes(size, '\0');
+        for (char& byte : bytes) {
+            random ^= random << 13U; random ^= random >> 7U; random ^= random << 17U;
+            byte = static_cast<char>(random & 0xffU);
+        }
+        std::string old_frame(auth::state_hash_identity);
+        old_frame.push_back('\0'); old_frame += bytes;
+        for (const auto backend : {Sha256Backend::scalar, Sha256Backend::x86_sha, Sha256Backend::automatic}) {
+            Sha256Hasher streamed(backend);
+            streamed.update(view(auth::state_hash_identity));
+            const std::array<std::uint8_t, 1> separator{0};
+            streamed.update(separator);
+            streamed.update(view(bytes));
+            const auto old_digest = sha256_hex(view(old_frame), backend);
+            expect(streamed.hex_digest() == old_digest, "streamed framing equals original concatenation on every SHA path");
+            Sha256Hasher fragmented(backend);
+            std::uint64_t split = size + 1;
+            for (std::size_t offset = 0; offset < old_frame.size();) {
+                split = split * 6364136223846793005ULL + 1;
+                const auto length = std::min<std::size_t>(1 + static_cast<std::size_t>(split % 97), old_frame.size() - offset);
+                fragmented.update(view(old_frame).subspan(offset, length)); offset += length;
+            }
+            expect(fragmented.hex_digest() == old_digest, "random split framing matches the original hash");
+            if (size == 0) expect(old_digest == "5ab4ab363568d14c3c480d766224c19176a78d2a3be09fed58a251d5108f6a79",
+                "empty-save framing matches independent SHA-256 known answer");
+        }
+    }
+}
+
 void run_roundtrip() {
+    framed_sha_equivalence();
     std::string query_reference;
     for (const unsigned workers : {1U, 2U, 4U, 8U}) {
         const eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -356,6 +396,11 @@ void run_roundtrip() {
         expect(state_hash(session) == reference.hashes[static_cast<std::size_t>(saved)], label + ": loaded state hash");
         auto resaved = session.scheduler->save();
         expect(resaved.has_value() && resaved.value() == bytes, label + ": re-saving a loaded state gives the same bytes");
+        std::string old_frame(auth::state_hash_identity);
+        old_frame.push_back('\0'); old_frame += bytes;
+        const auto old_digest = eawr::core::sha256_hex(std::span(
+            reinterpret_cast<const std::uint8_t*>(old_frame.data()), old_frame.size()));
+        expect(state_hash(session) == old_digest, label + ": streamed hash equals the prior framing bytes");
         expect(session.scheduler->completed_tick() == static_cast<std::uint64_t>(saved), label + ": completed tick");
         Run continued;
         continue_run(session, inline_executor, saved + 1, continued);

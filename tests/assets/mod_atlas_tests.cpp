@@ -1,4 +1,5 @@
 #include "eawr/assets/assets.hpp"
+#include "eawr/assets/asset_name_resolver.hpp"
 #include "../../apps/viewer/src/galactic/radar_texture_lookup.hpp"
 #include "../ui/ui_test_support.hpp"
 
@@ -205,8 +206,10 @@ void shadowed_atlas_entries() {
         };
         expect(lookup(&effective.value(), "A") == 7 && original_calls == 1,
                "radar consumer preserves effective atlas and ordinary cache");
+        reset_name_misses();
         expect(lookup(&effective.value(), "B") == 0x10 && original_calls == 1,
                "radar consumer materializes the matching lower-layer page");
+        expect(name_miss_lines().empty(), "radar's preliminary lookup does not report a miss before fallback");
         expect(lookup(nullptr, "B") == 7 && original_calls == 2,
                "radar consumer does not skip a failed effective atlas");
         expect(lookup(&effective.value(), "absent") == 7 && original_calls == 3,

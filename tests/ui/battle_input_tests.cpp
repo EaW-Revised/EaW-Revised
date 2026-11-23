@@ -338,6 +338,28 @@ void allied_inspect_is_not_selection() {
         "#4919: armed mode, modifiers, empty space, own, enemy and unknown picks never inspect");
 }
 
+void script_unselectable_deselects() {
+    // TL-15: Set_Selectable(false) deselects the unit (and its team members) at the call, and refuses it afterwards.
+    auto first = unit(1, 10, true, {}, std::array{20.0F, 20.0F});
+    auto second = unit(2, 10, true, {40.0F, 0.0F, 0.0F}, std::array{60.0F, 20.0F});
+    auto third = unit(3, 10, true, {80.0F, 0.0F, 0.0F}, std::array{100.0F, 20.0F});
+    std::array units{first, second, third};
+    ui::Selection selection;
+    selection.replace(std::array<sim::EntityId, 3>{1, 2, 3});
+    selection.assign_group(2);
+    const std::array<sim::EntityId, 2> refused{2, 3};
+    expect(selection.remove_sorted(refused) && selection.units() == std::vector<sim::EntityId>{1}
+               && !selection.contains(2) && !selection.contains(3), "TL-15: the flagged units leave the selection");
+    expect(selection.group(2).size() == 3, "TL-15: control groups keep their members for when the flag clears");
+    expect(!selection.remove_sorted(refused), "TL-15: removing absent units changes nothing");
+    units[1].selectable = false;
+    ui::Selection clicking;
+    expect(!clicking.click(2, {}, units, {0.0F, 0.0F, 800.0F, 600.0F}) && clicking.empty(),
+           "TL-15: a click on an unselectable unit selects nothing");
+    expect(!clicking.double_click(2, units, {0.0F, 0.0F, 800.0F, 600.0F}) && clicking.empty(),
+           "TL-15: a double click on an unselectable unit selects nothing");
+}
+
 void selection_denial() {
     auto denied = unit(2, 10, true, {}, std::array{20.0F, 20.0F});
     denied.selection_denied = true;
@@ -1736,6 +1758,7 @@ int main() {
     box_eligibility_and_icons();
     allied_inspect_is_not_selection();
     selection_denial();
+    script_unselectable_deselects();
     select_all();
     control_groups();
     overview();

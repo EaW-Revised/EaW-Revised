@@ -353,6 +353,7 @@ public:
     // colourise mask. Shared materials and noncolourising surfaces stay intact.
     // Holds across absence/recreation; unchanged values send no renderer update.
     void set_unit_colorization(sim::EntityId entity_id, const std::array<float, 3>& rgb);
+    void clear_unit_colorization(sim::EntityId entity_id);
     // Presentation-only: the entity's own opacity (#535, docs/behaviour/space-fog-presentation.md
     // FW-16 to FW-18: the local player's fog fading a unit in or out). It holds while the entity
     // is absent and applies when its instance is (re)created; 1 (fully opaque) ends it. Applied as

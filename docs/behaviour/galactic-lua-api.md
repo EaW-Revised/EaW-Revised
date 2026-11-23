@@ -56,7 +56,7 @@ have narrower, observable runtime coverage:
 | `Player.Enable_Advisor_Hints` | The story host accepts a registered player, mode string and boolean, warns that the presentation preference is unavailable, and returns no values. It preserves the story script. | Advisor preference presentation and invalid-mode vocabulary are unimplemented. |
 | `Get_Story_Plot` | In AI plan scripts: returns a plot object for a loaded sub-plot of the campaign's story (name as written, case-sensitive), or a warning and nil. Plot: `Activate`, `Suspend`, `Reset`, `Get_Event(name)` (script error when absent). Event: `Set_Event_Parameter`, `Set_Reward_Parameter` (0-based index, rounded), `Set_Reward_Type`, `Set_Dialog`, `Add_Dialog_Text`, `Clear_Dialog_Text`, `Is_Valid`. Requests are ordered plain-data commands (`foc.story_plot`) committed by the AI engine to the plot engine in command order (WST-56, WST-26); edits are checkpointed in an optional tail of the campaign owner state (absent when nothing was edited). | Story-scheduler scripts (sub-plot Lua) still fault by name. Extra dialog text is stored on the triggered record but not yet shown by the dialog presentation (legacy EAWR-5495).
 
-Retail evidence for the budget flush is WGA-24; story plot semantics are WST-56.
+Retail evidence for the budget flush is WGA-24; story plot semantics are WST-56. Plot `Suspend` ignores extra arguments.
 Read-only debug-build inspection establishes that the desire API takes five
 arguments and returns a timed bonus block, and that advisor-hint control changes
 a per-player presentation toggle and returns no values. Neither the stub nor a

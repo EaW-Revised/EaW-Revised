@@ -217,6 +217,11 @@ struct TacticalInstance {
     SeatId controller_seat{};
     UnitControl control{UnitControl::none};
     bool hide_when_fogged{}; // land static fog presentation input
+    // TL-14/TL-15 (Lua Hide / Set_Selectable): copied from the unit's hashed view flags for presentation, so the
+    // viewer skips the model and silences attached sound, and selection and orders refuse the unit. Excluded from
+    // canonical snapshot bytes (the SVEW block carries the state).
+    bool script_hidden{};
+    bool script_unselectable{};
     friend bool operator==(const TacticalInstance&, const TacticalInstance&) = default;
 };
 

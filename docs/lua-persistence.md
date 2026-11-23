@@ -6,12 +6,12 @@ the versioned script state hash built on it. It implements the save/hash prerequ
 [multiplayer readiness](multiplayer-readiness.md). This is new-engine persistence for
 checkpoints, resync and hashing; it does not read or write retail save files.
 
-Identities: save format `eawr-script-save-v4` (v4 adds object attachment identities and completed/rejected lifecycle records;
+Identities: save format `eawr-script-save-v5` (v5 adds the handle third word, a position wrapper's z; v4 adds object attachment identities and completed/rejected lifecycle records;
 v3 added instance-local proximity registrations;
-v2 added the memory quota and account with Lua pattern metering), state hash `eawr-script-state-v1`, combined
+v2 added the memory quota and account with Lua pattern metering), state hash `eawr-script-state-v2` (v2 hashes the handle third word), combined
 hash `eawr-authoritative-state-v1`. Any change to a rule below needs a new identity.
 
-The galactic clock profile uses `eawr-script-galactic-save-v4`. Its object attachment records include the service-registration sequence, which determines reverse registration order. Immediately after
+The galactic clock profile uses `eawr-script-galactic-save-v5`. Its object attachment records include the service-registration sequence, which determines reverse registration order. Immediately after
 its completed tick and galactic frame it stores a uint32 retirement count and
 strictly increasing nonzero uint64 instance IDs. Retired IDs cannot also be live
 or receive queued events. Old GC scheduler saves are refused; no legacy reader
@@ -207,7 +207,7 @@ and an allocation failure during a load is one more rejection with `EAWR-SCRIPT-
 
 ## State hash
 
-`state_hash()` is SHA-256 over `eawr-script-state-v1`, a zero byte and the canonical save.
+`state_hash()` is SHA-256 over `eawr-script-state-v2`, a zero byte and the canonical save.
 The save holds every value that can affect a later tick: the Lua graph, identities,
 scheduler queues and counters, random draw positions and next IDs. Existing replay
 formats and their v1/v2 goldens are unchanged; the tactical tick hash does not include

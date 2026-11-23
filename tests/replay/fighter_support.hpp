@@ -50,6 +50,7 @@ void test_validation();
 void test_finite_reserve_boundary();
 void test_formation_catch_up();
 void test_coordinate_limit();
+void test_teamless_idle();
 void test_out_of_combat();
 void test_approach();
 void test_installed_attack_segment();

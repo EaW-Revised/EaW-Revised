@@ -56,6 +56,7 @@ LiveUnit TacticalSession::Impl::live_at(const EntityId id, const entt::entity ha
         const auto* asteroid = registry.try_get<AsteroidContact>(handle);
         const auto* nebula = registry.try_get<NebulaState>(handle);
         const auto* corrupt = registry.try_get<CorruptedSystems>(handle);
+        const auto* script_view = registry.try_get<ScriptView>(handle);
         const auto* sighted = registry.try_get<Sighted>(handle);
         auto result = LiveUnit{
             UnitState{
@@ -91,6 +92,7 @@ LiveUnit TacticalSession::Impl::live_at(const EntityId id, const entt::entity ha
             nebula != nullptr ? std::optional(nebula->value) : std::nullopt,
         };
         result.corrupt = corrupt != nullptr ? std::optional(corrupt->value) : std::nullopt;
+        result.script_view = script_view != nullptr ? std::optional(script_view->value) : std::nullopt;
         result.sighting = sighted != nullptr ? std::optional(sighted->value) : std::nullopt;
         result.garrison_unit = registry.all_of<GarrisonUnit>(handle);
         result.script_invulnerable = registry.all_of<ScriptInvulnerable>(handle);
@@ -175,6 +177,7 @@ void TacticalSession::Impl::rebuild(const std::vector<LiveUnit>& units, const bo
             if (unit.asteroid_contact) emplace_component<AsteroidContact>(handle, *unit.asteroid_contact);
             if (unit.nebula) emplace_component<NebulaState>(handle, *unit.nebula);
             if (unit.corrupt) emplace_component<CorruptedSystems>(handle, *unit.corrupt);
+            if (unit.script_view) emplace_component<ScriptView>(handle, *unit.script_view);
             if (unit.waypoints) {
                 waypoint_queues_present |= !unit.waypoints->points.empty();
                 emplace_component<Waypoints>(handle, *unit.waypoints);
@@ -225,9 +228,9 @@ enum CommitBit : std::uint32_t {
     commit_abilities = 1U << 8, commit_approaching = 1U << 9, commit_sighted = 1U << 10, commit_ion = 1U << 11,
     commit_corrupt = 1U << 12, commit_waypoints = 1U << 13, commit_history = 1U << 14,
     commit_vulnerable = 1U << 15, commit_upgraded = 1U << 16, commit_script_invulnerable = 1U << 17,
-    commit_hold_fire = 1U << 18,
-    commit_every_component = (1U << 19) - 1U,
-    commit_new_entity = 1U << 19,
+    commit_hold_fire = 1U << 18, commit_script_view = 1U << 19,
+    commit_every_component = (1U << 20) - 1U,
+    commit_new_entity = 1U << 20,
 };
 
 // One optional component in the phase: assign a changed value in place (the pool is not restructured), or flag
@@ -289,6 +292,7 @@ core::Result<void> TacticalSession::Impl::commit_units(std::vector<LiveUnit>& un
         auto& sighted_storage = registry.storage<Sighted>();
         auto& ion_storage = registry.storage<IonStunned>();
         auto& corrupt_storage = registry.storage<CorruptedSystems>();
+        auto& script_view_storage = registry.storage<ScriptView>();
         auto& waypoints_storage = registry.storage<Waypoints>();
         auto& history_storage = registry.storage<PositionHistoryComponent>();
         auto& vulnerable_storage = registry.storage<ArrivalVulnerability>();
@@ -360,6 +364,7 @@ core::Result<void> TacticalSession::Impl::commit_units(std::vector<LiveUnit>& un
                 settle_component(sighted_storage, handle, unit.sighting, part.writes, mask, commit_sighted);
                 settle_component(ion_storage, handle, unit.ion_stun, part.writes, mask, commit_ion);
                 settle_component(corrupt_storage, handle, unit.corrupt, part.writes, mask, commit_corrupt);
+                settle_component(script_view_storage, handle, unit.script_view, part.writes, mask, commit_script_view);
                 settle_component(waypoints_storage, handle, unit.waypoints, part.writes, mask, commit_waypoints);
                 settle_component(history_storage, handle, unit.position_history, part.writes, mask, commit_history);
                 if (!unit.arrival_vulnerable_until) {
@@ -477,6 +482,7 @@ core::Result<void> TacticalSession::Impl::commit_units(std::vector<LiveUnit>& un
                 if ((op.mask & commit_sighted) != 0U) commit_optional<Sighted>(handle, unit.sighting, writes);
                 if ((op.mask & commit_ion) != 0U) commit_optional<IonStunned>(handle, unit.ion_stun, writes);
                 if ((op.mask & commit_corrupt) != 0U) commit_optional<CorruptedSystems>(handle, unit.corrupt, writes);
+                if ((op.mask & commit_script_view) != 0U) commit_optional<ScriptView>(handle, unit.script_view, writes);
                 if ((op.mask & commit_waypoints) != 0U) commit_optional<Waypoints>(handle, unit.waypoints, writes);
                 if ((op.mask & commit_history) != 0U) commit_optional<PositionHistoryComponent>(handle, unit.position_history, writes);
                 if ((op.mask & commit_vulnerable) != 0U) {
@@ -586,6 +592,7 @@ void TacticalSession::Impl::commit_units_reference(std::vector<LiveUnit>& units,
             commit_optional<Sighted>(handle, unit.sighting, writes);
             commit_optional<IonStunned>(handle, unit.ion_stun, writes);
             commit_optional<CorruptedSystems>(handle, unit.corrupt, writes);
+            commit_optional<ScriptView>(handle, unit.script_view, writes);
             // Derive the next tick's readiness gate in this existing stable commit, before the route is moved.
             waypoint_queues_present |= unit.waypoints && !unit.waypoints->points.empty();
             commit_optional<Waypoints>(handle, unit.waypoints, writes);

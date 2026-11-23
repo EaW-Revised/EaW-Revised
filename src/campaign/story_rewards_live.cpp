@@ -24,6 +24,7 @@ constexpr std::uint8_t op_spawn = 1;   // uint32 player, uint64 planet, uint64 t
 constexpr std::uint8_t op_credits = 2; // uint32 player, int64 Q24 raw amount
 constexpr std::uint8_t op_switch_control = 3; // uint32 player, uint32 type length, the type name's bytes (#6917)
 constexpr std::uint8_t op_planet_faction = 4; // uint32 new owner player, uint64 planet
+constexpr std::uint8_t op_black_market = 5; // uint32 player, uint32 item id (its 1-based registration ordinal)
 
 template<class T> core::Result<T> failure(std::string message) {
     core::Diagnostic d; d.code = std::string(gc::diagnostic_codes::invalid_setup);
@@ -75,6 +76,7 @@ struct Rewards {
     std::map<std::string, gc::TypeId> types;    // upper-case original name -> runtime type (every registered original)
     std::map<std::string, gc::PlanetId> planets; // upper-case planet name -> its first instance (lowest id)
     std::string good_side;                       // GameConstants Good_Side_Name (WST-64)
+    std::vector<std::string> black_market_items; // registered item names in registration order (WGEP-138)
     std::shared_ptr<const StartingForceInputs> force; // rebuilt from the live authoring on first use
     std::shared_ptr<GameSession::AiControlSwitch> ai_control; // filled when a native AI is installed (#6917)
 
@@ -115,6 +117,7 @@ private:
     core::Result<Outcome> credits(gc::GalacticSession&, const st::Triggered&);
     core::Result<Outcome> switch_control(gc::GalacticSession&, const st::Triggered&);
     core::Result<Outcome> planet_faction(gc::GalacticSession&, const st::Triggered&);
+    core::Result<Outcome> black_market(gc::GalacticSession&, const st::Triggered&);
     core::Result<Outcome> corruption(gc::GalacticSession&, const st::Triggered&);
     core::Result<std::optional<gc::PlanetId>> destination(const gc::GalacticSnapshot&, gc::PlayerId,
         std::optional<gc::PlanetId> named, std::string& reason) const;
@@ -134,6 +137,7 @@ core::Result<Outcome> Rewards::apply(gc::GalacticSession& world, const st::Trigg
     if (kind == "RESTRICT_CORRUPTION" || kind == "REMOVE_CORRUPTION" || kind == "ENABLE_GALACTIC_CORRUPTION_HOLOGRAM")
         return corruption(world, record);
     if (kind == "PLANET_FACTION") return planet_faction(world, record);
+    if (kind == "GIVE_BLACK_MARKET") return black_market(world, record);
     return declined("this reward type has no live owner yet");
 }
 
@@ -297,6 +301,25 @@ core::Result<Outcome> Rewards::credits(gc::GalacticSession& world, const st::Tri
     return applied();
 }
 
+// WGEP-139: GIVE_BLACK_MARKET (1 item name) adds the first registered item of that name to the owning player's unlock
+// list, deduplicated. It is neither a purchase nor a production grant: no debit, no despawn, no purchase feedback. An
+// unregistered name or a galaxy without the item's owner declines; the request is journaled only once it applied.
+core::Result<Outcome> Rewards::black_market(gc::GalacticSession& world, const st::Triggered& record) {
+    if (token(record, 0).empty()) return declined("names no item (WGEP-139)");
+    const auto wanted = upper(token(record, 0));
+    const auto at = std::find_if(black_market_items.begin(), black_market_items.end(), [&](const auto& name) { return upper(name) == wanted; });
+    if (at == black_market_items.end()) return declined("item " + std::string(token(record, 0)) + " is not a registered black-market item");
+    const auto item = static_cast<std::uint32_t>(at - black_market_items.begin()) + 1U;
+    auto granted = world.grant_black_market_item(record.owner, item);
+    if (!granted) return core::Result<Outcome>::failure(granted.error());
+    if (!granted.value()) return declined("the galaxy cannot take the item now: unknown player or item, or a native barrier is open (WGEP-139)");
+    std::vector<std::uint8_t> bytes{op_black_market};
+    put(bytes, record.owner, 4); put(bytes, item, 4);
+    if (auto recorded = world.append_native_effect(gc::NativeEffectKind::story_reward, std::move(bytes)); !recorded)
+        return core::Result<Outcome>::failure(recorded.error());
+    return applied();
+}
+
 // WGCH-200/201/203: all three rewards resolve the first object of the authored planet type.
 core::Result<Outcome> Rewards::corruption(gc::GalacticSession& world, const st::Triggered& record) {
     const auto at = planets.find(upper(token(record, 0)));
@@ -379,6 +402,11 @@ core::Result<void> Rewards::replay(gc::GalacticSession& world, const gc::NativeE
         auto changed = world.set_planet_faction(a, static_cast<gc::PlayerId>(player));
         return changed ? core::Result<void>::success() : core::Result<void>::failure(changed.error());
     }
+    if (op == op_black_market) {
+        if (!in.read(a, 4) || !in.done()) return failure<void>("invalid story black-market journal");
+        auto granted = world.grant_black_market_item(static_cast<gc::PlayerId>(player), static_cast<std::uint32_t>(a));
+        return granted ? core::Result<void>::success() : core::Result<void>::failure(granted.error());
+    }
     if (op == op_switch_control) {
         if (!in.read(a, 4)) return failure<void>("invalid story control-switch journal");
         const auto size = static_cast<std::size_t>(a);
@@ -396,8 +424,9 @@ core::Result<void> Rewards::replay(gc::GalacticSession& world, const gc::NativeE
 }
 } // namespace
 
-core::Result<void> bind_story_rewards(GameSession& game, const CampaignSetupPlan& plan, const data::galactic::GalacticData& data) {
-    auto state = std::make_shared<Rewards>(Rewards{plan, {}, {}, {}, {}, game.ai_control_switch_slot()});
+core::Result<void> bind_story_rewards(GameSession& game, const CampaignSetupPlan& plan, const data::galactic::GalacticData& data,
+    std::vector<std::string> black_market_items) {
+    auto state = std::make_shared<Rewards>(Rewards{plan, {}, {}, {}, std::move(black_market_items), {}, game.ai_control_switch_slot()});
     for (const auto& binding : plan.type_bindings()) state->types.emplace(upper(binding.original_type), binding.id);
     for (const auto& location : plan.locations()) {
         if (!location.planet) continue;

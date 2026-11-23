@@ -44,6 +44,7 @@ enum class SandboxFault : ::std::uint8_t {
 struct HostHandle {
     ::std::uint32_t kind{};
     ::std::uint64_t id{};
+    ::std::uint32_t aux{}; // a position wrapper's z as binary32 bits
 };
 
 // WGA-471: semantic ownership excludes private interning/identity caches.

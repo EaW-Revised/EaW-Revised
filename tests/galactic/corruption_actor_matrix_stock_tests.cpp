@@ -43,7 +43,7 @@ using eawr::testing::result_diagnostic::take;
 using eawr::testing::galactic::find_hero_place;
 using namespace std::chrono_literals;
 
-constexpr std::string_view kFile = "campaigns_underworld_gc.xml";
+constexpr std::string_view kStockFile = "campaigns_underworld_gc.xml";
 
 std::vector<std::string> authored_kinds(const gc::GalacticAbilityProfile& profile) {
     std::vector<std::string> kinds;
@@ -88,8 +88,8 @@ struct Content {
     eawr::data::galactic::GalacticData data;
     eawr::units::GalacticTypeTable types;
 };
-Content load_content(const eawr::vfs::Vfs& filesystem) {
-    auto loaded = take(eawr::data::load_catalog(filesystem, eawr::data::Profile::foc));
+Content load_content(const eawr::vfs::Vfs& filesystem, const eawr::data::Profile profile) {
+    auto loaded = take(eawr::data::load_catalog(filesystem, profile));
     auto data = take(eawr::data::galactic::load_galactic_data(filesystem, loaded.catalog));
     auto types = eawr::units::galactic_type_table(loaded.catalog);
     return Content{std::move(loaded), std::move(data), std::move(types)};
@@ -109,11 +109,19 @@ Sandbox find_sandbox(const std::string& xml, std::string_view campaign_name) {
     Sandbox box;
     const auto begin = active + std::string_view("<Starting_Active_Player>").size();
     for (auto at = begin; at < close; ++at) if (xml[at] != ' ' && xml[at] != '\t' && xml[at] != '\r' && xml[at] != '\n') box.faction += xml[at];
-    const auto forces = xml.find("<Starting_Forces> " + box.faction + ",", campaign);
+    // Data files differ in the spacing after the tag (stock writes a space, mods often none): follow the data, not a layout.
+    constexpr std::string_view tag = "<Starting_Forces>";
+    const auto blank = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    std::size_t forces = std::string::npos, planet_begin{};
+    for (auto at = xml.find(tag, campaign); at != std::string::npos; at = xml.find(tag, at + tag.size())) {
+        auto value = at + tag.size();
+        while (value < xml.size() && blank(xml[value])) ++value;
+        if (xml.compare(value, box.faction.size() + 1, box.faction + ",") != 0) continue;
+        forces = at; planet_begin = value + box.faction.size() + 1; break;
+    }
     if (forces == std::string::npos) throw std::runtime_error("the active faction has no starting forces");
-    const auto planet_begin = forces + std::string("<Starting_Forces> ").size() + box.faction.size() + 1;
     const auto planet_end = xml.find(',', planet_begin);
-    for (auto at = planet_begin; at < planet_end; ++at) if (xml[at] != ' ') box.planet += xml[at];
+    for (auto at = planet_begin; at < planet_end; ++at) if (!blank(xml[at])) box.planet += xml[at];
     box.insert_at = forces;
     return box;
 }
@@ -174,9 +182,12 @@ void land_choice_timed(gc::CorruptionChoice land, const std::string& label) {
     expect(economic && economic->planets[0].corruption == wanted, label + ": the stock land choice reaches its timed outcome");
 }
 
-void matrix(const std::vector<eawr::vfs::MountSpec>& mounts, std::string_view campaign_name) {
+// Returns how many (diplomat, planet) corruption offers it checked, so a caller can refuse a run that checked none.
+std::size_t matrix(const std::vector<eawr::vfs::MountSpec>& mounts, std::string_view campaign_name, const std::string& kFile,
+    const eawr::data::Profile profile) {
+    std::size_t corruption_checks{};
     const auto base = eawr::vfs::Vfs::mount(mounts).value();
-    const auto bytes = base.open("data/xml/" + std::string(kFile)).value();
+    const auto bytes = base.open("data/xml/" + kFile).value();
     auto xml = std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     const auto box = find_sandbox(xml, campaign_name);
     const std::string label = "actor-matrix " + std::string(campaign_name);
@@ -184,7 +195,7 @@ void matrix(const std::vector<eawr::vfs::MountSpec>& mounts, std::string_view ca
     // Pass 1 (no overlay): which hero companies of the faction have a member with an authored ability.
     struct Row { std::string company, member; gc::TypeId member_type{}; std::vector<std::string> authored; };
     const auto plain = std::make_shared<const eawr::vfs::Vfs>(take(eawr::vfs::Vfs::mount(mounts)));
-    auto content = load_content(*plain);
+    auto content = load_content(*plain, profile);
     const auto& loaded = content.loaded;
     const auto& data = content.data;
     const auto& types = content.types;
@@ -254,7 +265,7 @@ void matrix(const std::vector<eawr::vfs::MountSpec>& mounts, std::string_view ca
     }
     std::cout << label << " faction=" << box.faction << " planet=" << box.planet << " ability companies=" << rows.size() << '\n';
     expect(!rows.empty(), "the stock faction has hero companies with authored abilities");
-    if (rows.empty()) return;
+    if (rows.empty()) return corruption_checks;
 
     // Pass 2: the same sandbox with every such company added at the faction's first starting planet.
     std::string overlay;
@@ -266,13 +277,13 @@ void matrix(const std::vector<eawr::vfs::MountSpec>& mounts, std::string_view ca
     struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{directory};
     std::filesystem::create_directories(directory / "xml");
     {
-        std::ofstream out(directory / "xml" / std::string(kFile), std::ios::binary); out << xml;
+        std::ofstream out(directory / "xml" / kFile, std::ios::binary); out << xml;
         if (!out) throw std::runtime_error("sandbox overlay write failed");
     }
     auto layered = mounts;
     layered.insert(layered.begin(), {"actor-matrix", directory, "data", {}});
     const auto filesystem = std::make_shared<const eawr::vfs::Vfs>(take(eawr::vfs::Vfs::mount(layered)));
-    auto content2 = load_content(*filesystem);
+    auto content2 = load_content(*filesystem, profile);
     auto prepared = take(eawr::platform::PreparedLiveCampaign::create(filesystem, content2.loaded.catalog, content2.data, content2.types,
         campaign_name, options, "Normal_Default", false));
     const auto host = *prepared->layout().ability_host;
@@ -288,6 +299,25 @@ void matrix(const std::vector<eawr::vfs::MountSpec>& mounts, std::string_view ca
         }
     }
     const auto snapshot = live->frame().latest;
+    // The data's own reading of "a planet this actor's corruption can open on": an owner that is neither neutral, the actor's
+    // own nor allied, an authored choice, residual influence and no corruption yet. Derived from published facts only, so
+    // the check names no unit, faction or planet.
+    const auto corruptible = [&](const gc::PlanetId id) {
+        const auto planets = snapshot->planets();
+        const auto planet = std::find_if(planets.begin(), planets.end(), [&](const auto& row) { return row.id == id; });
+        const auto* control = snapshot->control();
+        const auto* economy = snapshot->economy_corruption();
+        if (planet == planets.end() || !control || !economy || planet->owner == human) return false;
+        const auto owner = std::find_if(control->players.begin(), control->players.end(), [&](const auto& row) { return row.player == planet->owner; });
+        if (owner == control->players.end() || owner->neutral) return false;
+        if (std::any_of(control->relations.begin(), control->relations.end(), [&](const auto& row) {
+            return row.player == human && row.other == planet->owner && row.allied; })) return false;
+        const auto content = std::find_if(host.corruption_planets.begin(), host.corruption_planets.end(), [&](const auto& row) { return row.planet == id; });
+        const auto economic = std::find_if(economy->planets.begin(), economy->planets.end(), [&](const auto& row) { return row.planet == id; });
+        return content != host.corruption_planets.end() && content->retains_influence && economic != economy->planets.end()
+            && !economic->destroyed && economic->corruption == gc::corruption_fixture::Type::none
+            && std::any_of(content->slots.begin(), content->slots.end(), [](const auto& slot) { return slot.type != gc::corruption_fixture::Type::none; });
+    };
     for (const auto& row : rows) {
         const auto place = find_hero_place(*snapshot, human, row.member_type);
         std::set<std::string> authored(row.authored.begin(), row.authored.end()), found, own;
@@ -308,8 +338,28 @@ void matrix(const std::vector<eawr::vfs::MountSpec>& mounts, std::string_view ca
             << " kinds=" << join(found) << " own_planet=" << join(own) << '\n';
         expect(place.has_value(), row.company + ": the company is on the map");
         expect(!place || !startable || tiles > 0, row.company + ": an authored ability that needs no prepared planet gets a drop tile on some planet");
+        // A hero whose only startable action is corruption (a diplomat) is offered it on every planet that admits it, whether it
+        // stands in orbit (a fleet) or on the surface (a landed force): the drag the player makes is the same either way.
+        const bool corruption_only = row.authored.size() >= 1 && std::all_of(row.authored.begin(), row.authored.end(), [](const std::string& kind) {
+            return kind == "corruption" || kind == "removal" || kind == "sabotage" || kind == "hack"; })
+            && std::find(row.authored.begin(), row.authored.end(), "corruption") != row.authored.end();
+        if (place && corruption_only) {
+            const bool routed = std::any_of(host.profiles.begin(), host.profiles.end(), [&](const auto& profile) {
+                return profile.type == row.member_type && profile.corruption
+                    && std::find(host.activated_corruption_abilities.begin(), host.activated_corruption_abilities.end(), profile.corruption->name)
+                        != host.activated_corruption_abilities.end(); });
+            for (const auto& planet : snapshot->planets()) {
+                if (!routed || !corruptible(planet.id)) continue;
+                ++corruption_checks;
+                const auto drop = view::ability_drop_candidate(*snapshot, human, place->dragged, host, {}, planet.id);
+                expect(drop && drop->kind == gc::AbilityKind::corruption,
+                    row.company + ": a routed corruption hero is offered corruption on every planet that admits it (planet " + std::to_string(planet.id) + ")");
+            }
+        }
     }
+    std::cout << label << " corruption offers checked=" << corruption_checks << '\n';
     live->stop();
+    return corruption_checks;
 }
 } // namespace
 
@@ -321,7 +371,37 @@ int main() {
         for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
             mounts.push_back(take(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data")).mount);
         for (const auto* campaign : {"Sandbox_Origin_Empire", "Sandbox_Origin_Rebel", "Sandbox_Origin_Underworld"})
-            matrix(mounts, campaign);
+            matrix(mounts, campaign, std::string(kStockFile), eawr::data::Profile::foc);
+        // The same matrix over an installed mod (a mod's heroes author the same blocks differently: its diplomat is a
+        // company whose member carries the ability). The mod, its campaign file and campaign come from the environment, so no
+        // mod is named in code.
+        if (const auto mod = eawr::testing::environment("EAWR_ACTOR_MATRIX_MOD_ID")) {
+            const auto file = eawr::testing::environment("EAWR_ACTOR_MATRIX_CAMPAIGN_FILE");
+            const auto campaign = eawr::testing::environment("EAWR_ACTOR_MATRIX_CAMPAIGN");
+            if (!file || !campaign) throw std::runtime_error("EAWR_ACTOR_MATRIX_MOD_ID needs EAWR_ACTOR_MATRIX_CAMPAIGN_FILE and EAWR_ACTOR_MATRIX_CAMPAIGN");
+            std::vector<std::filesystem::path> roots;
+            if (const auto workshop = eawr::testing::environment("EAWR_WORKSHOP_ROOT")) roots.emplace_back(*workshop);
+            const std::filesystem::path game(*root);
+            roots.push_back(game.parent_path().parent_path() / "workshop" / "content" / "32470");
+            if (const auto remake = eawr::testing::environment("EAWR_REMAKE_MOD_ROOT")) roots.push_back(std::filesystem::path(*remake).parent_path());
+            roots.push_back(game.parent_path() / "workshop" / "content" / "32470");
+            roots.push_back(game.parent_path().parent_path() / "mods" / "workshop" / "content" / "32470");
+            std::vector<eawr::vfs::LayerRoot> layers;
+            for (const auto& workshop : roots) {
+                std::error_code unreadable;
+                if (std::filesystem::is_directory(workshop / *mod, unreadable) && !unreadable) {
+                    layers = eawr::vfs::mod_chain_roots(workshop / *mod); break;
+                }
+            }
+            if (layers.empty()) throw std::runtime_error("the actor matrix requires installed workshop mod " + *mod);
+            layers.emplace_back("expansion", game / "corruption" / "Data");
+            layers.emplace_back("base", game / "GameData" / "Data");
+            std::vector<eawr::vfs::MountSpec> mod_mounts;
+            for (auto& layer : take(eawr::vfs::resolve_manifest_chain(layers))) mod_mounts.push_back(std::move(layer.mount));
+            const auto checked = matrix(mod_mounts, *campaign, *file, eawr::data::Profile::remake);
+            // A mod run that never reached a routed corruption hero and an admitting planet proved nothing.
+            expect(checked > 0, "the mod run checked at least one routed corruption hero against an admitting planet");
+        }
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

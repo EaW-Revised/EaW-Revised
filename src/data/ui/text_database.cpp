@@ -204,11 +204,15 @@ struct BuiltinText final {
     std::string_view key;
     std::u16string_view value;
 };
-constexpr std::array<BuiltinText, 43> builtin_texts{{
+constexpr std::array<BuiltinText, 74> builtin_texts{{
     {"TEXT_EAWR_HIDDEN_PLANET", u"Hidden planet"},
     // ADR-020 project caption; an authored language database overrides this default.
     {"TEXT_EAWR_GIFT_UNITS", u"Gift"},
     {"TEXT_EAWR_TWEAKS", u"Tweaks"},
+    {"TEXT_EAWR_GC_BATTLE_COLOURS", u"GC battle colours"},
+    {"TEXT_EAWR_GC_FACTION_UNITS", u"Faction units, player icons"},
+    {"TEXT_EAWR_GC_PLAYER_UNITS", u"Player-coloured units"},
+    {"TEXT_EAWR_GC_COLOURS_TOOLTIP", u"This choice applies only to your view."},
     {"TEXT_EAWR_PERFORMANCE", u"Performance"},
     {"TEXT_EAWR_RENDER_THREAD", u"Render thread (restart)"},
     {"TEXT_EAWR_PARTICLE_THREADS", u"Particle threads"},
@@ -247,6 +251,34 @@ constexpr std::array<BuiltinText, 43> builtin_texts{{
     {"TEXT_EAWR_DEFAULTS", u"Defaults"},
     {"TEXT_EAWR_APPLY", u"Apply"},
     {"TEXT_EAWR_ACCEPT", u"Accept"},
+    // #8157: the notices of a refused hero ability, one per cause; project wording (the original's text table has none).
+    {"TEXT_EAWR_ABILITY_REFUSED", u"That order cannot be carried out."},
+    {"TEXT_EAWR_ABILITY_SEAT_INACTIVE", u"You can no longer give orders."},
+    {"TEXT_EAWR_ABILITY_TARGET_GONE", u"That hero or planet is no longer there."},
+    {"TEXT_EAWR_ABILITY_NOT_YOURS", u"You do not control that hero."},
+    {"TEXT_EAWR_ABILITY_LIMIT", u"Too many orders are waiting; try again in a moment."},
+    {"TEXT_EAWR_ABILITY_UNAVAILABLE", u"This hero has no ability it can use."},
+    {"TEXT_EAWR_ABILITY_DISABLED", u"That ability is switched off right now."},
+    {"TEXT_EAWR_ABILITY_NOT_HERE", u"This hero has no ability it can use on that planet."},
+    {"TEXT_EAWR_ABILITY_MUST_BE_IN_ORBIT", u"This hero must be in orbit of that planet to use its ability."},
+    {"TEXT_EAWR_ABILITY_NO_ENEMY_HERO", u"There is no enemy hero on that planet to neutralize."},
+    {"TEXT_EAWR_ABILITY_ALLIED_HERO", u"The only heroes on that planet belong to an ally."},
+    {"TEXT_EAWR_ABILITY_NOT_TARGETABLE", u"The enemy heroes on that planet cannot be neutralized by this hero."},
+    {"TEXT_EAWR_ABILITY_NEUTRALIZE_UNAVAILABLE", u"Neutralize Hero cannot be used on that planet right now."},
+    {"TEXT_EAWR_ABILITY_UNEXPLORED", u"That planet has not been explored yet."},
+    {"TEXT_EAWR_ABILITY_NO_CREDITS", u"You cannot afford that."},
+    {"TEXT_EAWR_ABILITY_NO_ROUTE", u"There is no route for the hero to that planet."},
+    {"TEXT_EAWR_ABILITY_CANNOT_DEPART", u"The hero cannot leave its planet right now."},
+    {"TEXT_EAWR_ABILITY_PATH_BLOCKED", u"The hero's path to that planet is blocked."},
+    {"TEXT_EAWR_ABILITY_CANNOT_TRAVEL", u"This fleet cannot travel there."},
+    {"TEXT_EAWR_ABILITY_ORDER_UNAVAILABLE", u"That order is not available for this fleet."},
+    {"TEXT_EAWR_ABILITY_MARKET_OWN_PLANET", u"You cannot open a black market on your own planet or an ally's."},
+    {"TEXT_EAWR_ABILITY_MARKET_NO_TRADERS", u"Nobody on this planet trades on the black market."},
+    {"TEXT_EAWR_ABILITY_MARKET_CANNOT_HOST", u"This planet cannot host a black market."},
+    {"TEXT_EAWR_ABILITY_MARKET_OTHER_CORRUPTION", u"This planet already carries another corruption, so it cannot host a black market."},
+    {"TEXT_EAWR_ABILITY_MARKET_NOT_ESTABLISHED", u"This planet has no black market yet: corrupt it with the Black Market option first."},
+    {"TEXT_EAWR_ABILITY_MARKET_NOTHING_OFFERED", u"The black market on this planet has nothing to offer you."},
+    {"TEXT_EAWR_ABILITY_MARKET_CANNOT_PRICE", u"The black market cannot price anything on this planet right now."},
     {"TEXT_MODS_OPTIONS", u"Mods"},
     {"TEXT_SELECT_MOD_TITLE", u"Select Mod"},
 }};

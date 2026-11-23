@@ -142,6 +142,7 @@ struct ShotProfileBuilder final {
         tactical::ShotProfile shot;
         shot.damage = weapon.damage && weapon.damage->raw() > 0 ? *weapon.damage : projectile.damage.value_or(Fixed{});
         shot.blast = projectile.blast; // WAD-02/36: independent of instance direct damage
+        shot.combat_mod = projectile.combat_mod;
         // #5724: a tolerant load saturates a hit damage above the sim's fixed-point bound (debug build: the tag is an
         // unchecked float, no range message exists; the authored value far exceeds any health). A note names it;
         // strict loads keep refusing.
@@ -162,6 +163,7 @@ struct ShotProfileBuilder final {
             saturate(shot.blast.damage, "Projectile_Blast_Area_Damage");
         }
         shot.damage_delay = projectile.damage_delay;
+        shot.damages_random_hardpoints = projectile.damages_random_hardpoints;
         shot.damage_type = types.damage(!weapon.damage_type.empty() ? weapon.damage_type : projectile.damage_type);
         shot.speed = *projectile.max_speed;
         // WWP-48: the unit's own weapon travels its type's Targeting_Max_Attack_Distance; the

@@ -13,6 +13,9 @@ chunk). The companion parent/child rules are in
 
 ## Source rules
 
+FoC verification: D-01 to D-07 describe the reference; BP-48 separately
+establishes the debug-build hidden-host drain and reset, not every detach rule.
+
 | Rule | Behaviour |
 |---|---|
 | D-01 | The V1 `0x0900` root may end with a one-byte `0x0002` chunk after the emitters. A nonzero byte sets `leave_particles`; an absent chunk leaves the default, which is set. |

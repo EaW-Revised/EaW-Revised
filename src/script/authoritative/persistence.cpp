@@ -11,6 +11,7 @@
 #include "eawr/sim/world.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <map>
 #include <limits>
@@ -122,6 +123,7 @@ void write_value(ByteWriter& out, const Value& value, int depth = 0) {
                 out.u8(value_handle);
                 out.u32(data.kind);
                 out.u64(data.id);
+                out.u32(data.aux);
             } else {
                 if (depth >= max_value_list_depth) {
                     out.fail();
@@ -156,6 +158,7 @@ bool read_value(ByteReader& in, Value& value, int depth) {
         Handle handle;
         handle.kind = in.u32();
         handle.id = in.u64();
+        handle.aux = in.u32();
         value.data = handle;
         break;
     }
@@ -990,11 +993,12 @@ core::Result<std::string> ScriptScheduler::state_hash() {
 core::Result<std::string> ScriptScheduler::state_hash(const sim::PartitionExecutor& executor) {
     auto bytes = save(executor);
     if (!bytes) return core::Result<std::string>::failure(bytes.error());
-    std::string framed(state_hash_identity);
-    framed.push_back('\0');
-    framed += bytes.value();
-    return core::Result<std::string>::success(
-        core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(framed.data()), framed.size())));
+    core::Sha256Hasher hasher;
+    hasher.update(std::span(reinterpret_cast<const std::uint8_t*>(state_hash_identity.data()), state_hash_identity.size()));
+    const std::array<std::uint8_t, 1> separator{0};
+    hasher.update(separator);
+    hasher.update(std::span(reinterpret_cast<const std::uint8_t*>(bytes.value().data()), bytes.value().size()));
+    return core::Result<std::string>::success(hasher.hex_digest());
 }
 
 std::string authoritative_state_sha256(

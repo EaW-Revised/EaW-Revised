@@ -11,10 +11,11 @@ namespace eawr::campaign {
 //   BUILDABLE_UNIT, LOCK_UNIT WST-40/64  production unlock/lock lists and the faction's slicer post-check
 //   SET_TECH_LEVEL, SET_MAX_TECH_LEVEL  WST-41
 //   CREDITS                   WST-41
+//   GIVE_BLACK_MARKET         WGEP-139  one registered item joins the owner's black-market unlock list (no debit)
 //   SWITCH_CONTROL            WST-49/75, WGS-136  (#6917) hands the AI player type change to the native AI's inbox
 // Every other reward type is declined by name (the doc lists them). Each applied reward is a journaled native
 // effect (kinds 12, 19, 20), so a recording replays it without the engine; the replayer is registered here.
 [[nodiscard]] core::Result<void> bind_story_rewards(GameSession&, const CampaignSetupPlan&,
-    const data::galactic::GalacticData&);
+    const data::galactic::GalacticData&, std::vector<std::string> black_market_items = {});
 
 } // namespace eawr::campaign

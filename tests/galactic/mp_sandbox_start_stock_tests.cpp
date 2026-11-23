@@ -56,8 +56,8 @@ void start_entry(const std::shared_ptr<const eawr::vfs::Vfs>& filesystem, const 
         if (!playable && !faction.is_neutral.value_or(false))
             paired_ambient = paired_ambient || std::any_of(source->ai_player_control.begin(), source->ai_player_control.end(),
                 [&](const auto& pair) { return pair.faction == faction.name; });
-        // A galaxy has at most two human sides: in the ambient-only layout the first human holds side 1, the rest side 2.
-        const gc::HumanSideId side = !human ? 0U : !ambient_only ? static_cast<gc::HumanSideId>(id) : humans++ == 0 ? 1U : 2U;
+        // One faction per human side: in the ambient-only layout each human faction holds the side of its rank among the humans (1..N).
+        const gc::HumanSideId side = !human ? 0U : !ambient_only ? static_cast<gc::HumanSideId>(id) : static_cast<gc::HumanSideId>(++humans);
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
             human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, side});
     }

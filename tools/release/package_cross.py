@@ -32,12 +32,17 @@ def main(argv=None):
     parser.add_argument('--sha', required=True)
     parser.add_argument('--version', required=True)
     parser.add_argument('--build-dir', required=True, type=Path)
-    parser.add_argument('--engine-dir', required=True, type=Path)
-    parser.add_argument('--launcher-artifact', required=True, type=Path)
+    parser.add_argument('--engine-dir', type=Path)
+    parser.add_argument('--launcher-artifact', type=Path)
     parser.add_argument('--out', required=True, type=Path)
-    parser.add_argument('--symbol-store', required=True, type=Path)
-    parser.add_argument('--linux-import-godot', required=True, type=Path,
+    parser.add_argument('--symbol-store', type=Path)
+    parser.add_argument('--linux-import-godot', type=Path,
                         help='the pinned official Linux Godot editor that writes the project metadata (no Wine)')
+    parser.add_argument('--linux-player', action='store_true',
+                        help='write the Linux x64 player instead of the Windows kit: needs --linux-engine and --linux-viewer, '
+                             '--build-dir is the native Linux root build; no launcher, symbols or Windows inputs')
+    parser.add_argument('--linux-engine', type=Path, help='--linux-player: the patched godot.linuxbsd.editor.x86_64')
+    parser.add_argument('--linux-viewer', type=Path, help='--linux-player: libeawr_viewer.linux.template_release.x86_64.so')
     parser.add_argument('--revised-layer', type=Path)
     parser.add_argument('--allow-missing-revised-layer', action='store_true')
     parser.add_argument('--public', action='store_true')
@@ -50,6 +55,28 @@ def main(argv=None):
         head = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
         if head != args.sha:
             raise ValueError(f'source checkout is at {head}, expected {args.sha}')
+        if args.linux_player:
+            if not (args.linux_engine and args.linux_viewer):
+                raise ValueError('--linux-player needs --linux-engine and --linux-viewer')
+            if args.debug or args.inputs_dir or args.engine_dir or args.launcher_artifact or args.symbol_store:
+                raise ValueError('--linux-player takes no Debug, launcher, symbol or Windows engine inputs')
+            # The same identity rule as every kit engine: only the pinned patched build, nothing else.
+            identity = kit_engine.guard.identify(args.linux_engine)
+            if not identity['patched'] or not identity['label'].endswith('linux-x64'):
+                raise ValueError(f'--linux-engine is not the pinned patched Linux x64 engine ({identity["sha256"]})')
+            command = host_package.linux_player_command(
+                ROOT / 'tools/release/package_release.py', expect_identity=args.sha, build_dir=args.build_dir,
+                version=args.version, out=args.out, linux_engine=args.linux_engine, linux_viewer=args.linux_viewer,
+                revised_layer=args.revised_layer, allow_missing_revised_layer=args.allow_missing_revised_layer,
+                public=args.public)
+            subprocess.run(command, check=True)
+            for line in host_package.release_file_lines(args.out):
+                print(line)
+            return 0
+        missing = [name for name in ('engine_dir', 'launcher_artifact', 'symbol_store', 'linux_import_godot')
+                   if getattr(args, name) is None]
+        if missing:
+            raise ValueError('missing --' + ', --'.join(name.replace('_', '-') for name in missing))
         launcher_artifact.verify_local(args.launcher_artifact, launcher_artifact.read_pin())
         if args.debug:
             if args.inputs_dir is None:

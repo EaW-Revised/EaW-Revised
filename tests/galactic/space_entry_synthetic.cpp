@@ -585,6 +585,35 @@ void ground_passenger_contracts() {
         rules.reserve_attachments.push_back({27, reserve.contained});
         check(campaign::apply_space_rules(entry, input.map, rules));
         const auto& content = entry.content;
+        {
+            // A hero whose transport is a reserve (not first wave) arrives as its unique ship, never as the transport (#8173).
+            auto unique_record = record; unique_record.forces.push_back({34, 3, 1, 10});
+            auto unique_input = input;
+            unique_input.riders.push_back({{37, 4, 1, 10}, "Commander", 34, {}, {}});
+            unique_input.riders.back().force.hero = true;
+            unique_input.types[3].unique_space_unit = "ReserveShip";
+            auto unique_entry = take(campaign::build_space_entry(unique_record, unique_input, 100, 17));
+            campaign::SpaceRuleInputs unique_rules;
+            for (const auto owner : {1U, 2U}) {
+                campaign::SpaceRulePlayer player; player.player = owner; player.max_tech = 5; unique_rules.players.push_back(player);
+            }
+            for (const auto& [carrier, rider_id, rider_type] : {std::tuple{27U, 29U, skirmish::type_id(member.tactical)},
+                     std::tuple{34U, 37U, skirmish::type_id("Commander")}}) {
+                tt::UnitState outer; outer.entity_id = carrier;
+                tt::CarriedObject rider; rider.entity_id = rider_id; rider.type_id = rider_type;
+                expect(tt::contain_object(outer, rider, false), "unique-arrival reserve rider attaches to its carrier");
+                unique_rules.reserve_attachments.push_back({carrier, outer.contained});
+            }
+            check(campaign::apply_space_rules(unique_entry, unique_input.map, unique_rules));
+            const auto& reserves = unique_entry.conflict.tactical.campaign->reserves;
+            const auto hero_reserve = std::find_if(reserves.begin(), reserves.end(), [](const auto& r) { return r.id == 34; });
+            expect(hero_reserve != reserves.end() && hero_reserve->type == skirmish::type_id("ReserveShip")
+                && hero_reserve->contained.size() == 1 && hero_reserve->contained.front().entity_id == 37,
+                "a reserve transport carrying a unique-ship hero arrives as that ship and keeps the hero aboard");
+            const auto plain_reserve = std::find_if(reserves.begin(), reserves.end(), [](const auto& r) { return r.id == 27; });
+            expect(plain_reserve != reserves.end() && plain_reserve->type == skirmish::type_id("Transport"),
+                "a reserve transport without a unique ship still arrives as the transport");
+        }
         expect(entry.conflict.tactical.campaign->reserves.size() == 1
             && entry.conflict.tactical.campaign->reserves.front().id == 27,
             "WGT-122: transports use a count allowance independently of ship population");
@@ -2070,5 +2099,58 @@ void ai_retreat_completion() {
         if (workers == 1) { reference = hashes; reference_replay = bytes; }
         else expect(reference == hashes && reference_replay == bytes, "AI retreat hashes and replay bytes equal on 1/2/4/8 workers");
     }
+}
+// #8171 / D10: the agreed multiplayer difficulty entry is turned into a LEVEL once, and each AI slot then reads that level
+// from its own player type. No entry name has to match across player types.
+void mp_ai_difficulty_contracts() {
+    using campaign::MpAgreedLevel;
+    using campaign::MpAiDifficulty;
+    using campaign::MpLevelEntries;
+    const MpLevelEntries stock{"Easy_Default", "Normal_Default", "Hard_Default"};
+    const MpLevelEntries skirmish{"Easy_Skirmish", "Medium_Skirmish", "Hard_Skirmish"}; // a skirmish-style player type
+    const MpLevelEntries minor{"Easy_Minor", "Normal_Minor", "Hard_Minor"};
+    const MpLevelEntries story{"Easy_Story", "", "Hard_Story"};
+    const MpLevelEntries none{};
+    const std::array types{stock, skirmish, minor, story};
+    const auto level = [&](const std::string_view agreed, const MpLevelEntries& campaign_entries) {
+        return campaign::agreed_mp_level(agreed, campaign_entries, types);
+    };
+    // The lobby agrees Normal_Default for every room; it is the stock Normal name, so the level is Normal.
+    expect(level("Normal_Default", stock).level == tt::AiLevel::normal && !level("Normal_Default", stock).assumed,
+        "the campaign's own lobby entries turn the agreed name into its level");
+    expect(level("normal_default", none).level == tt::AiLevel::normal && !level("normal_default", none).assumed,
+        "without campaign entries any player type that authors the name gives its level, in any case");
+    expect(level("Easy_Minor", stock).level == tt::AiLevel::easy && level("Hard_Story", stock).level == tt::AiLevel::hard,
+        "a name only a differently named player type authors still maps to its level");
+    expect(level("Hard_Default", none).level == tt::AiLevel::hard, "the stock name of a level is the level");
+    expect(campaign::agreed_mp_level("Easy_Default", none, {}).level == tt::AiLevel::easy,
+        "with no player types at all the stock names still read as their level");
+    // A name two player types map to different levels is not a match; unknown names are Normal, never a refusal.
+    const MpLevelEntries clash{"Shared", "", ""}, clash_other{"", "", "Shared"};
+    const std::array clashing{clash, clash_other};
+    const auto ambiguous = campaign::agreed_mp_level("Shared", none, clashing);
+    expect(ambiguous.level == tt::AiLevel::normal && ambiguous.assumed, "a name that two types map to different levels is assumed Normal");
+    const auto unknown = level("Nothing_Authors_This", none);
+    expect(unknown.level == tt::AiLevel::normal && unknown.assumed, "an unknown agreed name is assumed Normal, not refused");
+    expect(campaign::agreed_mp_level("", none, {}).assumed, "an empty agreed name is assumed Normal");
+
+    // The same agreed level reaches each faction's own entry name.
+    for (const auto agreed : {tt::AiLevel::easy, tt::AiLevel::normal, tt::AiLevel::hard}) {
+        const std::size_t at = agreed == tt::AiLevel::easy ? 0U : agreed == tt::AiLevel::normal ? 1U : 2U;
+        for (const auto* entries : {&stock, &skirmish, &minor}) {
+            const auto chosen = campaign::choose_mp_ai_difficulty(*entries, agreed);
+            expect(chosen.level == agreed && chosen.adjustment == (*entries)[at] && chosen.source == MpAiDifficulty::Source::level_entry,
+                "each player type runs its own entry for the agreed level, whatever its entry names are");
+        }
+    }
+    const auto no_normal = campaign::choose_mp_ai_difficulty(story, tt::AiLevel::normal);
+    expect(no_normal.source == MpAiDifficulty::Source::engine_default && no_normal.adjustment.empty()
+        && no_normal.level == tt::AiLevel::normal, "a type with neither the level nor a Normal entry runs the engine default");
+    const auto fallback = campaign::choose_mp_ai_difficulty(MpLevelEntries{"", "Only_Normal", ""}, tt::AiLevel::hard);
+    expect(fallback.source == MpAiDifficulty::Source::normal_entry && fallback.adjustment == "Only_Normal"
+        && fallback.level == tt::AiLevel::normal, "a type with no entry for the level uses its Normal entry");
+    const auto empty_type = campaign::choose_mp_ai_difficulty(none, tt::AiLevel::hard);
+    expect(empty_type.source == MpAiDifficulty::Source::engine_default && empty_type.adjustment.empty()
+        && empty_type.level == tt::AiLevel::hard, "a type that authors no entries runs the engine default at the agreed level");
 }
 } // namespace space_entry_test

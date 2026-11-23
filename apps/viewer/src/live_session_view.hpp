@@ -291,6 +291,10 @@ public:
     // #3076 (WU-21, WSU-31): the owner's UI tint: its lobby colour in a skirmish, its faction's `Color`
     // in a campaign battle.
     [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> owner_ui_colour(sim::tactical::PlayerId player) const;
+    [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> participant_colour(sim::SeatId seat,
+        sim::tactical::PlayerId owner) const;
+    [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> instance_model_colour(
+        const sim::tactical::TacticalInstance& instance, const std::string& object_id) const;
     // WGT-120: neutral owners always use nonzero type/faction No_Colorization_Color;
     // other owners use lobby colour in skirmish and type/faction colour in campaign.
     [[nodiscard]] bool model_uses_player_colour(sim::tactical::PlayerId player) const noexcept;
@@ -312,6 +316,8 @@ public:
         if (scheduler_) scheduler_->discard_unit_orders(entity);
     }
     [[nodiscard]] sim::SeatId local_controller_seat() const noexcept { return options_.controller_seat; }
+    // #8182: a non-commandable battle view (a spectator): no selection, no orders, no order controls.
+    [[nodiscard]] bool view_only() const noexcept { return options_.view_only; }
     [[nodiscard]] bool controller_policy_enabled() const noexcept {
         return battle_frame_.latest && battle_frame_.latest->controller_policy().has_value();
     }
@@ -329,7 +335,7 @@ public:
             setup_->beacon_rules.end(), [this](const auto& rule) { return rule.player == player_; });
     }
     bool place_beacon(const sim::math::Vec3& position) {
-        if (!beacon_available()) return false;
+        if (options_.view_only || !beacon_available()) return false; // #8182: a watched battle issues no order
         ui::TacticalIntent intent;
         intent.verb = ui::TacticalVerb::beacon;
         intent.destination = position;
@@ -1026,6 +1032,8 @@ private:
     // #3076: Factions.xml `Color` / `No_Colorization_Color`, and the types' own nonzero
     // `No_Colorization_Color`. Colorization is off outside a skirmish (campaign battles).
     presentation::ui::MinimapSettings faction_colours_;
+    std::vector<std::array<std::uint8_t, 3>> gc_palette_;
+    std::map<sim::SeatId, std::array<std::uint8_t, 3>> gc_seat_colours_;
     std::map<std::string, std::array<std::uint8_t, 3>> type_no_colorization_;
     bool colorization_enabled_{true};
     std::set<sim::tactical::PlayerId> neutral_model_owners_; // WGT-120: cached from authored faction neutrality

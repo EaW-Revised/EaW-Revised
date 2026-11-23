@@ -4,10 +4,16 @@ name: Post-release verification
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag associated with this verification of main
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
-  group: post-release-${{ github.event.release.tag_name }}
+  group: post-release-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 jobs:
   verify:
@@ -28,17 +34,28 @@ jobs:
       - name: Check out the published tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ github.event.release.tag_name }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || format('refs/tags/{0}', github.event.release.tag_name) }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Require the tagged commit on main
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           git fetch origin main:refs/remotes/origin/main
-          TAG_COMMIT=$(git rev-parse HEAD)
+          git check-ref-format "refs/tags/$TAG"
+          TAG_COMMIT=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
           git merge-base --is-ancestor "$TAG_COMMIT" origin/main
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null
+          else
+            test "$(git rev-parse HEAD)" = "$TAG_COMMIT"
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -59,7 +76,7 @@ jobs:
 
       - name: Install the Apple toolchain
         if: ${{ runner.os == 'macOS' }}
-        run: brew install ninja
+        run: brew install ninja llvm
 
       - name: Install test dependencies
         run: python -m pip install -r requirements-dev.txt
@@ -80,16 +97,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B out/build/macos -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DEAWR_WARNINGS_AS_ERRORS=ON -DEAWR_ENABLE_SIM_BOUNDARY_CHECK=ON
+          llvm="$(brew --prefix llvm)"
+          cmake -S . -B out/build/macos -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DCMAKE_CXX_COMPILER="$llvm/bin/clang++" \
+            -DCMAKE_CXX_FLAGS="-fexperimental-library -nostdinc++ -isystem $llvm/include/c++/v1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-L$llvm/lib/c++ -Wl,-rpath,$llvm/lib/c++" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DEAWR_WARNINGS_AS_ERRORS=ON -DEAWR_ENABLE_SIM_BOUNDARY_CHECK=ON
           cmake --build out/build/macos --parallel 3
           ctest --test-dir out/build/macos --output-on-failure -LE "game-data|installed-required"
 
       - name: File a non-blocking verification ticket
-        if: ${{ !cancelled() && failure() }}
+        if: ${{ github.event_name == 'release' && !cancelled() && failure() }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
           PLATFORM: ${{ matrix.name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |

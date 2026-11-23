@@ -167,7 +167,7 @@ core::Result<void> NativeActions::prepare_player_frontiers(const sim::PartitionE
 }
 NativeActions::NativeActions(gc::GalacticSession& world, std::shared_ptr<ai::GalacticFunding> funding,
     Placement placement, std::map<gc::PlayerId, sim::math::Fixed> multipliers, GoalResolver resolver, const sim::PartitionExecutor* executor, BaseCost base_cost)
-    : world_(world), funding_(std::move(funding)), placement_(std::move(placement)), multipliers_(std::move(multipliers)), goal_resolver_(std::move(resolver)), base_cost_(std::move(base_cost)), executor_(executor), lifetime_(std::make_shared<NativeActions*>(this)) {
+    : world_(world, *this), funding_(std::move(funding)), placement_(std::move(placement)), multipliers_(std::move(multipliers)), goal_resolver_(std::move(resolver)), base_cost_(std::move(base_cost)), executor_(executor), lifetime_(std::make_shared<NativeActions*>(this)) {
     bound().freestore_ = std::make_shared<QualifiedFreestore>([lifetime = lifetime_] { if (*lifetime) (*lifetime)->mark_state_changed(); });
     for (const auto& player : this->setup().players) bound().player_scratch_.try_emplace(player.player_id);
     update_metadata_record();
@@ -192,7 +192,7 @@ core::Result<void> NativeActions::probe_births(const gc::GalacticSnapshot& base,
     return freestore_births_(staged, base, shadow, births, workers);
 }
 void NativeActions::bind_handlers() {
-    if (actor_changes_) world_.set_native_actor_changes_handler([lifetime = lifetime_](const auto& snapshot, auto changes) {
+    if (actor_changes_) world_.write().set_native_actor_changes_handler([lifetime = lifetime_](const auto& snapshot, auto changes) {
         if (changes.empty()) return core::Result<void>::success();
         if (!*lifetime || !(*lifetime)->actor_changes_ || !(*lifetime)->actor_facts_)
             return invalid<void>("native actor lifecycle owner must be rebound before service");
@@ -204,17 +204,17 @@ void NativeActions::bind_handlers() {
         if (owner.delivery_sink_ && owner.delivery_sink_(delivery)) return core::Result<void>::success();
         return owner.apply_delivery(delivery);
     });
-    world_.set_native_production_outcome_handler([lifetime = lifetime_](const auto& input) {
+    world_.write().set_native_production_outcome_handler([lifetime = lifetime_](const auto& input) {
         if (!*lifetime) return;
         auto& owner = **lifetime;
         Delivery delivery{input};
         if (owner.delivery_sink_ && owner.delivery_sink_(delivery)) return;
         owner.apply_production_outcome(input);
     });
-    world_.set_native_production_handler([lifetime = lifetime_](const auto& input) {
+    world_.write().set_native_production_handler([lifetime = lifetime_](const auto& input) {
         return *lifetime ? (*lifetime)->notice(input) : invalid<gc::GalacticSession::NativeProductionPayment>("native producer owner must be rebound before service");
     });
-    world_.set_credit_notification_handler([lifetime = lifetime_](const auto& input) {
+    world_.write().set_credit_notification_handler([lifetime = lifetime_](const auto& input) {
         if (*lifetime && (*lifetime)->credit_sink_) if (auto taken = (*lifetime)->credit_sink_(input)) return std::move(*taken);
         return *lifetime && (*lifetime)->funding_ ? (*lifetime)->funding_->notify(input) : invalid<void>("native cash requires the rebound funding owner");
     });
@@ -222,14 +222,14 @@ void NativeActions::bind_handlers() {
 bool NativeActions::supports(ActionKind kind) const noexcept {
     return kind == ActionKind::produce || kind == ActionKind::magic || kind == ActionKind::give_money
         || ((kind == ActionKind::land || kind == ActionKind::launch || kind == ActionKind::regroup) && admission_pending_)
-        || (kind == ActionKind::invade && admission_pending_ && world_.native_invasion_available())
+        || (kind == ActionKind::invade && admission_pending_ && admission_session().native_invasion_available())
         || ((kind == ActionKind::move || kind == ActionKind::raid) && movement_provider_ && conflict_pending_ && no_hop_ && admission_pending_);
 }
 const gc::GalacticSession::NativeInvasion* NativeActions::invasion_status(std::uint64_t request) const noexcept {
-    return world_.native_invasion(request);
+    return admission_session().native_invasion(request);
 }
-core::Result<void> NativeActions::retire_invasion(std::uint64_t request) { return world_.retire_native_invasion(request); }
-core::Result<void> NativeActions::retire_unadmitted_invasion(std::uint64_t request) { return world_.retire_native_unadmitted_invasion(request); }
+core::Result<void> NativeActions::retire_invasion(std::uint64_t request) { return admission_session().retire_native_invasion(request); }
+core::Result<void> NativeActions::retire_unadmitted_invasion(std::uint64_t request) { return admission_session().retire_native_unadmitted_invasion(request); }
 core::Result<BillDecision> decide_bill(const BillRow& row, const gc::GalacticSession::NativeProductionNotice& input,
     const BillLedgers& ledgers, std::span<const gc::ProductionPlayer> players) {
     using Result = core::Result<BillDecision>;
@@ -319,7 +319,7 @@ core::Result<gc::GalacticSession::NativeProductionPayment> NativeActions::notice
     if (billing_sink_) taken = billing_sink_(input);
     auto result = taken ? std::move(*taken) : notice_unrecorded(input);
     if (result && input.kind == gc::GalacticSession::NativeProductionNotice::Kind::billed) {
-        const auto recorded = world_.append_native_effect(gc::NativeEffectKind::production_payment,
+        const auto recorded = admission_session().append_native_effect(gc::NativeEffectKind::production_payment,
             economic_replay::payment(input, result.value()), gc::NativeEffectPhase::world_service);
         if (!recorded) return core::Result<gc::GalacticSession::NativeProductionPayment>::failure(recorded.error());
     }
@@ -414,9 +414,9 @@ core::Result<void> NativeActions::finish_task(sim::EntityId build, bool salvage)
             for (const auto& planet : this->snapshot()->planets()) if (planet.id == producer.planet) recipient = planet.owner;
     const auto multiplier = multipliers_.find(recipient);
     if (multiplier == multipliers_.end()) return invalid<void>("finished task requires its refund multiplier");
-    auto result = world_.finish_native_production_task(build, salvage, multiplier->second);
+    auto result = admission_session().finish_native_production_task(build, salvage, multiplier->second);
     if (!result) return result;
-    if (auto recorded = world_.append_native_effect(gc::NativeEffectKind::production_finish,
+    if (auto recorded = admission_session().append_native_effect(gc::NativeEffectKind::production_finish,
         economic_replay::finish(build, salvage, multiplier->second)); !recorded) return recorded;
     mark_build_state_changed();
     at->second.orphan = true; // task signal itself never clears a mark or refunds
@@ -497,12 +497,12 @@ core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
     if (pending_admission()) return invalid<ActionReceipt>("native actions require ordered nonreentrant admission");
     if (request.kind == ActionKind::move || request.kind == ActionKind::raid) return admit_movement(request);
     if (request.kind == ActionKind::invade) {
-        auto invaded = world_.admit_native_invasion(request.player, request.object, admission_pending_());
+        auto invaded = admission_session().admit_native_invasion(request.player, request.object, admission_pending());
         if (!invaded) return Result::failure(invaded.error());
         return Result::success({invaded.value().admitted, invaded.value().request});
     }
     if (request.kind == ActionKind::land) {
-        auto landed = world_.land_native_transports(request.player, request.object, admission_pending_());
+        auto landed = admission_session().land_native_transports(request.player, request.object, admission_pending());
         if (!landed) return Result::failure(landed.error());
         return Result::success({landed.value().admitted, landed.value().object});
     }
@@ -521,7 +521,7 @@ core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
             if (landed->owner != request.player || trait == traits.end() || !trait->transport) continue;
             // WGA-486: each member launches at its own parent; the retained
             // result is not a target for another member's local launch.
-            auto launched = world_.launch_native_transport(request.player, member, 0, admission_pending_());
+            auto launched = admission_session().launch_native_transport(request.player, member, 0, admission_pending());
             if (!launched) return Result::failure(launched.error());
             // WGA-227: a later blockade/refusal keeps earlier actual launches.
             if (!launched.value().admitted) return Result::success({false, 0});
@@ -532,7 +532,7 @@ core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
         return Result::success({tracked || target != 0, target});
     }
     if (request.kind == ActionKind::launch) {
-        auto launched = world_.launch_native_transport(request.player, request.object, request.target, admission_pending_());
+        auto launched = admission_session().launch_native_transport(request.player, request.object, request.target, admission_pending());
         if (!launched) return Result::failure(launched.error());
         return Result::success({launched.value().admitted, launched.value().object});
     }
@@ -548,14 +548,14 @@ core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
         for (const auto member : request.members) if (const auto fleet = containing_fleet(request.player, member))
             if (*fleet != target && std::find(others.begin(), others.end(), *fleet) == others.end()) others.push_back(*fleet);
         for (const auto source : others) {
-            auto merged = world_.admit_native_fleet(request.player, gc::MergeFleets{source, target}, admission_pending_());
+            auto merged = admission_session().admit_native_fleet(request.player, gc::MergeFleets{source, target}, admission_pending());
             if (!merged) return Result::failure(merged.error());
             if (!merged.value().admitted) return Result::success({false, 0});
         }
         return Result::success({true, target});
     }
     if (request.kind == ActionKind::regroup) {
-        auto merged = world_.admit_native_fleet(request.player, gc::MergeFleets{request.object, request.target}, admission_pending_());
+        auto merged = admission_session().admit_native_fleet(request.player, gc::MergeFleets{request.object, request.target}, admission_pending());
         if (!merged) return Result::failure(merged.error());
         return Result::success({merged.value().admitted, merged.value().admitted ? request.target : 0});
     }
@@ -564,9 +564,9 @@ core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
         if (multiplier == multipliers_.end()) return invalid<ActionReceipt>("cash requires the selected AI multiplier or explicit non-AI one");
         auto amount = numeric::to_fixed(request.amount);
         if (!amount) return Result::failure(amount.error());
-        auto added = world_.add_credits(request.player, amount.value(), multiplier->second);
+        auto added = admission_session().add_credits(request.player, amount.value(), multiplier->second);
         if (!added) return Result::failure(added.error());
-        if (auto recorded = world_.append_native_effect(gc::NativeEffectKind::cash,
+        if (auto recorded = admission_session().append_native_effect(gc::NativeEffectKind::cash,
             economic_replay::cash(request.player, amount.value(), multiplier->second, added.value())); !recorded) return Result::failure(recorded.error());
         return Result::success({true, 0});
     }
@@ -577,11 +577,11 @@ core::Result<ActionReceipt> NativeActions::admit(const ActionRequest& request) {
         return admit_paid(request, *goal);
     }
     if (!placement_) return invalid<ActionReceipt>("magic creation requires original placement inputs");
-    auto made = world_.create_native_force(input, [&](const gc::GalacticSnapshot& snapshot, sim::EntityId frontier) {
+    auto made = admission_session().create_native_force(input, [&](const gc::GalacticSnapshot& snapshot, sim::EntityId frontier) {
         return placement_(request, snapshot, frontier);
     });
     if (!made) return Result::failure(made.error());
-    if (auto recorded = world_.append_native_effect(gc::NativeEffectKind::magic,
+    if (auto recorded = admission_session().append_native_effect(gc::NativeEffectKind::magic,
         economic_replay::magic(request, made.value())); !recorded) return Result::failure(recorded.error());
     created_ = std::move(made).value();
     return Result::success({!created_.empty(), created_.empty() ? 0 : created_.front()});
@@ -602,11 +602,11 @@ core::Result<ActionReceipt> NativeActions::admit_paid(const ActionRequest& reque
     auto& pending_goal_ = scratch.pending_goal;
     pending_ = request; pending_goal_ = goal;
     const sim::InlineExecutor inline_executor;
-    auto accepted = world_.admit_native_production({request.player, request.target, request.type, cost.value()}, current_executor() ? *current_executor() : inline_executor);
+    auto accepted = admission_session().admit_native_production({request.player, request.target, request.type, cost.value()}, current_executor() ? *current_executor() : inline_executor);
     pending_.reset(); pending_goal_ = 0;
     if (!accepted) return Result::failure(accepted.error());
     if (accepted.value().admission == gc::ProductionAdmission::allowed) {
-        if (auto recorded = world_.append_native_effect(gc::NativeEffectKind::production,
+        if (auto recorded = admission_session().append_native_effect(gc::NativeEffectKind::production,
             economic_replay::production({request.player, request.target, request.type, cost.value()}, accepted.value())); !recorded) return Result::failure(recorded.error());
     }
     return Result::success({accepted.value().admission == gc::ProductionAdmission::allowed, accepted.value().build});
@@ -638,7 +638,7 @@ core::Result<ActionReceipt> NativeActions::prepare_assembly_actor(gc::PlayerId p
     auto at = assembly_location(player, actor);
     if (!at || at->transit || !at->planet) return Result::success({false, 0});
     if (at->landed) {
-        auto launched = world_.launch_native_transport(player, actor, 0, admission_pending_());
+        auto launched = admission_session().launch_native_transport(player, actor, 0, admission_pending());
         if (!launched) return Result::failure(launched.error());
         if (!launched.value().admitted) return Result::success({false, 0});
         at = assembly_location(player, actor);
@@ -650,10 +650,10 @@ core::Result<ActionReceipt> NativeActions::prepare_assembly_actor(gc::PlayerId p
     if (separate && actor != fleet->id && fleet->members.size() > 1) {
         // Each ordinary existing actor leaves a multi-member fleet before its
         // common join/pathing route. Earlier real effects survive later refusal.
-        auto removed = world_.admit_native_fleet(player, gc::RemoveFleetMembers{fleet->id, {actor}}, admission_pending_());
+        auto removed = admission_session().admit_native_fleet(player, gc::RemoveFleetMembers{fleet->id, {actor}}, admission_pending());
         if (!removed) return Result::failure(removed.error());
         if (!removed.value().admitted) return Result::success({false, 0});
-        auto created = world_.admit_native_fleet(player, gc::CreateFleet{at->planet, {actor}, 0}, admission_pending_());
+        auto created = admission_session().admit_native_fleet(player, gc::CreateFleet{at->planet, {actor}, 0}, admission_pending());
         if (!created) return Result::failure(created.error());
         if (!created.value().admitted) return Result::success({false, 0});
         at = assembly_location(player, actor);
@@ -681,13 +681,13 @@ core::Result<void> NativeActions::land_assembly_arrival(gc::PlayerId player, sim
     const bool allied = planet != snapshot->planets().end() && (planet->owner == player || std::any_of(relations.begin(), relations.end(),
         [&](const auto& row) { return row.player == player && row.other == planet->owner && row.allied; }));
     if (!allied) return core::Result<void>::success();
-    const auto available = world_.native_transport_landing_available(player, at->planet);
+    const auto available = admission_session().native_transport_landing_available(player, at->planet);
     if (!available) return core::Result<void>::failure(available.error());
     if (available.value() != gc::GalacticSession::NativeTransportLandingGate::admitted) return core::Result<void>::success();
-    auto removed = world_.admit_native_fleet(player, gc::RemoveFleetMembers{at->fleet, {actor}}, admission_pending_());
+    auto removed = admission_session().admit_native_fleet(player, gc::RemoveFleetMembers{at->fleet, {actor}}, admission_pending());
     if (!removed) return core::Result<void>::failure(removed.error());
     if (!removed.value().admitted) return core::Result<void>::success();
-    auto landed = world_.land_native_transport(player, actor, at->planet, admission_pending_());
+    auto landed = admission_session().land_native_transport(player, actor, at->planet, admission_pending());
     if (!landed) return core::Result<void>::failure(landed.error());
     return core::Result<void>::success();
 }
@@ -700,7 +700,7 @@ void NativeActions::bind_freestore_path(FreestorePathProvider provider, Conflict
     freestore_path_ = std::move(provider); conflict_pending_ = std::move(pending); bind_movement_listener();
 }
 void NativeActions::bind_movement_listener() {
-    world_.set_native_movement_listener([token = lifetime_](const gc::GalacticEvent& event) {
+    world_.write().set_native_movement_listener([token = lifetime_](const gc::GalacticEvent& event) {
         if (!*token) return;
         (*token)->on_movement_event(event);
     });
@@ -753,10 +753,11 @@ core::Result<void> NativeActions::advance_movement(Movement& movement, bool task
     });
     const auto no_hop = [&]() -> core::Result<void> {
         return at != snapshot->fleets().end() && at->orbit && !at->motion.transit
-            ? no_hop_(movement.player, movement.actor) : core::Result<void>::success();
+            ? (lane_session_ ? lane_session_->recheck_native_orbit(movement.player, movement.actor)
+                             : no_hop_(movement.player, movement.actor)) : core::Result<void>::success();
     };
     // WGA-229: global conflict gate precedes actor/source/path terminal tests.
-    if (conflict_pending_()) { movement.advance_requested = true; return no_hop(); }
+    if (conflict_pending()) { movement.advance_requested = true; return no_hop(); }
     movement.advance_requested = false;
     if (movement.taskforce && !taskforce_has_members) { movement.finished = true; return no_hop(); }
     if (at == snapshot->fleets().end()) { movement.actor = 0; movement.finished = true; return core::Result<void>::success(); }
@@ -798,8 +799,8 @@ core::Result<void> NativeActions::advance_movement(Movement& movement, bool task
         }
     }
     // WGA-228: one ordinary hop only. The next poll searches the new world again.
-    auto admitted = world_.admit_native_fleet(movement.player,
-        gc::MoveFleet{movement.actor, movement.raid ? path.value().planets : std::vector<gc::PlanetId>{at->orbit, next}, {}, movement.raid}, admission_pending_());
+    auto admitted = admission_session().admit_native_fleet(movement.player,
+        gc::MoveFleet{movement.actor, movement.raid ? path.value().planets : std::vector<gc::PlanetId>{at->orbit, next}, {}, movement.raid}, admission_pending());
     if (!admitted) return core::Result<void>::failure(admitted.error());
     if (!admitted.value().admitted) movement.finished = true;
     return core::Result<void>::success();
@@ -809,7 +810,7 @@ core::Result<void> NativeActions::advance_freestore_movement(Movement& movement)
     // exact next-orbit ownership; no ordinary path/bribe/no-hop callback.
     if (!freestore_path_ || !conflict_pending_ || !admission_pending_)
         return invalid<void>("direct freestore movement requires its rebuilt cache and conflict owners");
-    if (conflict_pending_()) { movement.advance_requested = true; return core::Result<void>::success(); }
+    if (conflict_pending()) { movement.advance_requested = true; return core::Result<void>::success(); }
     movement.advance_requested = false;
     const auto snapshot = this->snapshot();
     const auto at = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& fleet) { return fleet.id == movement.actor; });
@@ -836,8 +837,8 @@ core::Result<void> NativeActions::advance_freestore_movement(Movement& movement)
     if (input.planets.front() != at->orbit || input.planets.back() != movement.destination
         || input.planets[1] == at->orbit || !this->graph() || !this->graph()->node(input.planets[1]))
         return invalid<void>("cached freestore route endpoints are unqualified");
-    auto admitted = world_.admit_native_fleet(movement.player,
-        gc::MoveFleet{movement.actor, {at->orbit, input.planets[1]}, {}}, admission_pending_());
+    auto admitted = admission_session().admit_native_fleet(movement.player,
+        gc::MoveFleet{movement.actor, {at->orbit, input.planets[1]}, {}}, admission_pending());
     if (!admitted) return core::Result<void>::failure(admitted.error());
     if (!admitted.value().admitted) movement.finished = true;
     return core::Result<void>::success();
@@ -895,7 +896,7 @@ core::Result<NativeActions::Movement> NativeActions::poll_movement(std::uint64_t
     movement.event_cursor = events.size();
     if ((movement.freestore_actor || !movement.finished) && movement.advance_requested)
         if (auto advanced = advance_movement(movement, taskforce_has_members); !advanced) return core::Result<Movement>::failure(advanced.error());
-    if (!movement.freestore_actor && movement.actor && conflict_pending_ && !conflict_pending_()
+    if (!movement.freestore_actor && movement.actor && conflict_pending_ && !conflict_pending()
         && std::none_of(this->snapshot()->fleets().begin(), this->snapshot()->fleets().end(),
         [&](const auto& fleet) { return fleet.id == movement.actor; })) { movement.actor = 0; movement.finished = true; }
     return core::Result<Movement>::success(movement);
@@ -1049,7 +1050,7 @@ core::Result<NativeActions::FreestoreMove> NativeActions::preflight_freestore_mo
     // WGA-313: management gate first, reservation is deliberately not read.
     if (this->pause_depth()) return Result::success(FreestoreMove::refused);
     if (!admission_pending_) return invalid<FreestoreMove>("freestore movement requires its galactic conflict admission owner");
-    if (admission_pending_()) return Result::success(FreestoreMove::refused);
+    if (admission_pending()) return Result::success(FreestoreMove::refused);
     const auto* facts = store.facts(actor);
     if (!player || !actor || !destination || !this->graph() || !this->graph()->node(destination)
         || !facts || !facts->qualified || facts->object.owner != player || facts->dead || facts->deleting
@@ -1095,7 +1096,7 @@ core::Result<bool> NativeActions::admit_freestore_move(gc::PlayerId player, sim:
     auto fleet = containing_fleet(player, actor);
     // WGA-313: landed transport launch uses the actual blockade/control owner.
     if (facts.object.transport && facts.parent_is_planet) {
-        auto launched = world_.launch_native_transport(player, actor, 0, admission_pending_());
+        auto launched = admission_session().launch_native_transport(player, actor, 0, admission_pending());
         if (!launched) return core::Result<bool>::failure(launched.error());
         if (!launched.value().admitted) return core::Result<bool>::success(false);
         fleet = containing_fleet(player, actor);
@@ -1108,7 +1109,7 @@ core::Result<bool> NativeActions::admit_freestore_move(gc::PlayerId player, sim:
     if (at == snapshot->fleets().end()) return core::Result<bool>::success(false);
     if (at->members.size() > 1 && actor != *fleet) {
         const auto source = at->orbit;
-        auto removed = world_.admit_native_fleet(player, gc::RemoveFleetMembers{*fleet, {actor}}, admission_pending_());
+        auto removed = admission_session().admit_native_fleet(player, gc::RemoveFleetMembers{*fleet, {actor}}, admission_pending());
         if (!removed) return core::Result<bool>::failure(removed.error());
         if (!removed.value().admitted) return core::Result<bool>::success(false);
         auto detached = *bound().freestore_->facts(actor); detached.parent = detached.object.planet = source;
@@ -1116,7 +1117,7 @@ core::Result<bool> NativeActions::admit_freestore_move(gc::PlayerId player, sim:
         detached.enroute = detached.tracked_movement = false;
         if (auto updated = bound().freestore_->update(detached); !updated) return core::Result<bool>::failure(updated.error());
         // Earlier admitted detach/launch effects remain if a later step refuses.
-        auto created = world_.admit_native_fleet(player, gc::CreateFleet{source, {actor}, 0}, admission_pending_());
+        auto created = admission_session().admit_native_fleet(player, gc::CreateFleet{source, {actor}, 0}, admission_pending());
         if (!created) return core::Result<bool>::failure(created.error());
         if (!created.value().admitted) return core::Result<bool>::success(false);
         fleet = created.value().object;
@@ -1198,13 +1199,13 @@ core::Result<void> NativeActions::service_freestore_landing(gc::PlayerId player,
         const auto surface = std::lower_bound(landing_surfaces_.begin(), landing_surfaces_.end(), planet,
             [](const auto& value, auto id) { return value.planet < id; });
         if (surface == landing_surfaces_.end() || surface->planet != planet) continue;
-        const auto capacity = world_.native_transport_landing_available(player, planet, surface->landed);
+        const auto capacity = admission_session().native_transport_landing_available(player, planet, surface->landed);
         if (!capacity) return core::Result<void>::failure(capacity.error());
         if (capacity.value() != gc::GalacticSession::NativeTransportLandingGate::admitted) continue;
         if (!admission_pending_) return invalid<void>("automatic landing management admission owner unavailable");
-        const auto removed = world_.admit_native_fleet(player, gc::RemoveFleetMembers{facts->parent, {actor}}, admission_pending_());
+        const auto removed = admission_session().admit_native_fleet(player, gc::RemoveFleetMembers{facts->parent, {actor}}, admission_pending());
         if (!removed) return core::Result<void>::failure(removed.error());
-        const auto landed = world_.land_native_transport(player, actor, planet, admission_pending_(), surface->landed);
+        const auto landed = admission_session().land_native_transport(player, actor, planet, admission_pending(), surface->landed);
         if (!landed) return core::Result<void>::failure(landed.error());
         // The event receipt is admission, not the link Boolean (WGA-413).
         if (landed.value().linked) {
@@ -1641,7 +1642,7 @@ struct NativeActions::ImmediateState final : authoritative::ImmediateEffectState
         if (name == "galactic.created_owner") return Result::success({authoritative::Value{authoritative::Handle{handle_player, object->owner}}});
         if (name == "galactic.created_position") {
             const auto* planet = world.planet(object->planet);
-            if (planet) return Result::success({detail::position_value(planet->position)});
+            if (planet) return Result::success({detail::position_object(planet->position)});
         }
         return invalid<authoritative::ValueList>("unknown native query");
     }
@@ -1656,7 +1657,7 @@ struct NativeActions::ImmediateHost final : authoritative::ImmediateEffectHost {
         using Result = core::Result<std::unique_ptr<authoritative::ImmediateEffectState>>;
         auto* owner = *lifetime;
         if (!owner) return invalid<std::unique_ptr<authoritative::ImmediateEffectState>>("immediate native owner must be rebound");
-        auto shadow = owner->world_.begin_native_actions(max_requests);
+        auto shadow = owner->admission_session().begin_native_actions(max_requests);
         if (!shadow) return Result::failure(shadow.error());
         return Result::success(std::make_unique<ImmediateState>(lifetime, std::move(shadow).value(), placement));
     }
@@ -1687,7 +1688,7 @@ struct NativeActions::ImmediateHost final : authoritative::ImmediateEffectHost {
                 return invalid<void>("immediate freestore step has an invalid native intent prefix");
             previous_count = step.native_count;
         }
-        const auto publish_world = [&] { return owner->world_.commit_native_actions(native->world, prepared, !(native_sink && store_sink)); };
+        const auto publish_world = [&] { return owner->admission_session().commit_native_actions(native->world, prepared, !(native_sink && store_sink)); };
         auto committed = [&]() -> core::Result<void> {
             if (!owner->funding_) return publish_world();
             if (!owner->funding_->has_player_frontier())
@@ -1713,7 +1714,7 @@ struct NativeActions::ImmediateHost final : authoritative::ImmediateEffectHost {
                 while (next < intents.size()) native_sink(native->world.player(), intents[next++]);
             }
             for (const auto& [kind, payload] : native->effects)
-                if (auto recorded = owner->world_.append_native_effect(kind, payload); !recorded) return recorded;
+                if (auto recorded = owner->admission_session().append_native_effect(kind, payload); !recorded) return recorded;
         }
         return committed;
     }

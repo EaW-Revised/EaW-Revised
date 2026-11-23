@@ -380,6 +380,11 @@ reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasin
 | 41 | Script teleport (Lua Teleport_And_Face; OrderKind 34) | uint64 target unit (nonzero); one or more listed units, each moved to the target's position and facing and stopped there; squadron containers and craft are skipped; script host only | 40 + 8n |
 | 42 | Script hold fire (Lua Prevent_All_Fire; OrderKind 35) | uint32 enabled (0 or 1), uint32 reserved (zero); one or more listed units, a squadron also covering its members; script host only | 40 + 8n |
 | 43 | Script change owner (Lua Change_Owner; OrderKind 36) | uint32 new owner player (a battle player or the pad-neutral player), uint32 reserved (zero); one or more listed units, a squadron container or member also moving the rest of its squadron; script host only | 40 + 8n |
+| 44 | Script teleport to a point (Lua Teleport(position); OrderKind 37) | three int64 Q24 world coordinates x, y, z; one or more listed units, each landing on the point and stopping there (a space battle has no garrison to leave); a squadron container moves with its members keeping their offsets, a craft alone is skipped; script host only | 56 + 8n |
+| 45 | Script hide (Lua Hide; OrderKind 38) | uint32 hidden (0 or 1), uint32 reserved (zero); one or more listed units; a presentation flag, no combat effect; script host only | 40 + 8n |
+| 46 | Script cancel hyperspace (Lua Cancel_Hyperspace; OrderKind 42) | uint32 reserved (zero), uint32 reserved (zero); one or more listed units; each with a fighter or simple space locomotor still in its hyperspace arrival sequence leaves it at once and stands, stopped, at the arrival's exit point; any other unit, a squadron container and a craft are skipped; script host only | 40 + 8n |
+| 47 | Script hyperspace in (Lua Cinematic_Hyperspace_In; OrderKind 40) | uint32 frames (0 to 150), uint32 reserved (zero); one or more listed units; each that can fly starts the arrival sequence at its own position, frame 25 minus the argument; script host only | 40 + 8n |
+| 48 | Script selectable (Lua Set_Selectable; OrderKind 41) | uint32 selectable (0 or 1), uint32 reserved (zero); one or more listed units; script host only | 40 + 8n |
 
 The explicit-facing reinforcement command is an EAWR extension. Its facing drives both the arrival-lane placement sweep and the spawned unit's rotation and flight direction. Each drop carries the local player's chosen value; absence of a wheel choice retains opcodes 11/19 and the player's authored FoC facing, including their existing bytes. A present zero yaw is an explicit choice. Negative yaw and yaw at or above 360 degrees are rejected during command validation.
 
@@ -531,7 +536,9 @@ and bit 9 requests explicit service explosion on the next step. After any homing
 extension, bit 8 appends int64 area damage, radius and delay maximum raw; uint32 dropoff,
 tiers, signed victim-cap bits and immune-faction presence; uint64 immune faction (zero when
 absent); and int64 source cause-damage factor raw (WCC-44, separate from instance overrides).
-No command opcode is added. Projectiles without either flag encode as before.
+Bit 17 (131072) of the `PROJ` flag word marks a projectile that redirects its damage to random hardpoints (WAD-27); it is set only for such projectiles and absent otherwise, so every other projectile keeps its earlier word.
+Bit 18 (262144) of the `PROJ` flag word marks a projectile whose combat modifier follows the damage delay (WPCM-02); it is set only for such projectiles.
+No command opcode is added. Projectiles without these flags encode as before.
 
 Bit 10 appends retained flight state after the blast extension (WAD-04,
 [rocket flight](behaviour/rocket-flight.md)): uint32 flight kind (0 ordinary,
@@ -744,6 +751,7 @@ SHA-256 consumes, without padding:
 | optional | While a live unit's damage tracking holds damage (WCC-82, AB-42): coordinator-reserved ASCII `DTRK`, uint64 count, then ascending-ID records of uint64 unit ID, int64 window damage raw (hull and shield lost since the rate window last closed) and int64 damage rate raw (per second). Absent when every window and rate is zero. |
 | optional | With any unit holding a Lua `Make_Invulnerable(true)` flag (TL-03): ASCII `SINV`, uint32 block version 1, uint64 flagged count, then the uint64 IDs of the flagged units in ascending order. It follows the garrison birth marks and precedes the craft block; it is absent while no unit is flagged, so other sessions hash as before. The same flag is archived in the tactical checkpoint (see the checkpoint format). |
 | optional | With any unit under a Lua `Prevent_All_Fire(true)` flag: ASCII `SHFR`, uint32 block version 1, uint64 flagged count, then the uint64 IDs of the flagged units in ascending order. It follows `SINV` and precedes the craft block; it is absent while no unit is flagged, so other sessions hash as before. The same flag is archived in the tactical checkpoint (child-state domain +8: domains 45 to 52). |
+| optional | With any unit carrying a Lua `Hide` or `Set_Selectable(false)` flag: ASCII `SVEW`, uint32 block version 1, uint64 flagged count, then per flagged unit in ascending ID order the uint64 ID and a uint32 flag word (bit 0 hidden, bit 1 unselectable). It follows `SHFR` and precedes the craft block; it is absent while no unit is flagged, so other sessions hash as before. The same flags are archived in the tactical checkpoint (child-state domain +64: domains 101 to 164). |
 | optional | With converted hero purchases (WHE-02/06/07/49): coordinator-reserved ASCII `HERO`, uint64 carrier count, then ascending carrier-ID records of uint64 carrier ID, uint64 logical purchase type and uint64 contained count. Each contained record stores uint64 identity ID, uint64 type, uint64 parent, uint8 flags and uint64 member count followed recursively by its ordered members. Flag bits 0â€“7 mean named, generic, limbo, model visible, collidable, selected, movement coordinated and preserved combat. Riders and team members retain authored creation order. The block is absent without converted purchases; initial replay units cannot carry this derived state. |
 | optional | While jammer-only sources are registered: coordinator-reserved ASCII `PDEF`, uint64 source count, then uint64 source IDs in registration order. Static shield/passive declarations register at creation; jammer-only owners append on activation and leave on termination/death. The block is absent with no active jammer-only sources; static creation order then follows stable IDs. Staged changes commit only after a successful tick. |
 | optional | With nested special-handler state (WHE-09/10/12): coordinator-reserved ASCII `SPAB`, uint64 owner count, then ascending owner-ID records of uint64 owner ID, uint32 service-cancelled, uint32 zero and uint64 slot count. Declared-order slots store uint32 flags (bits 0 enabled, 1 cancelled, 2 successful despawn), uint32 context-present, uint64 next service frame, optional context (uint64 owner and target, uint32 mode: 0 space/1 ground/2 galactic, uint32 flags: owner exists/type exists/death clone/map editor), uint64 tracked-target count and ascending uint64 target IDs. Activation clears its context after Apply; ordinary committed slots therefore have no context. The block is absent with no nested slots. |
@@ -785,8 +793,10 @@ Each held row then appends uint64 script reference and three int64 Q24 position
 raws; ordinary queued objects write zero for all four added values. Every unit
 has seven bonus values in version 3. A direct object has no parent station, while
 its ordinary hidden-object ID still comes from the world's ordered allocator.
-The child checkpoint state domain is 37..44, retaining the existing three layout
-flags above a base domain of 37; older layouts are refused.
+The child checkpoint state domain is 37..100, with layout flags above a base domain of 37 (fire range +1, script invulnerability +2, final facing +4,
+deploy clips +8, hold fire +16); a last flag (+32) is set when a live projectile
+redirects its damage to random hardpoints (WAD-27), and each projectile then
+appends one flag byte after its other fields; older layouts are refused.
 It contains uint64 account count, then accounts in ascending player order:
 uint32 player and tech level, uint64 lifetime count, then pairs of uint64 type and
 completed-build count in ascending type order; uint64 held count, then uint64

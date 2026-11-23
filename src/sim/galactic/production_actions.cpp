@@ -1325,6 +1325,12 @@ core::Result<void> GalacticSession::refresh_lane(const GalacticSession& live) {
     dst.next_id = src.next_id; dst.next_native_invasion = src.next_native_invasion;
     dst.native_invasions_enabled = src.native_invasions_enabled; dst.native_invasions = src.native_invasions;
     dst.native_invasion_transport_count = src.native_invasion_transport_count;
+    // Deliveries decided by the lane reach the same AI-owned sinks; world application later suppresses duplicate delivery.
+    dst.native_actor_changes_handler = src.native_actor_changes_handler;
+    dst.native_production_handler = src.native_production_handler;
+    dst.native_production_outcome_handler = src.native_production_outcome_handler;
+    dst.credit_notification_handler = src.credit_notification_handler;
+    dst.native_movement_listener = src.native_movement_listener;
     dst.live_object_count = src.live_object_count; dst.system_hold = src.system_hold;
     dst.population = src.population; dst.population_stale = src.population_stale;
     dst.native_population_schema = src.native_population_schema; dst.native_income_schema = src.native_income_schema;
@@ -1474,7 +1480,7 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::build_native_
     auto root = std::move(opened).value();
     root.data_->free_players = true; root.data_->movement_listener = {}; root.data_->intent_sink = {};
     const auto clear_logs = [](NativeActionShadow& shadow) {
-        shadow.data_->action_requests.clear(); shadow.data_->actor_changes.clear(); shadow.data_->events.clear();
+        shadow.data_->action_requests.clear(); shadow.data_->actor_changes.clear(); shadow.data_->script_usage_count = 0; shadow.data_->events.clear();
     };
     for (const auto& step : records) {
         if (!step.record) return invalid<NativeActionShadow>("a window overlay record is missing");

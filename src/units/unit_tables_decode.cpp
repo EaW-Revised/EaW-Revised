@@ -634,6 +634,34 @@ void Loader::load_projectile(const std::string& id) {
                 projectile.id, "Projectile_Weaken_Enemy_Targets_Category_Mask", report_);
             weaken.status_effect = object->text("Projectile_Weaken_Enemy_Spawn_Effect");
         }
+        // Projectile_Combat_Mod_*: the original reads the modifier at detonation (Add_Combat_Modifier_To_Enemies);
+        // Projectile_Combat_Mod_Radius has no reader there, the blast area range is the radius.
+        if (const auto name = object->text("Projectile_Combat_Mod"); !name.empty()) {
+            using Stat = sim::tactical::CombatBonusStat;
+            static constexpr std::array<std::pair<std::string_view, Stat>, 7> stats{{
+                {"COMBAT_MOD_HEALTH", Stat::health}, {"COMBAT_MOD_DAMAGE", Stat::damage},
+                {"COMBAT_MOD_ENERGY", Stat::energy}, {"COMBAT_MOD_SHIELD", Stat::shield},
+                {"COMBAT_MOD_DEFENSE", Stat::defense}, {"COMBAT_MOD_SPEED", Stat::speed},
+                {"COMBAT_MOD_FIRE_RANGE", Stat::fire_range}}};
+            const auto found = std::find_if(stats.begin(), stats.end(),
+                [&](const auto& entry) { return iequals(entry.first, name); });
+            if (found == stats.end()) {
+                report_.note(projectile.id, "Projectile_Combat_Mod", name,
+                    "modifier list has no matching combat bonus statistic; not applied");
+            } else {
+                auto& mod = projectile.combat_mod;
+                mod.enabled = true;
+                mod.stat = static_cast<std::uint32_t>(found->second);
+                mod.value = object->fixed("Projectile_Combat_Mod_Value", report_, false).value_or(Fixed{});
+                const auto duration = object->fixed("Projectile_Combat_Mod_Duration", report_, false).value_or(Fixed{});
+                mod.duration_frames = static_cast<std::uint32_t>(std::clamp<std::int64_t>(duration.raw(), 0, 3600 * Fixed::scale)
+                    * sim::tactical::logical_frames_per_second / Fixed::scale);
+                mod.categories = enum_bits(tables_.categories, mask(object->text("Projectile_Combat_Mod_Category_Mask")),
+                    projectile.id, "Projectile_Combat_Mod_Category_Mask", report_);
+                projectile.combat_mod_effect = object->text("Projectile_Combat_Mod_Effect");
+                mod.key = assets::object_type_crc(object->effective.object_id);
+            }
+        }
         // WAD-01: resolve variants first, then apply the debug-build defaults.
         projectile.blast.damage = object->fixed("Projectile_Blast_Area_Damage", report_, false).value_or(Fixed{});
         projectile.blast.radius = object->fixed("Projectile_Blast_Area_Range", report_, false).value_or(Fixed{});
@@ -647,6 +675,7 @@ void Loader::load_projectile(const std::string& id) {
             .value_or(projectile.blast.max_delay);
         projectile.blast_immune_faction = object->text("Projectile_Blast_Area_Immune_Faction");
         projectile.damage_delay = object->fixed("Projectile_Damage_Delay_Secs", report_, false).value_or(Fixed{});
+        projectile.damages_random_hardpoints = flag(*object, "Projectile_Damages_Random_Hard_Points", false).value_or(false); // WAD-27
         if (!projectile.blast_immune_faction.empty()) {
             auto faction = resolve(*input_.catalog, projectile.blast_immune_faction, data::Category::faction,
                 projectile.id, "blast immune faction", report_);

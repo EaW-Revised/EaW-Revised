@@ -14,7 +14,10 @@
 
 #include <filesystem>
 #include <fstream>
+#include <chrono>
+#include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -136,6 +139,7 @@ int run(const std::vector<fs::path>& args, const fs::path& executable) {
     fs::path user_data;
     fs::path helper;
     fs::path records_helper;
+    fs::path records_clock;
     for (std::size_t index = 0; index < args.size(); ++index) {
         if (args[index] == fs::path("--transcript") && index + 1 < args.size()) {
             transcript_path = args[++index];
@@ -145,6 +149,8 @@ int run(const std::vector<fs::path>& args, const fs::path& executable) {
             helper = fs::absolute(args[++index]);
         } else if (args[index] == fs::path("--records-helper") && index + 1 < args.size()) {
             records_helper = fs::absolute(args[++index]);
+        } else if (args[index] == fs::path("--records-clock-file") && index + 1 < args.size()) {
+            records_clock = fs::absolute(args[++index]);
         } else {
             log_line("usage: eawr_mods_service [--user-data <folder>] [--transcript <file>]");
             return 2;
@@ -176,6 +182,14 @@ int run(const std::vector<fs::path>& args, const fs::path& executable) {
     service.loadcheck().executable = helper;
     service.loadcheck().emit = send;
     service.records().executable = records_helper;
+    if (!records_clock.empty()) {
+        service.records().now = [records_clock] {
+            std::int64_t milliseconds{};
+            std::ifstream input(records_clock);
+            if (!(input >> milliseconds)) throw std::runtime_error("records test clock unavailable");
+            return std::chrono::steady_clock::time_point{} + std::chrono::milliseconds(milliseconds);
+        };
+    }
     service.records().emit = send;
     eawr::mods_service::LineFramer framer(eawr::mods_service::kLineLimit);
     std::vector<std::string> out;

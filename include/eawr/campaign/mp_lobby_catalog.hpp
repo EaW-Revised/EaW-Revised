@@ -44,6 +44,11 @@ using LobbyAiLevels = std::function<std::array<std::string, 3>(std::string_view 
 [[nodiscard]] std::string solo_difficulty_entry(const data::galactic::GalacticData& data, std::string_view campaign,
     std::string_view level, const LobbyAiLevels& ai_levels = {});
 
+// The three difficulty entries (Easy, Normal, Hard; empty where none) the lobby offers for one campaign: the pick
+// solo_difficulty_entry reads before its stock-name fallback. An unknown campaign, or no `ai_levels`, gives three empties.
+[[nodiscard]] std::array<std::string, 3> campaign_difficulty_entries(const data::galactic::GalacticData& data,
+    std::string_view campaign, const LobbyAiLevels& ai_levels);
+
 // One campaign of the list by authored name (case-insensitive), or nullptr.
 [[nodiscard]] const sim::galactic::MpLobbyCampaign* find_mp_lobby_campaign(
     const std::vector<sim::galactic::MpLobbyCampaign>& campaigns, std::string_view name) noexcept;

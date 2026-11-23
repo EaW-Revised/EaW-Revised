@@ -457,8 +457,17 @@ void MapMode::State::write_perf_screenshot() {
     if (image.is_valid()) image->save_png(String::utf8(perf_trace->screenshot_path(frame_number).c_str()));
 }
 
-void MapMode::State::update_attract_camera(double, const std::optional<int>&) {
-    // BCAM-17: keep the saved static attract pose until a moving view is established.
+void MapMode::State::update_attract_camera(const double delta, const std::optional<int>& finished) {
+    // BCAM-17 (#8105): the demo battle runs the same movie mode the C/Space battlecam does, requested once the map is up. The
+    // retail request fails quietly when nothing is worth watching yet, so a failed or ended shot chain is retried about once a
+    // second. Presentation only: nothing here reads or writes the simulation.
+    if (!options.attract || finished || !space || !live_session
+        || live_session->phase() != LiveSessionView::Phase::running) return;
+    if (space->live_camera_movie()) return;
+    attract_movie_wait -= delta;
+    if (attract_movie_wait > 0.0) return;
+    attract_movie_wait = 1.0;
+    set_movie_mode(true);
 }
 
 bool MapMode::State::finalize_camera() {

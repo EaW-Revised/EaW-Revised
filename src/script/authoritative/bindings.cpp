@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -73,7 +74,7 @@ bool read_value(Instance& instance, lua_State* state, int index, int depth, Valu
     case LUA_TUSERDATA: {
         sf::HostHandle handle;
         if (!instance.sandbox->to_handle(state, index, handle)) break;
-        out.data = Handle{handle.kind, handle.id};
+        out.data = Handle{handle.kind, handle.id, handle.aux};
         return true;
     }
     case LUA_TTABLE: {
@@ -110,10 +111,10 @@ bool read_value(Instance& instance, lua_State* state, int index, int depth, Valu
                     error = "only sequential tables or sets of handles cross the binding boundary";
                     return false;
                 }
-                handles.push_back(Handle{handle.kind, handle.id});
+                handles.push_back(Handle{handle.kind, handle.id, handle.aux});
             }
             ::std::sort(handles.begin(), handles.end(), [](const Handle& left, const Handle& right) {
-                return ::std::pair{left.kind, left.id} < ::std::pair{right.kind, right.id};
+                return ::std::tuple{left.kind, left.id, left.aux} < ::std::tuple{right.kind, right.id, right.aux};
             });
             ::std::vector<Value> list;
             for (const Handle& handle : handles) list.push_back(Value{handle});
@@ -1049,7 +1050,7 @@ void push_value(lua_State* state, const Value& value) {
             } else if constexpr (::std::is_same_v<T, ::std::string>) {
                 lua_pushlstring(state, data.data(), data.size());
             } else if constexpr (::std::is_same_v<T, Handle>) {
-                running_instance->sandbox->push_handle(state, sf::HostHandle{data.kind, data.id});
+                running_instance->sandbox->push_handle(state, sf::HostHandle{data.kind, data.id, data.aux});
             } else {
                 lua_newtable(state);
                 for (::std::size_t index = 0; index < data.size(); ++index) {

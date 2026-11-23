@@ -1,0 +1,5228 @@
+{
+ "schema_version": 1,
+ "note": "One row per family of unbound Lua names in tools/lua_api_scan/baseline.json: a family is the names of one host and kind that share a stem (the part before the first dot or underscore). tests/inventory/test_lua_gap_plan.py fails when a baseline name has no row here or a row names something the baseline no longer lists. When a binding fix drops a name from the baseline, drop it from its row (and the row when it empties, renumbering order) in the same change. Order inside owner_lane: severity first (critical = load or start of a script, high = recurring), then score = the sum over the family's names of call sites x mods blocked, highest first. severity, call_sites and mods_blocked (the most mods blocked by any name of the family) come from the scan matrix (python -m tools.lua_api_scan --out-dir, matrix.json, run 2026-11-23 over stock and the nine mod profiles); they are a snapshot, so re-rank from a fresh scan when the next family is picked up.",
+ "rows": [
+  {
+   "id": "galactic_object.global.find",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "find",
+   "names": [
+    "Find_All_Objects_With_Hint",
+    "Find_Best_Local_Threat_Center",
+    "Find_Hint",
+    "Find_Nearest",
+    "Find_Nearest_Space_Field",
+    "Find_Path"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 1,
+   "severity": "critical",
+   "call_sites": 3299,
+   "score": 29637
+  },
+  {
+   "id": "galactic_object.member.get",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "get",
+   "names": [
+    "Get_All_Projectile_Types",
+    "Get_Attack_Target",
+    "Get_Bone_Position",
+    "Get_Build_Pad_Contents",
+    "Get_Combat_Rating",
+    "Get_Contained_Object_Count",
+    "Get_Credits",
+    "Get_Difficulty",
+    "Get_Distance",
+    "Get_Enemy",
+    "Get_Faction_Name",
+    "Get_Game_Object",
+    "Get_Health",
+    "Get_Hint",
+    "Get_Hull",
+    "Get_ID",
+    "Get_Max_Range",
+    "Get_Min_Range",
+    "Get_Parent_Object",
+    "Get_Position",
+    "Get_Rate_Of_Damage_Taken",
+    "Get_Shield",
+    "Get_Space_Station",
+    "Get_Team",
+    "Get_Tech_Level",
+    "Get_Unit_Table",
+    "Get_XYZ"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 2,
+   "severity": "critical",
+   "call_sites": 1490,
+   "score": 12418
+  },
+  {
+   "id": "galactic_object.member.is",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "is",
+   "names": [
+    "Is_Ability_Active",
+    "Is_Ability_Autofire",
+    "Is_Ability_Ready",
+    "Is_Affected_By_Laser_Defense",
+    "Is_Affected_By_Missile_Shield",
+    "Is_Category",
+    "Is_In_Nebula",
+    "Is_Neutral"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 3,
+   "severity": "critical",
+   "call_sites": 1339,
+   "score": 11995
+  },
+  {
+   "id": "galactic_object.member.activate",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "activate",
+   "names": [
+    "Activate",
+    "Activate_Ability"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 4,
+   "severity": "critical",
+   "call_sites": 537,
+   "score": 4825
+  },
+  {
+   "id": "galactic_object.global.globalvalue",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "globalvalue",
+   "names": [
+    "GlobalValue.Get",
+    "GlobalValue.Set"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 7,
+   "order": 5,
+   "severity": "critical",
+   "call_sites": 349,
+   "score": 2344
+  },
+  {
+   "id": "galactic_object.global.findplanet",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "findplanet",
+   "names": [
+    "FindPlanet",
+    "FindPlanet.Get_All_Planets"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 5,
+   "order": 6,
+   "severity": "critical",
+   "call_sites": 93,
+   "score": 407
+  },
+  {
+   "id": "galactic_object.global.add",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "add",
+   "names": [
+    "Add_Objective",
+    "Add_Planet_Highlight",
+    "Add_Radar_Blip"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 7,
+   "severity": "critical",
+   "call_sites": 70,
+   "score": 376
+  },
+  {
+   "id": "galactic_ai.global.discretedistribution",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "discretedistribution",
+   "names": [
+    "DiscreteDistribution.Create"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 8,
+   "severity": "critical",
+   "call_sites": 12,
+   "score": 108
+  },
+  {
+   "id": "galactic_ai.member.insert",
+   "host": "galactic_ai",
+   "kind": "member",
+   "family": "insert",
+   "names": [
+    "Insert"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 9,
+   "severity": "critical",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "scoring.global._messagepopup",
+   "host": "scoring",
+   "kind": "global",
+   "family": "_messagepopup",
+   "names": [
+    "_MessagePopup"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 10,
+   "severity": "critical",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "galactic_story.global.weightedtypelist",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "weightedtypelist",
+   "names": [
+    "WeightedTypeList.Create"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 11,
+   "severity": "critical",
+   "call_sites": 17,
+   "score": 17
+  },
+  {
+   "id": "galactic_object.global.hide",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "hide",
+   "names": [
+    "Hide_Object",
+    "Hide_Sub_Object"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 7,
+   "order": 12,
+   "severity": "high",
+   "call_sites": 1654,
+   "score": 11536
+  },
+  {
+   "id": "galactic_object.global.gamerandom",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "gamerandom",
+   "names": [
+    "GameRandom",
+    "GameRandom.Get_Float"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 13,
+   "severity": "high",
+   "call_sites": 514,
+   "score": 4592
+  },
+  {
+   "id": "scoring.global.find",
+   "host": "scoring",
+   "kind": "global",
+   "family": "find",
+   "names": [
+    "Find_All_Objects_Of_Type",
+    "Find_Best_Local_Threat_Center",
+    "Find_First_Object",
+    "Find_Nearest",
+    "Find_Nearest_Space_Field",
+    "Find_Object_Type",
+    "Find_Player"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 14,
+   "severity": "high",
+   "call_sites": 480,
+   "score": 4306
+  },
+  {
+   "id": "galactic_story.member.set",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "set",
+   "names": [
+    "Set_Black_Market_Tutorial",
+    "Set_Check_Contested_Space",
+    "Set_Dialog",
+    "Set_Event_Parameter",
+    "Set_Reward_Parameter",
+    "Set_Sabotage_Tutorial"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 15,
+   "severity": "high",
+   "call_sites": 537,
+   "score": 3909
+  },
+  {
+   "id": "galactic_object.global.create",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "create",
+   "names": [
+    "Create_Cinematic_Transport",
+    "Create_Generic_Object",
+    "Create_Position"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 16,
+   "severity": "high",
+   "call_sites": 395,
+   "score": 3509
+  },
+  {
+   "id": "galactic_story.global.find",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "find",
+   "names": [
+    "Find_All_Objects_Of_Type",
+    "Find_All_Objects_With_Hint",
+    "Find_Best_Local_Threat_Center",
+    "Find_Nearest",
+    "Find_Nearest_Space_Field",
+    "Find_Path"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 17,
+   "severity": "high",
+   "call_sites": 358,
+   "score": 3190
+  },
+  {
+   "id": "galactic_object.member.teleport",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "teleport",
+   "names": [
+    "Teleport",
+    "Teleport_And_Face"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 18,
+   "severity": "high",
+   "call_sites": 271,
+   "score": 2323
+  },
+  {
+   "id": "galactic_object.member.play",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "play",
+   "names": [
+    "Play_Animation",
+    "Play_SFX_Event"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 19,
+   "severity": "high",
+   "call_sites": 260,
+   "score": 2270
+  },
+  {
+   "id": "galactic_story.member.get",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "get",
+   "names": [
+    "Get_Base_Level",
+    "Get_Build_Cost",
+    "Get_Credits",
+    "Get_Distance",
+    "Get_Enemy",
+    "Get_Faction_Name",
+    "Get_Game_Object",
+    "Get_Hull",
+    "Get_Max_Range",
+    "Get_Min_Range",
+    "Get_Name",
+    "Get_Next_Starbase_Type",
+    "Get_Parent_Object",
+    "Get_Planet_Location",
+    "Get_Shield",
+    "Get_Starbase_Level",
+    "Get_Tech_Level",
+    "Get_Type",
+    "Get_XYZ"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 20,
+   "severity": "high",
+   "call_sites": 316,
+   "score": 2236
+  },
+  {
+   "id": "galactic_object.global.fade",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "fade",
+   "names": [
+    "Fade_On",
+    "Fade_Screen_In",
+    "Fade_Screen_Out"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 21,
+   "severity": "high",
+   "call_sites": 269,
+   "score": 2086
+  },
+  {
+   "id": "galactic_story.global.assemble",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "assemble",
+   "names": [
+    "Assemble_Fleet"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 22,
+   "severity": "high",
+   "call_sites": 214,
+   "score": 1926
+  },
+  {
+   "id": "galactic_object.global.fogofwar",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "fogofwar",
+   "names": [
+    "FogOfWar.Reveal",
+    "FogOfWar.Reveal_All",
+    "FogOfWar.Temporary_Reveal"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 23,
+   "severity": "high",
+   "call_sites": 172,
+   "score": 1522
+  },
+  {
+   "id": "galactic_object.global.transition",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "transition",
+   "names": [
+    "Transition_Cinematic_Camera_Key",
+    "Transition_Cinematic_Target_Key",
+    "Transition_To_Tactical_Camera"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 24,
+   "severity": "high",
+   "call_sites": 183,
+   "score": 1464
+  },
+  {
+   "id": "galactic_object.member.change",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "change",
+   "names": [
+    "Change_Owner"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 25,
+   "severity": "high",
+   "call_sites": 154,
+   "score": 1386
+  },
+  {
+   "id": "galactic_object.global.set",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "set",
+   "names": [
+    "Set_Cinematic_Camera_Key",
+    "Set_Cinematic_Environment",
+    "Set_Cinematic_Target_Key"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 26,
+   "severity": "high",
+   "call_sites": 163,
+   "score": 1280
+  },
+  {
+   "id": "galactic_object.global.finddeadlyenemy",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "finddeadlyenemy",
+   "names": [
+    "FindDeadlyEnemy"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 27,
+   "severity": "high",
+   "call_sites": 139,
+   "score": 1251
+  },
+  {
+   "id": "galactic_object.global.letter",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "letter",
+   "names": [
+    "Letter_Box_In",
+    "Letter_Box_Out"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 28,
+   "severity": "high",
+   "call_sites": 151,
+   "score": 1208
+  },
+  {
+   "id": "galactic_object.global.suspend",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "suspend",
+   "names": [
+    "Suspend_AI"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 29,
+   "severity": "high",
+   "call_sites": 151,
+   "score": 1208
+  },
+  {
+   "id": "galactic_object.global.lock",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "lock",
+   "names": [
+    "Lock_Controls"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 30,
+   "severity": "high",
+   "call_sites": 150,
+   "score": 1200
+  },
+  {
+   "id": "scoring.global.thread",
+   "host": "scoring",
+   "kind": "global",
+   "family": "thread",
+   "names": [
+    "Thread.Create",
+    "Thread.Get_Current_ID",
+    "Thread.Get_Name",
+    "Thread.Kill",
+    "Thread.Kill_All"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 31,
+   "severity": "high",
+   "call_sites": 120,
+   "score": 1080
+  },
+  {
+   "id": "galactic_object.member.take",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "take",
+   "names": [
+    "Take_Damage"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 32,
+   "severity": "high",
+   "call_sites": 113,
+   "score": 1017
+  },
+  {
+   "id": "galactic_object.member.move",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "move",
+   "names": [
+    "Move_To"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 33,
+   "severity": "high",
+   "call_sites": 108,
+   "score": 972
+  },
+  {
+   "id": "galactic_story.member.move",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "move",
+   "names": [
+    "Move_To"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 34,
+   "severity": "high",
+   "call_sites": 108,
+   "score": 972
+  },
+  {
+   "id": "galactic_object.member.has",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "has",
+   "names": [
+    "Has_Ability",
+    "Has_Active_Orders",
+    "Has_Attack_Target",
+    "Has_Property"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 35,
+   "severity": "high",
+   "call_sites": 167,
+   "score": 955
+  },
+  {
+   "id": "galactic_object.global.start",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "start",
+   "names": [
+    "Start_Cinematic_Camera",
+    "Start_Cinematic_Mode"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 36,
+   "severity": "high",
+   "call_sites": 86,
+   "score": 646
+  },
+  {
+   "id": "galactic_story.global.findtarget",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "findtarget",
+   "names": [
+    "FindTarget",
+    "FindTarget.Reachable_Target"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 37,
+   "severity": "high",
+   "call_sites": 75,
+   "score": 627
+  },
+  {
+   "id": "galactic_object.member.cancel",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "cancel",
+   "names": [
+    "Cancel_Ability",
+    "Cancel_Event_Object_In_Range"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 38,
+   "severity": "high",
+   "call_sites": 78,
+   "score": 618
+  },
+  {
+   "id": "galactic_object.global.end",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "end",
+   "names": [
+    "End_Cinematic_Camera",
+    "End_Cinematic_Mode"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 39,
+   "severity": "high",
+   "call_sites": 77,
+   "score": 609
+  },
+  {
+   "id": "galactic_object.member.event",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "event",
+   "names": [
+    "Event_Object_In_Range"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 40,
+   "severity": "high",
+   "call_sites": 67,
+   "score": 603
+  },
+  {
+   "id": "galactic_object.member.set",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "set",
+   "names": [
+    "Set_Cannot_Be_Killed",
+    "Set_Check_Contested_Space",
+    "Set_Event_Parameter",
+    "Set_Importance",
+    "Set_Reward_Parameter",
+    "Set_Selectable"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 41,
+   "severity": "high",
+   "call_sites": 99,
+   "score": 595
+  },
+  {
+   "id": "galactic_object.global.reinforce",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "reinforce",
+   "names": [
+    "Reinforce_Unit"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 42,
+   "severity": "high",
+   "call_sites": 53,
+   "score": 477
+  },
+  {
+   "id": "galactic_story.global.create_thread",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "create_thread",
+   "names": [
+    "Create_Thread.Is_Thread_Active"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 43,
+   "severity": "high",
+   "call_sites": 51,
+   "score": 459
+  },
+  {
+   "id": "galactic_object.member.attack",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "attack",
+   "names": [
+    "Attack_Move",
+    "Attack_Target"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 44,
+   "severity": "high",
+   "call_sites": 59,
+   "score": 443
+  },
+  {
+   "id": "galactic_story.member.activate",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "activate",
+   "names": [
+    "Activate",
+    "Activate_Ability"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 45,
+   "severity": "high",
+   "call_sites": 41,
+   "score": 327
+  },
+  {
+   "id": "galactic_story.member.despawn",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "despawn",
+   "names": [
+    "Despawn"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 46,
+   "severity": "high",
+   "call_sites": 36,
+   "score": 324
+  },
+  {
+   "id": "scoring.global.spawn",
+   "host": "scoring",
+   "kind": "global",
+   "family": "spawn",
+   "names": [
+    "Spawn_Unit"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 47,
+   "severity": "high",
+   "call_sites": 32,
+   "score": 288
+  },
+  {
+   "id": "galactic_object.member.prevent",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "prevent",
+   "names": [
+    "Prevent_All_Fire",
+    "Prevent_Opportunity_Fire"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 6,
+   "order": 48,
+   "severity": "high",
+   "call_sites": 51,
+   "score": 286
+  },
+  {
+   "id": "galactic_object.member.attach",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "attach",
+   "names": [
+    "Attach_Particle_Effect"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 49,
+   "severity": "high",
+   "call_sites": 35,
+   "score": 280
+  },
+  {
+   "id": "scoring.global.gamerandom",
+   "host": "scoring",
+   "kind": "global",
+   "family": "gamerandom",
+   "names": [
+    "GameRandom",
+    "GameRandom.Get_Float"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 50,
+   "severity": "high",
+   "call_sites": 41,
+   "score": 268
+  },
+  {
+   "id": "scoring.global.game",
+   "host": "scoring",
+   "kind": "global",
+   "family": "game",
+   "names": [
+    "Game_Message"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 51,
+   "severity": "high",
+   "call_sites": 29,
+   "score": 261
+  },
+  {
+   "id": "scoring.global.reinforce",
+   "host": "scoring",
+   "kind": "global",
+   "family": "reinforce",
+   "names": [
+    "Reinforce_Unit"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 52,
+   "severity": "high",
+   "call_sites": 29,
+   "score": 261
+  },
+  {
+   "id": "galactic_story.global.gamerandom",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "gamerandom",
+   "names": [
+    "GameRandom.Get_Float"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 53,
+   "severity": "high",
+   "call_sites": 32,
+   "score": 256
+  },
+  {
+   "id": "galactic_object.member.cinematic",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "cinematic",
+   "names": [
+    "Cinematic_Hyperspace_In"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 5,
+   "order": 54,
+   "severity": "high",
+   "call_sites": 50,
+   "score": 250
+  },
+  {
+   "id": "galactic_object.member.suspend",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "suspend",
+   "names": [
+    "Suspend_Locomotor"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 55,
+   "severity": "high",
+   "call_sites": 30,
+   "score": 240
+  },
+  {
+   "id": "galactic_object.global.remove",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "remove",
+   "names": [
+    "Remove_All_Text",
+    "Remove_Planet_Highlight",
+    "Remove_Radar_Blip"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 56,
+   "severity": "high",
+   "call_sites": 35,
+   "score": 237
+  },
+  {
+   "id": "galactic_object.member.override",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "override",
+   "names": [
+    "Override_Max_Speed"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 57,
+   "severity": "high",
+   "call_sites": 25,
+   "score": 225
+  },
+  {
+   "id": "galactic_story.global.game",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "game",
+   "names": [
+    "Game_Message"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 6,
+   "order": 58,
+   "severity": "high",
+   "call_sites": 36,
+   "score": 216
+  },
+  {
+   "id": "galactic_evaluators.global.findplanet",
+   "host": "galactic_evaluators",
+   "kind": "global",
+   "family": "findplanet",
+   "names": [
+    "FindPlanet",
+    "FindPlanet.Get_All_Planets"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 59,
+   "severity": "high",
+   "call_sites": 38,
+   "score": 214
+  },
+  {
+   "id": "galactic_object.global.point",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "point",
+   "names": [
+    "Point_Camera_At"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 60,
+   "severity": "high",
+   "call_sites": 22,
+   "score": 198
+  },
+  {
+   "id": "scoring.global.globalvalue",
+   "host": "scoring",
+   "kind": "global",
+   "family": "globalvalue",
+   "names": [
+    "GlobalValue.Get"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 61,
+   "severity": "high",
+   "call_sites": 66,
+   "score": 198
+  },
+  {
+   "id": "galactic_story.global.reinforce",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "reinforce",
+   "names": [
+    "Reinforce_Unit"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 62,
+   "severity": "high",
+   "call_sites": 21,
+   "score": 189
+  },
+  {
+   "id": "galactic_story.member.invade",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "invade",
+   "names": [
+    "Invade"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 63,
+   "severity": "high",
+   "call_sites": 20,
+   "score": 180
+  },
+  {
+   "id": "galactic_object.global.allow",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "allow",
+   "names": [
+    "Allow_Localized_SFX"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 64,
+   "severity": "high",
+   "call_sites": 22,
+   "score": 176
+  },
+  {
+   "id": "galactic_object.global.weather",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "weather",
+   "names": [
+    "Weather_Audio_Pause"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 65,
+   "severity": "high",
+   "call_sites": 22,
+   "score": 176
+  },
+  {
+   "id": "galactic_object.member.make",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "make",
+   "names": [
+    "Make_Ally",
+    "Make_Enemy",
+    "Make_Invulnerable"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 5,
+   "order": 66,
+   "severity": "high",
+   "call_sites": 41,
+   "score": 172
+  },
+  {
+   "id": "scoring.global.evaluateperception",
+   "host": "scoring",
+   "kind": "global",
+   "family": "evaluateperception",
+   "names": [
+    "EvaluatePerception"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 67,
+   "severity": "high",
+   "call_sites": 56,
+   "score": 168
+  },
+  {
+   "id": "scoring.global.get",
+   "host": "scoring",
+   "kind": "global",
+   "family": "get",
+   "names": [
+    "Get_Game_Mode",
+    "Get_Story_Plot"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 68,
+   "severity": "high",
+   "call_sites": 23,
+   "score": 159
+  },
+  {
+   "id": "galactic_story.member.unlock",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "unlock",
+   "names": [
+    "Unlock_Tech"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 69,
+   "severity": "high",
+   "call_sites": 144,
+   "score": 144
+  },
+  {
+   "id": "galactic_story.global.remove",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "remove",
+   "names": [
+    "Remove_All_Text",
+    "Remove_Planet_Highlight",
+    "Remove_Radar_Blip"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 70,
+   "severity": "high",
+   "call_sites": 22,
+   "score": 138
+  },
+  {
+   "id": "galactic_object.member.build",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "build",
+   "names": [
+    "Build"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 71,
+   "severity": "high",
+   "call_sites": 34,
+   "score": 136
+  },
+  {
+   "id": "galactic_story.global.add",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "add",
+   "names": [
+    "Add_Planet_Highlight",
+    "Add_Radar_Blip"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 72,
+   "severity": "high",
+   "call_sites": 17,
+   "score": 133
+  },
+  {
+   "id": "galactic_object.member.hide",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "hide",
+   "names": [
+    "Hide"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 73,
+   "severity": "high",
+   "call_sites": 30,
+   "score": 120
+  },
+  {
+   "id": "galactic_story.member.lock",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "lock",
+   "names": [
+    "Lock_Tech"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 74,
+   "severity": "high",
+   "call_sites": 118,
+   "score": 118
+  },
+  {
+   "id": "galactic_story.global.finddeadlyenemy",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "finddeadlyenemy",
+   "names": [
+    "FindDeadlyEnemy"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 75,
+   "severity": "high",
+   "call_sites": 13,
+   "score": 117
+  },
+  {
+   "id": "galactic_story.member.give",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "give",
+   "names": [
+    "Give_Money"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 76,
+   "severity": "high",
+   "call_sites": 37,
+   "score": 111
+  },
+  {
+   "id": "scoring.global.story",
+   "host": "scoring",
+   "kind": "global",
+   "family": "story",
+   "names": [
+    "Story_Event"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 77,
+   "severity": "high",
+   "call_sites": 36,
+   "score": 108
+  },
+  {
+   "id": "galactic_object.global.is",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "is",
+   "names": [
+    "Is_Campaign_Game",
+    "Is_Multiplayer_Mode"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 78,
+   "severity": "high",
+   "call_sites": 31,
+   "score": 102
+  },
+  {
+   "id": "galactic_story.member.override",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "override",
+   "names": [
+    "Override_Max_Speed"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 79,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 99
+  },
+  {
+   "id": "scoring.global.discretedistribution",
+   "host": "scoring",
+   "kind": "global",
+   "family": "discretedistribution",
+   "names": [
+    "DiscreteDistribution.Create"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 80,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 99
+  },
+  {
+   "id": "galactic_object.member.enable",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "enable",
+   "names": [
+    "Enable_As_Actor"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 81,
+   "severity": "high",
+   "call_sites": 31,
+   "score": 93
+  },
+  {
+   "id": "galactic_ai.global.findplanet",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "findplanet",
+   "names": [
+    "FindPlanet"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 82,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "galactic_ai.member.sample",
+   "host": "galactic_ai",
+   "kind": "member",
+   "family": "sample",
+   "names": [
+    "Sample"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 83,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "galactic_object.global.evaluatetypelist",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "evaluatetypelist",
+   "names": [
+    "EvaluateTypeList"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 84,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "galactic_object.member.give",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "give",
+   "names": [
+    "Give_Random_Sliceable_Tech"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 85,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "galactic_story.global.script",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "script",
+   "names": [
+    "Script.Debug_Should_Issue_Event_Alert"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 86,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "galactic_story.member.service",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "service",
+   "names": [
+    "Service_Wrapper"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 87,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "scoring.global.dumpcallstack",
+   "host": "scoring",
+   "kind": "global",
+   "family": "dumpcallstack",
+   "names": [
+    "DumpCallStack"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 88,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "scoring.global.finddeadlyenemy",
+   "host": "scoring",
+   "kind": "global",
+   "family": "finddeadlyenemy",
+   "names": [
+    "FindDeadlyEnemy"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 89,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "scoring.global.script",
+   "host": "scoring",
+   "kind": "global",
+   "family": "script",
+   "names": [
+    "Script.Debug_Should_Issue_Event_Alert"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 90,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "scoring.member.insert",
+   "host": "scoring",
+   "kind": "member",
+   "family": "insert",
+   "names": [
+    "Insert"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 91,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "scoring.member.service",
+   "host": "scoring",
+   "kind": "member",
+   "family": "service",
+   "names": [
+    "Service_Wrapper"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 9,
+   "order": 92,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "galactic_object.global.enable",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "enable",
+   "names": [
+    "Enable_Fog"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 93,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 88
+  },
+  {
+   "id": "galactic_object.global.thread",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "thread",
+   "names": [
+    "Thread.Kill"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 8,
+   "order": 94,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 88
+  },
+  {
+   "id": "scoring.global.findplanet",
+   "host": "scoring",
+   "kind": "global",
+   "family": "findplanet",
+   "names": [
+    "FindPlanet",
+    "FindPlanet.Get_All_Planets"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 95,
+   "severity": "high",
+   "call_sites": 31,
+   "score": 87
+  },
+  {
+   "id": "galactic_story.global.gui",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "gui",
+   "names": [
+    "GUI_Button_Icon",
+    "GUI_Component_Enable",
+    "GUI_Component_Text",
+    "GUI_Component_Visibility"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 96,
+   "severity": "high",
+   "call_sites": 34,
+   "score": 60
+  },
+  {
+   "id": "galactic_object.member.force",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "force",
+   "names": [
+    "Force_Ability_Recharge"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 97,
+   "severity": "high",
+   "call_sites": 27,
+   "score": 54
+  },
+  {
+   "id": "scoring.member.get",
+   "host": "scoring",
+   "kind": "member",
+   "family": "get",
+   "names": [
+    "Get_Difficulty",
+    "Get_Distance",
+    "Get_Event",
+    "Get_Game_Object",
+    "Get_Hull",
+    "Get_Shield",
+    "Get_XYZ"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 5,
+   "order": 98,
+   "severity": "high",
+   "call_sites": 25,
+   "score": 49
+  },
+  {
+   "id": "galactic_story.member.is",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "is",
+   "names": [
+    "Is_Ally",
+    "Is_Category",
+    "Is_Enemy"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 5,
+   "order": 99,
+   "severity": "high",
+   "call_sites": 12,
+   "score": 48
+  },
+  {
+   "id": "galactic_story.member.make",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "make",
+   "names": [
+    "Make_Ally",
+    "Make_Enemy"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 100,
+   "severity": "high",
+   "call_sites": 24,
+   "score": 48
+  },
+  {
+   "id": "galactic_object.global.stop",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "stop",
+   "names": [
+    "Stop_All_Music",
+    "Stop_All_Speech",
+    "Stop_Bink_Movie"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 101,
+   "severity": "high",
+   "call_sites": 17,
+   "score": 43
+  },
+  {
+   "id": "galactic_object.global.sfxmanager",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "sfxmanager",
+   "names": [
+    "SFXManager.Allow_Ambient_VO",
+    "SFXManager.Allow_Enemy_Sighted_VO",
+    "SFXManager.Allow_HUD_VO",
+    "SFXManager.Allow_Localized_SFXEvents",
+    "SFXManager.Allow_Unit_Reponse_VO"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 102,
+   "severity": "high",
+   "call_sites": 20,
+   "score": 40
+  },
+  {
+   "id": "galactic_object.global.evaluate",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "evaluate",
+   "names": [
+    "Evaluate_In_Galactic_Context"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 103,
+   "severity": "high",
+   "call_sites": 13,
+   "score": 39
+  },
+  {
+   "id": "galactic_story.global.create",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "create",
+   "names": [
+    "Create_Cinematic_Transport",
+    "Create_Generic_Object",
+    "Create_Position"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 6,
+   "order": 104,
+   "severity": "high",
+   "call_sites": 9,
+   "score": 39
+  },
+  {
+   "id": "galactic_ai.global.spawn",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "spawn",
+   "names": [
+    "Spawn_Unit"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 105,
+   "severity": "high",
+   "call_sites": 9,
+   "score": 36
+  },
+  {
+   "id": "scoring.member.is",
+   "host": "scoring",
+   "kind": "member",
+   "family": "is",
+   "names": [
+    "Is_Category"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 106,
+   "severity": "high",
+   "call_sites": 8,
+   "score": 32
+  },
+  {
+   "id": "scoring.member.prevent",
+   "host": "scoring",
+   "kind": "member",
+   "family": "prevent",
+   "names": [
+    "Prevent_AI_Usage"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 107,
+   "severity": "high",
+   "call_sites": 8,
+   "score": 32
+  },
+  {
+   "id": "galactic_object.member.highlight",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "highlight",
+   "names": [
+    "Highlight"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 108,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 30
+  },
+  {
+   "id": "galactic_story.global.stop",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "stop",
+   "names": [
+    "Stop_All_Music",
+    "Stop_All_Speech",
+    "Stop_Bink_Movie"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 109,
+   "severity": "high",
+   "call_sites": 12,
+   "score": 30
+  },
+  {
+   "id": "galactic_object.global.assemble",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "assemble",
+   "names": [
+    "Assemble_Fleet"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 110,
+   "severity": "high",
+   "call_sites": 9,
+   "score": 27
+  },
+  {
+   "id": "galactic_object.global.play",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "play",
+   "names": [
+    "Play_Bink_Movie",
+    "Play_Music"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 111,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 27
+  },
+  {
+   "id": "scoring.global.create",
+   "host": "scoring",
+   "kind": "global",
+   "family": "create",
+   "names": [
+    "Create_Generic_Object",
+    "Create_Position"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 5,
+   "order": 112,
+   "severity": "high",
+   "call_sites": 7,
+   "score": 27
+  },
+  {
+   "id": "galactic_object.member.stop",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "stop",
+   "names": [
+    "Stop",
+    "Stop_SFX_Event"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 113,
+   "severity": "high",
+   "call_sites": 12,
+   "score": 23
+  },
+  {
+   "id": "galactic_story.global.resume",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "resume",
+   "names": [
+    "Resume_Mode_Based_Music"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 114,
+   "severity": "high",
+   "call_sites": 7,
+   "score": 21
+  },
+  {
+   "id": "scoring.global.add",
+   "host": "scoring",
+   "kind": "global",
+   "family": "add",
+   "names": [
+    "Add_Planet_Highlight",
+    "Add_Radar_Blip"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 115,
+   "severity": "high",
+   "call_sites": 5,
+   "score": 17
+  },
+  {
+   "id": "scoring.global.remove",
+   "host": "scoring",
+   "kind": "global",
+   "family": "remove",
+   "names": [
+    "Remove_Planet_Highlight",
+    "Remove_Radar_Blip"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 116,
+   "severity": "high",
+   "call_sites": 5,
+   "score": 17
+  },
+  {
+   "id": "galactic_object.global.resume",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "resume",
+   "names": [
+    "Resume_Mode_Based_Music"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 117,
+   "severity": "high",
+   "call_sites": 8,
+   "score": 16
+  },
+  {
+   "id": "galactic_object.member.mark",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "mark",
+   "names": [
+    "Mark_Parent_Mode_Object_For_Death"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 118,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 16
+  },
+  {
+   "id": "galactic_story.member.mark",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "mark",
+   "names": [
+    "Mark_Parent_Mode_Object_For_Death"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 119,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 16
+  },
+  {
+   "id": "galactic_story.member.teleport",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "teleport",
+   "names": [
+    "Teleport_And_Face"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 120,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 16
+  },
+  {
+   "id": "scoring.member.mark",
+   "host": "scoring",
+   "kind": "member",
+   "family": "mark",
+   "names": [
+    "Mark_Parent_Mode_Object_For_Death"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 121,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 16
+  },
+  {
+   "id": "scoring.member.teleport",
+   "host": "scoring",
+   "kind": "member",
+   "family": "teleport",
+   "names": [
+    "Teleport_And_Face"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 4,
+   "order": 122,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 16
+  },
+  {
+   "id": "galactic_object.member.reset",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "reset",
+   "names": [
+    "Reset_Ability_Counter"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 123,
+   "severity": "high",
+   "call_sites": 13,
+   "score": 13
+  },
+  {
+   "id": "galactic_ai.global.assemble",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "assemble",
+   "names": [
+    "Assemble_Fleet"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 124,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 12
+  },
+  {
+   "id": "galactic_object.member.face",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "face",
+   "names": [
+    "Face_Immediate"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 125,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 12
+  },
+  {
+   "id": "galactic_story.global.getcurrenttime",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "getcurrenttime",
+   "names": [
+    "GetCurrentTime.Galactic_Time"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 126,
+   "severity": "high",
+   "call_sites": 12,
+   "score": 12
+  },
+  {
+   "id": "galactic_story.member.sample",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "sample",
+   "names": [
+    "Sample"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 127,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 12
+  },
+  {
+   "id": "galactic_object.global.givedesirebonus",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "givedesirebonus",
+   "names": [
+    "GiveDesireBonus"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 128,
+   "severity": "high",
+   "call_sites": 5,
+   "score": 10
+  },
+  {
+   "id": "galactic_object.global.project",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "project",
+   "names": [
+    "Project_By_Unit_Range"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 129,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 10
+  },
+  {
+   "id": "galactic_story.global.project",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "project",
+   "names": [
+    "Project_By_Unit_Range"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 130,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 10
+  },
+  {
+   "id": "galactic_story.global.sfxmanager",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "sfxmanager",
+   "names": [
+    "SFXManager.Allow_Ambient_VO",
+    "SFXManager.Allow_Enemy_Sighted_VO",
+    "SFXManager.Allow_HUD_VO",
+    "SFXManager.Allow_Localized_SFXEvents",
+    "SFXManager.Allow_Unit_Reponse_VO"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 131,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 10
+  },
+  {
+   "id": "galactic_ai.global.are",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "are",
+   "names": [
+    "Are_On_Opposite_Sides_Of_Shield"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 3,
+   "order": 132,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 9
+  },
+  {
+   "id": "galactic_ai.global.reinforce",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "reinforce",
+   "names": [
+    "Reinforce_Unit"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 133,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 8
+  },
+  {
+   "id": "galactic_object.global.cancel",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "cancel",
+   "names": [
+    "Cancel_Fast_Forward"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 134,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 8
+  },
+  {
+   "id": "galactic_object.global.findtarget",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "findtarget",
+   "names": [
+    "FindTarget",
+    "FindTarget.Reachable_Target"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 135,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 8
+  },
+  {
+   "id": "galactic_object.member.disable",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "disable",
+   "names": [
+    "Disable_Orbital_Bombardment"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 136,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 8
+  },
+  {
+   "id": "galactic_object.member.sample",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "sample",
+   "names": [
+    "Sample"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 137,
+   "severity": "high",
+   "call_sites": 8,
+   "score": 8
+  },
+  {
+   "id": "scoring.global.gui",
+   "host": "scoring",
+   "kind": "global",
+   "family": "gui",
+   "names": [
+    "GUI_Button_Icon",
+    "GUI_Component_Enable",
+    "GUI_Component_Text",
+    "GUI_Component_Visibility"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 138,
+   "severity": "high",
+   "call_sites": 8,
+   "score": 8
+  },
+  {
+   "id": "galactic_object.global.create_thread",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "create_thread",
+   "names": [
+    "Create_Thread.Is_Thread_Active"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 139,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 6
+  },
+  {
+   "id": "galactic_object.global.discretedistribution",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "discretedistribution",
+   "names": [
+    "DiscreteDistribution.Create"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 140,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 6
+  },
+  {
+   "id": "galactic_object.global.gui",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "gui",
+   "names": [
+    "GUI_Button_Icon",
+    "GUI_Component_Enable",
+    "GUI_Component_Text",
+    "GUI_Component_Visibility"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 141,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 6
+  },
+  {
+   "id": "galactic_object.global.master",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "master",
+   "names": [
+    "Master_Volume_Restore"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 142,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 6
+  },
+  {
+   "id": "galactic_object.global.scroll",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "scroll",
+   "names": [
+    "Scroll_Camera_To"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 143,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 6
+  },
+  {
+   "id": "galactic_object.member.hyperspace",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "hyperspace",
+   "names": [
+    "Hyperspace_Away"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 144,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 6
+  },
+  {
+   "id": "galactic_object.member.retreat",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "retreat",
+   "names": [
+    "Retreat"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 145,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 6
+  },
+  {
+   "id": "galactic_story.global.givedesirebonus",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "givedesirebonus",
+   "names": [
+    "GiveDesireBonus"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 146,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 6
+  },
+  {
+   "id": "galactic_story.global.set",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "set",
+   "names": [
+    "Set_Cinematic_Camera_Key",
+    "Set_Cinematic_Environment",
+    "Set_Cinematic_Target_Key"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 147,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 6
+  },
+  {
+   "id": "galactic_story.global.thread",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "thread",
+   "names": [
+    "Thread.Kill"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 148,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 6
+  },
+  {
+   "id": "galactic_story.global.transition",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "transition",
+   "names": [
+    "Transition_Cinematic_Camera_Key",
+    "Transition_Cinematic_Target_Key",
+    "Transition_To_Tactical_Camera"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 149,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 6
+  },
+  {
+   "id": "galactic_story.member.suspend",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "suspend",
+   "names": [
+    "Suspend"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 150,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 6
+  },
+  {
+   "id": "galactic_ai.global.get",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "get",
+   "names": [
+    "Get_Story_Plot"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 151,
+   "severity": "high",
+   "call_sites": 5,
+   "score": 5
+  },
+  {
+   "id": "galactic_evaluators.global.get",
+   "host": "galactic_evaluators",
+   "kind": "global",
+   "family": "get",
+   "names": [
+    "Get_Story_Plot"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 152,
+   "severity": "high",
+   "call_sites": 5,
+   "score": 5
+  },
+  {
+   "id": "galactic_story.global.play",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "play",
+   "names": [
+    "Play_Bink_Movie",
+    "Play_Music"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 153,
+   "severity": "high",
+   "call_sites": 5,
+   "score": 5
+  },
+  {
+   "id": "galactic_ai.global.aitarget",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "aitarget",
+   "names": [
+    "AITarget.Get_Game_Object"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 154,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 4
+  },
+  {
+   "id": "galactic_ai.member.get",
+   "host": "galactic_ai",
+   "kind": "member",
+   "family": "get",
+   "names": [
+    "Get_Event"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 155,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 4
+  },
+  {
+   "id": "galactic_ai.member.mark",
+   "host": "galactic_ai",
+   "kind": "member",
+   "family": "mark",
+   "names": [
+    "Mark_Parent_Mode_Object_For_Death"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 156,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 4
+  },
+  {
+   "id": "galactic_ai.member.set",
+   "host": "galactic_ai",
+   "kind": "member",
+   "family": "set",
+   "names": [
+    "Set_Reward_Parameter"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 157,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 4
+  },
+  {
+   "id": "galactic_evaluators.global._findstagearea",
+   "host": "galactic_evaluators",
+   "kind": "global",
+   "family": "_findstagearea",
+   "names": [
+    "_FindStageArea"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 158,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 4
+  },
+  {
+   "id": "galactic_evaluators.member.get",
+   "host": "galactic_evaluators",
+   "kind": "member",
+   "family": "get",
+   "names": [
+    "Get_Event"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 159,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 4
+  },
+  {
+   "id": "galactic_evaluators.member.set",
+   "host": "galactic_evaluators",
+   "kind": "member",
+   "family": "set",
+   "names": [
+    "Set_Reward_Parameter"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 160,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 4
+  },
+  {
+   "id": "galactic_object.member.isfinished",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "isfinished",
+   "names": [
+    "IsFinished"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 161,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 4
+  },
+  {
+   "id": "galactic_story.member.change",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "change",
+   "names": [
+    "Change_Owner"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 162,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 4
+  },
+  {
+   "id": "galactic_story.member.reset",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "reset",
+   "names": [
+    "Reset"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 163,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 4
+  },
+  {
+   "id": "scoring.global.resume",
+   "host": "scoring",
+   "kind": "global",
+   "family": "resume",
+   "names": [
+    "Resume_Mode_Based_Music"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 2,
+   "order": 164,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 4
+  },
+  {
+   "id": "scoring.member.set",
+   "host": "scoring",
+   "kind": "member",
+   "family": "set",
+   "names": [
+    "Set_Reward_Parameter"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 165,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 4
+  },
+  {
+   "id": "galactic_object.member.are",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "are",
+   "names": [
+    "Are_Engines_Online"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 166,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 3
+  },
+  {
+   "id": "galactic_object.member.guard",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "guard",
+   "names": [
+    "Guard_Target"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 167,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 3
+  },
+  {
+   "id": "galactic_story.global.fade",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "fade",
+   "names": [
+    "Fade_On",
+    "Fade_Screen_In",
+    "Fade_Screen_Out"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 168,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 3
+  },
+  {
+   "id": "galactic_story.global.lock",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "lock",
+   "names": [
+    "Lock_Controls"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 169,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 3
+  },
+  {
+   "id": "galactic_story.global.suspend",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "suspend",
+   "names": [
+    "Suspend_AI"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 170,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 3
+  },
+  {
+   "id": "galactic_story.member.are",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "are",
+   "names": [
+    "Are_Engines_Online"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 171,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 3
+  },
+  {
+   "id": "scoring.member.are",
+   "host": "scoring",
+   "kind": "member",
+   "family": "are",
+   "names": [
+    "Are_Engines_Online"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 172,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 3
+  },
+  {
+   "id": "galactic_ai.member.add",
+   "host": "galactic_ai",
+   "kind": "member",
+   "family": "add",
+   "names": [
+    "Add_Force"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 173,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 2
+  },
+  {
+   "id": "galactic_evaluators.global.spawn",
+   "host": "galactic_evaluators",
+   "kind": "global",
+   "family": "spawn",
+   "names": [
+    "Spawn_Unit"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 174,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 2
+  },
+  {
+   "id": "galactic_object.global.waitforstarbase",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "waitforstarbase",
+   "names": [
+    "WaitForStarbase"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 175,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 2
+  },
+  {
+   "id": "galactic_story.global.allow",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "allow",
+   "names": [
+    "Allow_Localized_SFX"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 176,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 2
+  },
+  {
+   "id": "galactic_story.global.cancel",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "cancel",
+   "names": [
+    "Cancel_Fast_Forward"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 177,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 2
+  },
+  {
+   "id": "galactic_story.global.end",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "end",
+   "names": [
+    "End_Cinematic_Camera"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 178,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 2
+  },
+  {
+   "id": "galactic_story.global.point",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "point",
+   "names": [
+    "Point_Camera_At"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 179,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 2
+  },
+  {
+   "id": "galactic_story.global.weather",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "weather",
+   "names": [
+    "Weather_Audio_Pause"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 180,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 2
+  },
+  {
+   "id": "galactic_story.member.insert",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "insert",
+   "names": [
+    "Insert"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 181,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 2
+  },
+  {
+   "id": "galactic_ai.global._produceobject",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "_produceobject",
+   "names": [
+    "_ProduceObject"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 182,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_ai.global.getcurrenttime",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "getcurrenttime",
+   "names": [
+    "GetCurrentTime.Galactic_Time"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 183,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_ai.global.is",
+   "host": "galactic_ai",
+   "kind": "global",
+   "family": "is",
+   "names": [
+    "Is_Campaign_Game"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 184,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_evaluators.global.discretedistribution",
+   "host": "galactic_evaluators",
+   "kind": "global",
+   "family": "discretedistribution",
+   "names": [
+    "DiscreteDistribution.Create"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 185,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_object.global._findstagearea",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "_findstagearea",
+   "names": [
+    "_FindStageArea"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 186,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_object.global.camera",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "camera",
+   "names": [
+    "Camera_To_Follow"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 187,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_object.global.cinematic",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "cinematic",
+   "names": [
+    "Cinematic_Zoom"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 188,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_object.global.get",
+   "host": "galactic_object",
+   "kind": "global",
+   "family": "get",
+   "names": [
+    "Get_Most_Defended_Position"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 189,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_object.member.undo",
+   "host": "galactic_object",
+   "kind": "member",
+   "family": "undo",
+   "names": [
+    "Undo_Reveal"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 190,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_story.global._findstagearea",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "_findstagearea",
+   "names": [
+    "_FindStageArea"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 191,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_story.global.enable",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "enable",
+   "names": [
+    "Enable_Fog"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 192,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_story.global.get",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "get",
+   "names": [
+    "Get_Most_Defended_Position"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 193,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_story.global.master",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "master",
+   "names": [
+    "Master_Volume_Restore"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 194,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_story.global.start",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "start",
+   "names": [
+    "Start_Cinematic_Camera"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 195,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_story.global.waitforstarbase",
+   "host": "galactic_story",
+   "kind": "global",
+   "family": "waitforstarbase",
+   "names": [
+    "WaitForStarbase"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 196,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_story.member.force",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "force",
+   "names": [
+    "Force_Test_Space_Conflict"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 197,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_story.member.has",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "has",
+   "names": [
+    "Has_Property"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 198,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "galactic_story.member.isfinished",
+   "host": "galactic_story",
+   "kind": "member",
+   "family": "isfinished",
+   "names": [
+    "IsFinished"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 199,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "scoring.global.findtarget",
+   "host": "scoring",
+   "kind": "global",
+   "family": "findtarget",
+   "names": [
+    "FindTarget.Reachable_Target"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 200,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "scoring.member.has",
+   "host": "scoring",
+   "kind": "member",
+   "family": "has",
+   "names": [
+    "Has_Property"
+   ],
+   "owner_lane": "gc",
+   "mods_blocked": 1,
+   "order": 201,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "tactical_story.global.transition",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "transition",
+   "names": [
+    "Transition_Cinematic_Camera_Key",
+    "Transition_Cinematic_Target_Key",
+    "Transition_To_Tactical_Camera"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 1,
+   "severity": "high",
+   "call_sites": 5943,
+   "score": 53487
+  },
+  {
+   "id": "tactical_story.global.set",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "set",
+   "names": [
+    "Set_Cinematic_Camera_Key",
+    "Set_Cinematic_Environment",
+    "Set_Cinematic_Target_Key",
+    "Set_New_Environment"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 2,
+   "severity": "high",
+   "call_sites": 5613,
+   "score": 50453
+  },
+  {
+   "id": "tactical_story.global.fade",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "fade",
+   "names": [
+    "Fade_Off",
+    "Fade_On",
+    "Fade_Screen_In",
+    "Fade_Screen_Out"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 3,
+   "severity": "high",
+   "call_sites": 4016,
+   "score": 35729
+  },
+  {
+   "id": "tactical_story.global.spawn",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "spawn",
+   "names": [
+    "Spawn_Special_Weapon",
+    "Spawn_Unit"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 4,
+   "severity": "high",
+   "call_sites": 3155,
+   "score": 28395
+  },
+  {
+   "id": "tactical_story.member.set",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "set",
+   "names": [
+    "Set_Black_Market_Tutorial",
+    "Set_Cannot_Be_Killed",
+    "Set_Check_Contested_Space",
+    "Set_Dialog",
+    "Set_Event_Parameter",
+    "Set_In_Limbo",
+    "Set_Reward_Parameter",
+    "Set_Reward_Type",
+    "Set_Sabotage_Tutorial",
+    "Set_Single_Ability_Autofire"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 5,
+   "severity": "high",
+   "call_sites": 2982,
+   "score": 26222
+  },
+  {
+   "id": "tactical_story.global.lock",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "lock",
+   "names": [
+    "Lock_Controls"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 6,
+   "severity": "high",
+   "call_sites": 2779,
+   "score": 25011
+  },
+  {
+   "id": "tactical_story.member.suspend",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "suspend",
+   "names": [
+    "Suspend",
+    "Suspend_Locomotor"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 7,
+   "severity": "high",
+   "call_sites": 2229,
+   "score": 19421
+  },
+  {
+   "id": "tactical_story.global.start",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "start",
+   "names": [
+    "Start_Cinematic_Camera",
+    "Start_Cinematic_Space_Retreat"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 8,
+   "severity": "high",
+   "call_sites": 1598,
+   "score": 14382
+  },
+  {
+   "id": "tactical_story.global.end",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "end",
+   "names": [
+    "End_Cinematic_Camera"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 9,
+   "severity": "high",
+   "call_sites": 1465,
+   "score": 13185
+  },
+  {
+   "id": "tactical_object.global.hide",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "hide",
+   "names": [
+    "Hide_Object",
+    "Hide_Sub_Object"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 7,
+   "order": 10,
+   "severity": "high",
+   "call_sites": 1654,
+   "score": 11536
+  },
+  {
+   "id": "tactical_story.member.attach",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "attach",
+   "names": [
+    "Attach_Particle_Effect"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 11,
+   "severity": "high",
+   "call_sites": 1156,
+   "score": 10404
+  },
+  {
+   "id": "tactical_story.global.point",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "point",
+   "names": [
+    "Point_Camera_At"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 12,
+   "severity": "high",
+   "call_sites": 1034,
+   "score": 9306
+  },
+  {
+   "id": "tactical_story.member.override",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "override",
+   "names": [
+    "Override_Max_Speed"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 13,
+   "severity": "high",
+   "call_sites": 920,
+   "score": 8280
+  },
+  {
+   "id": "tactical_story.member.prevent",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "prevent",
+   "names": [
+    "Prevent_Opportunity_Fire"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 14,
+   "severity": "high",
+   "call_sites": 907,
+   "score": 8163
+  },
+  {
+   "id": "tactical_story.global.fogofwar",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "fogofwar",
+   "names": [
+    "FogOfWar.Reveal",
+    "FogOfWar.Temporary_Reveal"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 15,
+   "severity": "high",
+   "call_sites": 894,
+   "score": 8046
+  },
+  {
+   "id": "tactical_story.global.hide",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "hide",
+   "names": [
+    "Hide_Object",
+    "Hide_Sub_Object"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 16,
+   "severity": "high",
+   "call_sites": 715,
+   "score": 6435
+  },
+  {
+   "id": "tactical_story.global.stop",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "stop",
+   "names": [
+    "Stop_All_Music",
+    "Stop_All_Speech",
+    "Stop_Bink_Movie"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 17,
+   "severity": "high",
+   "call_sites": 614,
+   "score": 5526
+  },
+  {
+   "id": "tactical_story.member.select",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "select",
+   "names": [
+    "Select_Object"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 18,
+   "severity": "high",
+   "call_sites": 602,
+   "score": 5418
+  },
+  {
+   "id": "tactical_story.global.thread",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "thread",
+   "names": [
+    "Thread.Kill"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 19,
+   "severity": "high",
+   "call_sites": 597,
+   "score": 5373
+  },
+  {
+   "id": "tactical_story.member.face",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "face",
+   "names": [
+    "Face_Immediate"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 20,
+   "severity": "high",
+   "call_sites": 551,
+   "score": 4959
+  },
+  {
+   "id": "tactical_story.global.cancel",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "cancel",
+   "names": [
+    "Cancel_Fast_Forward"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 21,
+   "severity": "high",
+   "call_sites": 519,
+   "score": 4671
+  },
+  {
+   "id": "tactical_story.member.make",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "make",
+   "names": [
+    "Make_Ally",
+    "Make_Enemy"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 22,
+   "severity": "high",
+   "call_sites": 500,
+   "score": 4500
+  },
+  {
+   "id": "tactical_story.member.in",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "in",
+   "names": [
+    "In_End_Cinematic"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 23,
+   "severity": "high",
+   "call_sites": 473,
+   "score": 4257
+  },
+  {
+   "id": "tactical_story.global.allow",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "allow",
+   "names": [
+    "Allow_Localized_SFX"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 24,
+   "severity": "high",
+   "call_sites": 440,
+   "score": 3960
+  },
+  {
+   "id": "tactical_story.member.stop",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "stop",
+   "names": [
+    "Stop",
+    "Stop_SFX_Event"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 25,
+   "severity": "high",
+   "call_sites": 340,
+   "score": 3060
+  },
+  {
+   "id": "tactical_object.global.spawn",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "spawn",
+   "names": [
+    "Spawn_Unit"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 26,
+   "severity": "high",
+   "call_sites": 335,
+   "score": 3015
+  },
+  {
+   "id": "tactical_story.global.create",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "create",
+   "names": [
+    "Create_Cinematic_Transport"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 27,
+   "severity": "high",
+   "call_sites": 312,
+   "score": 2808
+  },
+  {
+   "id": "tactical_story.member.undo",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "undo",
+   "names": [
+    "Undo_Reveal"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 28,
+   "severity": "high",
+   "call_sites": 306,
+   "score": 2754
+  },
+  {
+   "id": "tactical_story.global.reinforce",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "reinforce",
+   "names": [
+    "Reinforce_Unit"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 29,
+   "severity": "high",
+   "call_sites": 293,
+   "score": 2637
+  },
+  {
+   "id": "tactical_story.member.reset",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "reset",
+   "names": [
+    "Reset",
+    "Reset_Ability_Counter"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 30,
+   "severity": "high",
+   "call_sites": 346,
+   "score": 2472
+  },
+  {
+   "id": "tactical_object.global.fade",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "fade",
+   "names": [
+    "Fade_On",
+    "Fade_Screen_In",
+    "Fade_Screen_Out"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 31,
+   "severity": "high",
+   "call_sites": 269,
+   "score": 2086
+  },
+  {
+   "id": "tactical_story.member.activate",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "activate",
+   "names": [
+    "Activate"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 7,
+   "order": 32,
+   "severity": "high",
+   "call_sites": 293,
+   "score": 2051
+  },
+  {
+   "id": "tactical_story.global.resume",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "resume",
+   "names": [
+    "Resume_Hyperspace_In",
+    "Resume_Mode_Based_Music"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 33,
+   "severity": "high",
+   "call_sites": 219,
+   "score": 1971
+  },
+  {
+   "id": "tactical_story.global.assemble",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "assemble",
+   "names": [
+    "Assemble_Fleet"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 34,
+   "severity": "high",
+   "call_sites": 216,
+   "score": 1944
+  },
+  {
+   "id": "tactical_story.member.mark",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "mark",
+   "names": [
+    "Mark_Parent_Mode_Object_For_Death"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 35,
+   "severity": "high",
+   "call_sites": 203,
+   "score": 1827
+  },
+  {
+   "id": "tactical_story.member.hyperspace",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "hyperspace",
+   "names": [
+    "Hyperspace_Away"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 36,
+   "severity": "high",
+   "call_sites": 181,
+   "score": 1629
+  },
+  {
+   "id": "tactical_story.member.enable",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "enable",
+   "names": [
+    "Enable_Advisor_Hints",
+    "Enable_As_Actor",
+    "Enable_Behavior"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 37,
+   "severity": "high",
+   "call_sites": 176,
+   "score": 1584
+  },
+  {
+   "id": "tactical_story.global.cinematic",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "cinematic",
+   "names": [
+    "Cinematic_Zoom"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 38,
+   "severity": "high",
+   "call_sites": 174,
+   "score": 1566
+  },
+  {
+   "id": "tactical_story.global.play",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "play",
+   "names": [
+    "Play_Bink_Movie",
+    "Play_Lightning_Effect",
+    "Play_Music"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 39,
+   "severity": "high",
+   "call_sites": 171,
+   "score": 1539
+  },
+  {
+   "id": "tactical_story.member.disable",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "disable",
+   "names": [
+    "Disable_Bombing_Run",
+    "Disable_Orbital_Bombardment"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 40,
+   "severity": "high",
+   "call_sites": 167,
+   "score": 1503
+  },
+  {
+   "id": "tactical_story.global.weather",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "weather",
+   "names": [
+    "Weather_Audio_Pause"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 41,
+   "severity": "high",
+   "call_sites": 164,
+   "score": 1476
+  },
+  {
+   "id": "tactical_object.global.transition",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "transition",
+   "names": [
+    "Transition_Cinematic_Camera_Key",
+    "Transition_Cinematic_Target_Key",
+    "Transition_To_Tactical_Camera"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 42,
+   "severity": "high",
+   "call_sites": 183,
+   "score": 1464
+  },
+  {
+   "id": "tactical_story.global.promote",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "promote",
+   "names": [
+    "Promote_To_Space_Cinematic_Layer"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 43,
+   "severity": "high",
+   "call_sites": 144,
+   "score": 1296
+  },
+  {
+   "id": "tactical_object.global.set",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "set",
+   "names": [
+    "Set_Cinematic_Camera_Key",
+    "Set_Cinematic_Environment",
+    "Set_Cinematic_Target_Key"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 44,
+   "severity": "high",
+   "call_sites": 163,
+   "score": 1280
+  },
+  {
+   "id": "tactical_story.global.do",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "do",
+   "names": [
+    "Do_End_Cinematic_Cleanup"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 45,
+   "severity": "high",
+   "call_sites": 140,
+   "score": 1260
+  },
+  {
+   "id": "tactical_object.global.lock",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "lock",
+   "names": [
+    "Lock_Controls"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 46,
+   "severity": "high",
+   "call_sites": 150,
+   "score": 1200
+  },
+  {
+   "id": "tactical_story.global.enable",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "enable",
+   "names": [
+    "Enable_Distance_Fog",
+    "Enable_Fog"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 47,
+   "severity": "high",
+   "call_sites": 129,
+   "score": 1161
+  },
+  {
+   "id": "tactical_object.global.start",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "start",
+   "names": [
+    "Start_Cinematic_Camera",
+    "Start_Cinematic_Mode"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 48,
+   "severity": "high",
+   "call_sites": 86,
+   "score": 646
+  },
+  {
+   "id": "tactical_object.global.end",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "end",
+   "names": [
+    "End_Cinematic_Camera",
+    "End_Cinematic_Mode"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 49,
+   "severity": "high",
+   "call_sites": 77,
+   "score": 609
+  },
+  {
+   "id": "tactical_story.global.threadvalue",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "threadvalue",
+   "names": [
+    "ThreadValue.Get"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 50,
+   "severity": "high",
+   "call_sites": 60,
+   "score": 540
+  },
+  {
+   "id": "tactical_story.member.unlock",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "unlock",
+   "names": [
+    "Unlock_Tech"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 3,
+   "order": 51,
+   "severity": "high",
+   "call_sites": 178,
+   "score": 534
+  },
+  {
+   "id": "tactical_story.global.scroll",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "scroll",
+   "names": [
+    "Scroll_Camera_To"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 52,
+   "severity": "high",
+   "call_sites": 55,
+   "score": 495
+  },
+  {
+   "id": "tactical_object.global.reinforce",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "reinforce",
+   "names": [
+    "Reinforce_Unit"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 53,
+   "severity": "high",
+   "call_sites": 53,
+   "score": 477
+  },
+  {
+   "id": "tactical_story.global.create_thread",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "create_thread",
+   "names": [
+    "Create_Thread.Is_Thread_Active"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 54,
+   "severity": "high",
+   "call_sites": 52,
+   "score": 468
+  },
+  {
+   "id": "tactical_story.member.lock",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "lock",
+   "names": [
+    "Lock_Tech"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 3,
+   "order": 55,
+   "severity": "high",
+   "call_sites": 146,
+   "score": 438
+  },
+  {
+   "id": "tactical_story.member.get",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "get",
+   "names": [
+    "Get_Affiliated_Indigenous_Type",
+    "Get_Bone_Position",
+    "Get_Next_Starbase_Type",
+    "Get_Starbase_Level"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 56,
+   "severity": "high",
+   "call_sites": 52,
+   "score": 420
+  },
+  {
+   "id": "tactical_story.member.force",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "force",
+   "names": [
+    "Force_Ability_Recharge",
+    "Force_Test_Space_Conflict"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 57,
+   "severity": "high",
+   "call_sites": 53,
+   "score": 411
+  },
+  {
+   "id": "tactical_story.member.is",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "is",
+   "names": [
+    "Is_Under_Effects_Of_Ability"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 58,
+   "severity": "high",
+   "call_sites": 44,
+   "score": 396
+  },
+  {
+   "id": "tactical_object.member.set",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "set",
+   "names": [
+    "Set_Cannot_Be_Killed",
+    "Set_Check_Contested_Space",
+    "Set_Event_Parameter",
+    "Set_Importance",
+    "Set_Reward_Parameter"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 59,
+   "severity": "high",
+   "call_sites": 64,
+   "score": 385
+  },
+  {
+   "id": "tactical_story.global.find",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "find",
+   "names": [
+    "Find_Path"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 60,
+   "severity": "high",
+   "call_sites": 37,
+   "score": 333
+  },
+  {
+   "id": "tactical_object.member.attach",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "attach",
+   "names": [
+    "Attach_Particle_Effect"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 61,
+   "severity": "high",
+   "call_sites": 35,
+   "score": 280
+  },
+  {
+   "id": "tactical_story.member.remove",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "remove",
+   "names": [
+    "Remove_Orbital_Bombardment"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 62,
+   "severity": "high",
+   "call_sites": 30,
+   "score": 270
+  },
+  {
+   "id": "tactical_story.global.sfxmanager",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "sfxmanager",
+   "names": [
+    "SFXManager.Allow_Ambient_VO",
+    "SFXManager.Allow_Enemy_Sighted_VO",
+    "SFXManager.Allow_HUD_VO",
+    "SFXManager.Allow_Localized_SFXEvents",
+    "SFXManager.Allow_Unit_Reponse_VO"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 63,
+   "severity": "high",
+   "call_sites": 46,
+   "score": 267
+  },
+  {
+   "id": "tactical_object.member.suspend",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "suspend",
+   "names": [
+    "Suspend_Locomotor"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 64,
+   "severity": "high",
+   "call_sites": 30,
+   "score": 240
+  },
+  {
+   "id": "tactical_object.member.override",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "override",
+   "names": [
+    "Override_Max_Speed"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 65,
+   "severity": "high",
+   "call_sites": 25,
+   "score": 225
+  },
+  {
+   "id": "tactical_story.global.master",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "master",
+   "names": [
+    "Master_Volume_Restore"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 66,
+   "severity": "high",
+   "call_sites": 23,
+   "score": 207
+  },
+  {
+   "id": "tactical_story.global.zoom",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "zoom",
+   "names": [
+    "Zoom_Camera"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 67,
+   "severity": "high",
+   "call_sites": 23,
+   "score": 207
+  },
+  {
+   "id": "tactical_object.global.point",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "point",
+   "names": [
+    "Point_Camera_At"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 68,
+   "severity": "high",
+   "call_sites": 22,
+   "score": 198
+  },
+  {
+   "id": "tactical_object.global.allow",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "allow",
+   "names": [
+    "Allow_Localized_SFX"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 69,
+   "severity": "high",
+   "call_sites": 22,
+   "score": 176
+  },
+  {
+   "id": "tactical_object.global.weather",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "weather",
+   "names": [
+    "Weather_Audio_Pause"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 70,
+   "severity": "high",
+   "call_sites": 22,
+   "score": 176
+  },
+  {
+   "id": "tactical_story.member.insert",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "insert",
+   "names": [
+    "Insert"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 71,
+   "severity": "high",
+   "call_sites": 18,
+   "score": 162
+  },
+  {
+   "id": "tactical_story.member.sample",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "sample",
+   "names": [
+    "Sample"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 72,
+   "severity": "high",
+   "call_sites": 15,
+   "score": 135
+  },
+  {
+   "id": "tactical_object.member.is",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "is",
+   "names": [
+    "Is_Neutral"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 73,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 99
+  },
+  {
+   "id": "tactical_story.global.force",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "force",
+   "names": [
+    "Force_Weather"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 74,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 99
+  },
+  {
+   "id": "tactical_story.global.rotate",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "rotate",
+   "names": [
+    "Rotate_Camera_By"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 75,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 99
+  },
+  {
+   "id": "tactical_story.member.play",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "play",
+   "names": [
+    "Play_Cinematic_Engine_Flyby"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 76,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 99
+  },
+  {
+   "id": "tactical_story.member.retreat",
+   "host": "tactical_story",
+   "kind": "member",
+   "family": "retreat",
+   "names": [
+    "Retreat"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 77,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 99
+  },
+  {
+   "id": "tactical_object.member.enable",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "enable",
+   "names": [
+    "Enable_As_Actor"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 3,
+   "order": 78,
+   "severity": "high",
+   "call_sites": 31,
+   "score": 93
+  },
+  {
+   "id": "tactical_object.global.evaluatetypelist",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "evaluatetypelist",
+   "names": [
+    "EvaluateTypeList"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 79,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "tactical_object.member.give",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "give",
+   "names": [
+    "Give_Random_Sliceable_Tech"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 80,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "tactical_plan_space.global._findstagearea",
+   "host": "tactical_plan_space",
+   "kind": "global",
+   "family": "_findstagearea",
+   "names": [
+    "_FindStageArea"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 81,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "tactical_story.global._findstagearea",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "_findstagearea",
+   "names": [
+    "_FindStageArea"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 9,
+   "order": 82,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 90
+  },
+  {
+   "id": "tactical_object.global.enable",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "enable",
+   "names": [
+    "Enable_Fog"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 83,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 88
+  },
+  {
+   "id": "tactical_object.global.thread",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "thread",
+   "names": [
+    "Thread.Kill"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 8,
+   "order": 84,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 88
+  },
+  {
+   "id": "tactical_object.global.is",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "is",
+   "names": [
+    "Is_Campaign_Game"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 4,
+   "order": 85,
+   "severity": "high",
+   "call_sites": 20,
+   "score": 80
+  },
+  {
+   "id": "tactical_plan_space.global.aitarget",
+   "host": "tactical_plan_space",
+   "kind": "global",
+   "family": "aitarget",
+   "names": [
+    "AITarget.Get_Game_Object"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 7,
+   "order": 86,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 70
+  },
+  {
+   "id": "tactical_story.global.gui",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "gui",
+   "names": [
+    "GUI_Button_Icon",
+    "GUI_Component_Enable",
+    "GUI_Component_Text",
+    "GUI_Component_Visibility"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 87,
+   "severity": "high",
+   "call_sites": 34,
+   "score": 60
+  },
+  {
+   "id": "tactical_object.member.force",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "force",
+   "names": [
+    "Force_Ability_Recharge"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 88,
+   "severity": "high",
+   "call_sites": 27,
+   "score": 54
+  },
+  {
+   "id": "tactical_object.global.stop",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "stop",
+   "names": [
+    "Stop_All_Music",
+    "Stop_All_Speech",
+    "Stop_Bink_Movie"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 3,
+   "order": 89,
+   "severity": "high",
+   "call_sites": 17,
+   "score": 43
+  },
+  {
+   "id": "tactical_object.global.sfxmanager",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "sfxmanager",
+   "names": [
+    "SFXManager.Allow_Ambient_VO",
+    "SFXManager.Allow_Enemy_Sighted_VO",
+    "SFXManager.Allow_HUD_VO",
+    "SFXManager.Allow_Localized_SFXEvents",
+    "SFXManager.Allow_Unit_Reponse_VO"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 90,
+   "severity": "high",
+   "call_sites": 20,
+   "score": 40
+  },
+  {
+   "id": "tactical_plan_space.global.are",
+   "host": "tactical_plan_space",
+   "kind": "global",
+   "family": "are",
+   "names": [
+    "Are_On_Opposite_Sides_Of_Shield"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 4,
+   "order": 91,
+   "severity": "high",
+   "call_sites": 9,
+   "score": 36
+  },
+  {
+   "id": "tactical_object.global.assemble",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "assemble",
+   "names": [
+    "Assemble_Fleet"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 3,
+   "order": 92,
+   "severity": "high",
+   "call_sites": 9,
+   "score": 27
+  },
+  {
+   "id": "tactical_object.global.play",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "play",
+   "names": [
+    "Play_Bink_Movie",
+    "Play_Music"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 3,
+   "order": 93,
+   "severity": "high",
+   "call_sites": 11,
+   "score": 27
+  },
+  {
+   "id": "tactical_object.global.find",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "find",
+   "names": [
+    "Find_Path"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 4,
+   "order": 94,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 24
+  },
+  {
+   "id": "tactical_object.member.cancel",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "cancel",
+   "names": [
+    "Cancel_Ability"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 95,
+   "severity": "high",
+   "call_sites": 12,
+   "score": 24
+  },
+  {
+   "id": "tactical_object.member.stop",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "stop",
+   "names": [
+    "Stop",
+    "Stop_SFX_Event"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 96,
+   "severity": "high",
+   "call_sites": 12,
+   "score": 23
+  },
+  {
+   "id": "tactical_object.member.get",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "get",
+   "names": [
+    "Get_Bone_Position",
+    "Get_Health",
+    "Get_Hint"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 97,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 18
+  },
+  {
+   "id": "tactical_object.member.make",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "make",
+   "names": [
+    "Make_Ally",
+    "Make_Enemy"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 98,
+   "severity": "high",
+   "call_sites": 10,
+   "score": 17
+  },
+  {
+   "id": "tactical_object.global.resume",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "resume",
+   "names": [
+    "Resume_Mode_Based_Music"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 99,
+   "severity": "high",
+   "call_sites": 8,
+   "score": 16
+  },
+  {
+   "id": "tactical_object.member.mark",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "mark",
+   "names": [
+    "Mark_Parent_Mode_Object_For_Death"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 4,
+   "order": 100,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 16
+  },
+  {
+   "id": "tactical_object.member.reset",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "reset",
+   "names": [
+    "Reset_Ability_Counter"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 101,
+   "severity": "high",
+   "call_sites": 13,
+   "score": 13
+  },
+  {
+   "id": "tactical_object.member.face",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "face",
+   "names": [
+    "Face_Immediate"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 102,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 12
+  },
+  {
+   "id": "tactical_plan_space.global.spawn",
+   "host": "tactical_plan_space",
+   "kind": "global",
+   "family": "spawn",
+   "names": [
+    "Spawn_Unit"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 103,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 12
+  },
+  {
+   "id": "tactical_story.global.getcurrenttime",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "getcurrenttime",
+   "names": [
+    "GetCurrentTime.Galactic_Time"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 104,
+   "severity": "high",
+   "call_sites": 12,
+   "score": 12
+  },
+  {
+   "id": "tactical_object.global.fogofwar",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "fogofwar",
+   "names": [
+    "FogOfWar.Reveal",
+    "FogOfWar.Temporary_Reveal"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 3,
+   "order": 105,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 10
+  },
+  {
+   "id": "tactical_object.member.prevent",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "prevent",
+   "names": [
+    "Prevent_Opportunity_Fire"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 106,
+   "severity": "high",
+   "call_sites": 5,
+   "score": 10
+  },
+  {
+   "id": "tactical_object.global.create",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "create",
+   "names": [
+    "Create_Cinematic_Transport"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 3,
+   "order": 107,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 9
+  },
+  {
+   "id": "tactical_story.global.are",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "are",
+   "names": [
+    "Are_On_Opposite_Sides_Of_Shield"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 3,
+   "order": 108,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 9
+  },
+  {
+   "id": "tactical_object.global.cancel",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "cancel",
+   "names": [
+    "Cancel_Fast_Forward"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 109,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 8
+  },
+  {
+   "id": "tactical_object.member.disable",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "disable",
+   "names": [
+    "Disable_Orbital_Bombardment"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 110,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 8
+  },
+  {
+   "id": "tactical_object.member.sample",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "sample",
+   "names": [
+    "Sample"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 111,
+   "severity": "high",
+   "call_sites": 8,
+   "score": 8
+  },
+  {
+   "id": "tactical_plan_space.global.reinforce",
+   "host": "tactical_plan_space",
+   "kind": "global",
+   "family": "reinforce",
+   "names": [
+    "Reinforce_Unit"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 112,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 8
+  },
+  {
+   "id": "tactical_plan_space.global.is",
+   "host": "tactical_plan_space",
+   "kind": "global",
+   "family": "is",
+   "names": [
+    "Is_Campaign_Game"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 113,
+   "severity": "high",
+   "call_sites": 7,
+   "score": 7
+  },
+  {
+   "id": "tactical_story.global.letter",
+   "host": "tactical_story",
+   "kind": "global",
+   "family": "letter",
+   "names": [
+    "Letter_Box_Off",
+    "Letter_Box_On"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 114,
+   "severity": "high",
+   "call_sites": 7,
+   "score": 7
+  },
+  {
+   "id": "tactical_object.global.create_thread",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "create_thread",
+   "names": [
+    "Create_Thread.Is_Thread_Active"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 115,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 6
+  },
+  {
+   "id": "tactical_object.global.gui",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "gui",
+   "names": [
+    "GUI_Button_Icon",
+    "GUI_Component_Enable",
+    "GUI_Component_Text",
+    "GUI_Component_Visibility"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 116,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 6
+  },
+  {
+   "id": "tactical_object.global.master",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "master",
+   "names": [
+    "Master_Volume_Restore"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 117,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 6
+  },
+  {
+   "id": "tactical_object.global.scroll",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "scroll",
+   "names": [
+    "Scroll_Camera_To"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 118,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 6
+  },
+  {
+   "id": "tactical_object.member.hyperspace",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "hyperspace",
+   "names": [
+    "Hyperspace_Away"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 119,
+   "severity": "high",
+   "call_sites": 3,
+   "score": 6
+  },
+  {
+   "id": "tactical_object.member.retreat",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "retreat",
+   "names": [
+    "Retreat"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 120,
+   "severity": "high",
+   "call_sites": 6,
+   "score": 6
+  },
+  {
+   "id": "tactical_evaluators.global._findstagearea",
+   "host": "tactical_evaluators",
+   "kind": "global",
+   "family": "_findstagearea",
+   "names": [
+    "_FindStageArea"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 121,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 4
+  },
+  {
+   "id": "tactical_evaluators.member.set",
+   "host": "tactical_evaluators",
+   "kind": "member",
+   "family": "set",
+   "names": [
+    "Set_Reward_Parameter"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 122,
+   "severity": "high",
+   "call_sites": 4,
+   "score": 4
+  },
+  {
+   "id": "tactical_plan_space.member.mark",
+   "host": "tactical_plan_space",
+   "kind": "member",
+   "family": "mark",
+   "names": [
+    "Mark_Parent_Mode_Object_For_Death"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 2,
+   "order": 123,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 4
+  },
+  {
+   "id": "tactical_evaluators.global.spawn",
+   "host": "tactical_evaluators",
+   "kind": "global",
+   "family": "spawn",
+   "names": [
+    "Spawn_Unit"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 124,
+   "severity": "high",
+   "call_sites": 2,
+   "score": 2
+  },
+  {
+   "id": "tactical_evaluators.global.discretedistribution",
+   "host": "tactical_evaluators",
+   "kind": "global",
+   "family": "discretedistribution",
+   "names": [
+    "DiscreteDistribution.Create"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 125,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "tactical_object.global._findstagearea",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "_findstagearea",
+   "names": [
+    "_FindStageArea"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 126,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "tactical_object.global.camera",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "camera",
+   "names": [
+    "Camera_To_Follow"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 127,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "tactical_object.global.cinematic",
+   "host": "tactical_object",
+   "kind": "global",
+   "family": "cinematic",
+   "names": [
+    "Cinematic_Zoom"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 128,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "tactical_object.member.activate",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "activate",
+   "names": [
+    "Activate"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 129,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "tactical_object.member.undo",
+   "host": "tactical_object",
+   "kind": "member",
+   "family": "undo",
+   "names": [
+    "Undo_Reveal"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 130,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  },
+  {
+   "id": "tactical_plan_space.global.discretedistribution",
+   "host": "tactical_plan_space",
+   "kind": "global",
+   "family": "discretedistribution",
+   "names": [
+    "DiscreteDistribution.Create"
+   ],
+   "owner_lane": "sk",
+   "mods_blocked": 1,
+   "order": 131,
+   "severity": "high",
+   "call_sites": 1,
+   "score": 1
+  }
+ ]
+}

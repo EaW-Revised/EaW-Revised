@@ -113,8 +113,7 @@ mods::ContentDigests& content_digests(ModelState& m) {
     return *m.digests;
 }
 void refresh(ModelState& m) {
-    m.catalog = mods::discover(m.discovery);
-    mods::read_mod_metadata(m.catalog);
+    m.catalog = mods::discover(m.discovery);   // discover() already reads the modinfo files
     m.discovered = true;
 }
 const mods::ModRecord* record(const ModelState& m, std::string_view key) {

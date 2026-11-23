@@ -45,7 +45,8 @@ def production_hover_polling_violations(sources):
     if getter != "return!dragging_pool_&&is_visible_in_tree()?hover_.get():nullptr;":
         violations.append("panel getter must directly borrow the allocation-tested cache")
     handoff = text["map"].split("voidMapMode::State::sync_cards(){", 1)[1].split("if(live_session)", 1)[0]
-    if handoff != ("if(!hud||!battle)return;constauto*production_hover="
+    # #8182: a spectating view hides its order controls again when the sync returns (a scope guard, no owning pointer).
+    if handoff != ("constViewOnlyApply<State>view_only_apply{*this};if(!hud||!battle)return;constauto*production_hover="
                    "hud->shell_shown()&&hud->production()?hud->production()->hovered_entry():nullptr;"
                    "hud->set_production_hover(production_hover);"):
         violations.append("MapMode must pass the borrowed pointer without an owning local")

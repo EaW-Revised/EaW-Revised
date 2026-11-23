@@ -149,6 +149,19 @@ The tray never repurposes a bar slot.
     its enum does not define. Such names are ignored.
   - Squadron and company choices carry no category of their own; they take the union of
     their members' names (PL-13).
+- **Finer groups by encyclopedia class** (owner decision of 2026-11-23, on, no setting) (legacy EAWR-8160): a category group
+  whose choices carry more than one authored `Encyclopedia_Unit_Class` splits into one group per class, and each is
+  headed by that class's own text from the mod (the line the unit card shows, with what precedes its first colon dropped:
+  "Class: Droid" heads the group "Droid"; a text without a colon is kept whole), so a mod that sorts its vehicles into
+  speeders, droids and walkers gets those groups and a mod that authors one class, or none, keeps one group. A squadron
+  or company with no class of its own takes the class of its first member that has one (PL-13). A class group whose header reads the
+  same as another category group's (case aside; a class of one category worded like another category) is merged with that
+  group, so no two identical headers sit in one tray; the merged choices are in choice list order (keyed entries first),
+  and category groups without a class group are never merged, however their headers read. Within one category the
+  groups come in the order each first appears in the choice list (the categories keep their order, GBT-06); choices with
+  no class stay in the category's own group, last, under the category's header. Only category groups split: the buildings group, misc and the extra groups of GBT-12 never do. The
+  split is data, not a list: no class name is known to the code, and a class whose text the mod lacks shows its key.
+  The row packing, the row budget and the fold into misc (GBT-06) treat each class group as a group of its own.
 - A choice with no `CategoryMask`, or only names its enum file does not define, goes to misc.
 - Considered and rejected: guessing a missing size class from `Population_Value` or
   `Build_Cost_Credits`, relative to the other units of the mod. Tested on space units that do
@@ -176,6 +189,17 @@ The tray never repurposes a bar slot.
 
 - Each group has a small header above its icons. Groups on the same row are separated by a
   gap and a divider.
+- Every group's header sits above the first icon of that group, in every group and on both tabs (owner, 2026-11-23)
+  (legacy EAWR-8159), and clearly closer to its own icons than to the row above, so a label never reads as the caption of
+  the icons over it. The header strip is the line the label draws (the font's line height at the label's glyph size, at
+  either size step: the label is not scaled with the entries). The label is drawn a quarter of the strip's height above
+  the strip right over its icons and never on an icon frame (owner, 2026-11-20) (legacy EAWR-8031), and every row that
+  carries a header (the first row excepted; a wrapped group's later lines carry none) has three times that much extra
+  space above it, so the gap over the label is more than twice the gap under it. All amounts are relative to the
+  header's height (no per-skin or per-mod offset; no layout tag). The extra space is taken whole: the tray grows by it
+  once per headed row after the first, and the height fit below answers when that no longer fits. The first row's
+  label rides up into the strip the close mark reserved above it, never further than the row gap under the close
+  icon's band (GBT-07).
 - Groups are placed in the order of their category name in the mod's enum file, then any extra
   groups at the position their definition names (GBT-12). A group goes on the current row when it fits there,
   otherwise it starts a new row. Earlier rows are never backfilled, so the layout does not
@@ -285,6 +309,14 @@ hidden; mods customise that view heavily and must not be affected.
   layout) closes the tray, so the drop targets under it are uncovered. It stays closed after the
   drag until the player opens it again.
 - Otherwise it closes only by the handle or Tab, like everywhere else.
+- Over its whole area the open tray holds the pointer: a planet-view button behind it shows no hover art, opens no tooltip
+  or popup, and no click reaches it; with the tray closed the planet view gets the pointer back. The tray's controls live
+  in a layer of their own, a child of the HUD placed right after the last of the two shell input masks (the planet menu
+  has a mask of its own, a later child of the HUD than the command bar's, and Godot picks pointer targets subtree by
+  subtree in tree order): the rule is kept at the layer level, not per button. The ground input sits above the masks and
+  claims the pointer over the planet-view buttons, so it asks the tray first and gives the pointer up over the tray's
+  controls. The encyclopedia and queue popups are built before the shells: they draw over the tray but, as over every
+  shell, the pointer order puts the shells (and the tray) first.
 
 ## GBT-09 Mod filter buttons
 

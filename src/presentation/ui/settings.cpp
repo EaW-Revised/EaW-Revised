@@ -104,6 +104,7 @@ const IntField fields[] = {
     EAWR_SETTINGS_FIELD("gameplay.reinforcement_areas_only_while_placing", gameplay.reinforcement_areas_only_while_placing, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.fit_radar_to_galaxy", gameplay.fit_radar_to_galaxy, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.space_pauses_galactic", gameplay.space_pauses_galactic, 0, 1),
+    EAWR_SETTINGS_FIELD("gameplay.gc_battle_colours", gameplay.gc_battle_colours, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.galactic_build_tray", gameplay.galactic_build_tray, -1, 1),
     EAWR_SETTINGS_FIELD("gameplay.animated_loading_background", gameplay.animated_loading_background, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.hover_owner_names", gameplay.hover_owner_names, -1, 1),

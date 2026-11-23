@@ -1,6 +1,5 @@
 #include "hero_tray_view.hpp"
 
-#include "eawr/presentation/ui/command_bar_placement.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
 
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
@@ -108,23 +107,12 @@ const model::HudHeroFrame& EawrHeroTray::frame(const Tray tray) const noexcept {
 }
 
 model::ShellPlacement EawrHeroTray::frame_placement(const Tray tray) const {
-    const model::HudHeroFrame& art = frame(tray);
-    const model::ReferenceSpace space = setup_.space ? setup_.space() : model::ReferenceSpace{};
-    // The frame is a manual shell around its centred origin: its caller supplies the translation, which
-    // puts the first slot's bone at its distance from the top and from the safe area's right (friendly) or
+    // The first slot's bone sits at its distance from the top and from the safe area's right (friendly) or
     // left (hostile) edge (retail capture 10-20, WHE-70: the local team's heroes sit top right, the
     // opposing team's top left); the art and the other slots follow the bones.
-    model::CommandBarPlacement policy = art.placement;
-    model::ReferencePoint& translation = policy.manual_translation;
-    if (!art.slots.empty()) {
-        const assets::Vec2f first = art.slots.front().button.origin;
-        const double left_edge = space.safe_left - space.width / 2.0;
-        const double right_edge = left_edge + space.safe_width;
-        translation.x = (tray == Tray::hostile ? left_edge + setup_.placement.edge_inset
-                                               : right_edge - setup_.placement.edge_inset) - first.x;
-        translation.y = space.height / 2.0 - setup_.placement.top_inset - first.y;
-    }
-    return model::place_command_bar(space, 0.0, policy);
+    const model::ReferenceSpace space = setup_.space ? setup_.space() : model::ReferenceSpace{};
+    return model::hero_frame_placement(space, frame(tray), setup_.placement.edge_inset, setup_.placement.top_inset,
+                                       tray == Tray::hostile);
 }
 
 std::size_t EawrHeroTray::variant(const Tray tray, const std::size_t count) const noexcept {

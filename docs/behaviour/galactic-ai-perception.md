@@ -39,7 +39,7 @@ strength for a path coefficient.
   largest count in that graph; a zero maximum gives zero for every retained
   vertex. A vertex filtered from the graph has no coefficient entry. Zero edges
   can leave an incomplete predecessor chain after relaxation. Retail's walk of
-  that NIL chain remains unqualified and needs a capture/research follow-up.
+  that NIL chain is qualified by WGA-506 (legacy EAWR-4796): retail has no guard.
   The explicit project boundary skips that endpoint pair, contributes no partial
   counts, emits a diagnostic and preserves the other pairs and publications.
 - **WGA-492:** `FriendlyInternalConnectivity` and
@@ -49,10 +49,12 @@ strength for a path coefficient.
   graphs. Missing owning publications stay unavailable. The retail enemy
   external wrapper forwards an output without initializing it; its equation
   caller's seed is qualified separately by WGA-494.
-- **WGA-493:** Retail initialization and post-load reconstruction build the two
-  coefficient graphs for each player. This implementation rebuilds derived
-  tables from completed control, geometry, route and diplomacy inputs at fresh
-  binding and restore. It adds no native archive fields. Loaded equations request
+- **WGA-493:** Retail builds the two coefficient graphs for each player at
+  initialization and on WGA-505's planet trigger; no post-load caller was
+  found. This implementation rebuilds derived tables from completed control,
+  geometry, route and diplomacy inputs at fresh binding and restore, and at the
+  execution path-refresh seam when complete inputs differ (see the
+  implementation paragraph below). It adds no native archive fields. Loaded equations request
   the producer through their compiled lookup tokens; equal complete inputs reuse
   the prior publication. Raw authored movement constants are rounded to binary32
   for this producer, independently of existing fixed-point force consumers.
@@ -65,6 +67,49 @@ strength for a path coefficient.
   players. Missing vertex entries contribute nothing and can give successful
   zero; missing owning publications remain unavailable. This qualifies equation
   lookups, without claiming that an arbitrary direct native caller seeds zero.
+- **WGA-505:** The four connectivity getters only read the retained per-player
+  tables; a read never refreshes them. One global rebuild replaces every
+  player's internal table, then every player's external table, from the world as
+  it is at that moment. Two producers were found, with no other callers
+  (debug build CCP-01, CCP-02): (1) AI perception initialization, last, after
+  the six production-site lists are forced for every planet; (2) a planet's
+  object service, when its apparent faction differs from its displayed icon
+  faction, after its allegiance processing and before its icon update. Each
+  producer call finishes with a refresh of planet HUD text and colour for every
+  planet, then a potential-connectivity update for every AI player in
+  player-index order (the same trigger as GFS-26 in
+  [galactic-frame-service-schedule.md](galactic-frame-service-schedule.md)).
+  There is no per-player deadline and no period; this is not the execution
+  matrix of WGA-138/139 in [walks/gc-ai.md](walks/gc-ai.md). Ownership change
+  elsewhere, fleet movement, trade-route changes, diplomacy changes and load
+  restore have no direct caller, so a table stays as built until the next
+  producer call. Order in a frame: planet object service precedes fiscal
+  collection and outer AI (GFS-A01), so a rebuild is visible to that frame's
+  goals, planning and execution; initialization's rebuild runs at the start of
+  the first AI service, before its due checks (GFS-A02, CCP-03). Several planets
+  changing apparent faction in one frame each run a full rebuild in object order;
+  a rebuild sees planets later in that order before their own service this frame
+  (inferred from the service order, not traced). Not verified: how an
+  apparent-faction change relates to every allegiance or alliance change, and
+  whether the icon faction is updated so the trigger fires once. | debug build
+  CCP-01..03; GFS-A01; GFS-A02; GFS-26
+- **WGA-506:** Retail has no guard against an undefined predecessor on the
+  count walk. For each endpoint pair counted under WGA-491 (unordered for
+  internal graphs, ordered for external graphs) of distinct vertices, the
+  count starts only if the pair's own predecessor is defined. A zero-cost edge
+  between distinct vertices has no predecessor, and relaxation can leave a
+  shortest path whose intermediate vertex has no predecessor toward the source
+  (legacy EAWR-4796), for example co-located A and B with a slow direct A-C edge.
+  Retail therefore has no defined count for a pair of that shape; the
+  observable result is not verified at runtime. The project skip-and-diagnose
+  boundary of WGA-491 stays a deliberate deviation. | debug build (code
+  structure) CCP-04
+
+Evidence CCP-01..04 (debug build, behaviour level; receipts in ignored
+research): CCP-01 the getters read the retained tables without refresh;
+CCP-02 the two producers of the all-player rebuild and what follows it;
+CCP-03 initialization runs as the first step of the first AI service;
+CCP-04 the pair count walk has no undefined-predecessor test.
 
 Evidence: debug build, coefficient graph construction, edge weighting, vertex
 filtering and binary64 shortest-path calculation. Synthetic coverage includes
@@ -72,10 +117,11 @@ line, directed terminal, trade-shortcut and equal-path diamond graphs, independe
 lookup output seeds, human/neutral enemy graphs and unavailable owners, with
 independent graphs staged on 1, 2, 4 and 8 workers.
 
-The retail coefficient publication cadence is unqualified (legacy EAWR-4786).
-Integration uses a named coefficient-publication seam at the existing
-connectivity/execution refresh boundary pending the frame-service programme's
-qualification; that boundary is a project policy, not a retail timing claim.
+Retail publication cadence is qualified by WGA-505 (legacy EAWR-4786): AI
+perception initialization, and a planet's apparent-faction change in its object
+service. Integration keeps a named coefficient-publication seam. Publishing at
+the execution path-deadline boundary is a project policy that differs from
+WGA-505, not a retail timing claim.
 
 Each changed graph uses Floyd relaxation in O(m^3) time and O(m^2) storage for
 m retained planets. At m=250, two graphs require approximately
@@ -84,7 +130,7 @@ player/graph jobs use fixed worker partitions and ordered publication. Fresh
 binding and restore build once; subsequent builds occur only at the admitted
 execution-matrix refresh seam when complete graph inputs differ. Binding each
 tick does not recompute an existing publication. The retail refresh frequency
-is part of the unqualified cadence seam above; no additional timer is invented.
+is qualified by WGA-505 (legacy EAWR-4786); no additional timer is invented.
 
 The installed headless CLI accepts `--live-perception <equation>` with
 `--live <ticks> --live-ai on`. It reports failed native lookups beneath that

@@ -23,6 +23,7 @@ REPO_LAYER_FILES = {
     "Data/XML/RevisedPlanetSearch.xml": "revised_planet_search/RevisedPlanetSearch.xml",
     "Data/XML/RevisedBuildTray.xml": "revised_build_tray/RevisedBuildTray.xml",
     "Data/XML/RevisedBuildTrayGroups.xml": "revised_build_tray/RevisedBuildTrayGroups.xml",
+    "Data/XML/RevisedTweaks.xml": "revised_tweaks/RevisedTweaks.xml",
 }
 # sha256 of every earlier shipped version of the layer configuration files. A
 # destination file equal to one of these (or to the current template) was never
@@ -32,6 +33,7 @@ KNOWN_TEMPLATES = {
         "809ffab5a9d901a7cc31ae4a3a946a239d9efe940c00627253d264905316becb"}),
     "RevisedBuildTray.xml": frozenset(),
     "RevisedBuildTrayGroups.xml": frozenset(),
+    "RevisedTweaks.xml": frozenset(),
     "SelectionControls.xml": frozenset({
         "1fea04d62f745b14dd6b6687184f0322805c46246d4e481e8856d4129fa98c17",
         "ce653c486d245cc3168c5ce112b88b4c7632655377a63c6b1653335c92b2385d"}),

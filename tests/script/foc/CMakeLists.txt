@@ -6,6 +6,7 @@ add_executable(foc_ai_contract_tests
     foc_ai_contract_tactical_tests.cpp
     foc_ai_contract_objects_tests.cpp
     foc_ai_contract_story_tests.cpp
+    foc_ai_contract_planets_tests.cpp
     foc_ai_contract_tsw_tests.cpp
     foc_ai_contract_hint_radar_tests.cpp
     foc_ai_contract_evaluator_tests.cpp
@@ -13,6 +14,14 @@ add_executable(foc_ai_contract_tests
 target_link_libraries(foc_ai_contract_tests PRIVATE eawr::script_foc eawr::platform eawr::platform_live_ai eawr::vfs)
 target_include_directories(foc_ai_contract_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
 target_compile_features(foc_ai_contract_tests PRIVATE cxx_std_20)
+# The layering-library test input is embedded at configure time (the test must not read a source path at run time).
+set(EAWR_LAYERZ_FIXTURE_DIR "${PROJECT_SOURCE_DIR}/tests/fixtures/lua/eaw-layerz")
+file(READ "${EAWR_LAYERZ_FIXTURE_DIR}/layermanager.lua" EAWR_LAYERZ_MANAGER)
+file(READ "${EAWR_LAYERZ_FIXTURE_DIR}/configuration.lua" EAWR_LAYERZ_CONFIGURATION)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${EAWR_LAYERZ_FIXTURE_DIR}/layermanager.lua" "${EAWR_LAYERZ_FIXTURE_DIR}/configuration.lua")
+configure_file("${CMAKE_CURRENT_LIST_DIR}/layerz_fixture.hpp.in" "${CMAKE_CURRENT_BINARY_DIR}/layerz_fixture.hpp" @ONLY)
+target_include_directories(foc_ai_contract_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 eawr_target_project_warnings(foc_ai_contract_tests)
 add_test(NAME foc_ai_contracts COMMAND foc_ai_contract_tests)
 add_test(NAME foc_ai_reachable_target COMMAND foc_ai_contract_tests --reachable-target)

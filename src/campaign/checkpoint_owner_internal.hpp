@@ -47,9 +47,18 @@ template <> struct Fields<script::authoritative::Value> {
             return within_list_depth(item, depth + 1);
         });
     }
+    // A handle's third word (a position wrapper's z) has no place in the campaign owner encoding: refuse to save one
+    // rather than drop it. Campaign owner values are story and campaign handles, whose third word is always zero.
+    static bool carries_third_word(const script::authoritative::Value& value) {
+        if (const auto* handle = std::get_if<script::authoritative::Handle>(&value.data)) return handle->aux != 0;
+        const auto* list = std::get_if<script::authoritative::ValueList>(&value.data);
+        return list != nullptr && std::any_of(list->begin(), list->end(), [](const auto& item) { return carries_third_word(item); });
+    }
     template <class A, class T> static void apply(A& a, T& v) {
-        if constexpr (!A::reading)
+        if constexpr (!A::reading) {
+            if (carries_third_word(v)) throw Invalid("host value carries a handle third word the campaign owner state cannot store");
             if (!within_list_depth(v)) throw Invalid("host value exceeds list depth budget");
+        }
         a(v.data);
         if constexpr (A::reading)
             if (!within_list_depth(v)) throw Invalid("host value exceeds list depth budget");

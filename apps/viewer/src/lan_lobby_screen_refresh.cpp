@@ -535,17 +535,13 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
             state.preview->set_texture(image.is_valid() ? ImageTexture::create_from_image(image) : Ref<ImageTexture>());
             state.start_icons.rebuild(*state.preview, *map, *resources.content->filesystem,
                 skirmish::setup_factions(*resources.content->catalog),
-                resources.atlas ? &*resources.atlas : nullptr, resources.textures.get());
+                resources.atlas ? &*resources.atlas : nullptr, resources.textures.get(), state.preview_role,
+                state.preview_variation);
         }
         std::vector<StagingPreviewSeat> preview_seats;
         for (const auto& row : rows) {
             if (!row.occupied() || !row.team) continue;
-            Color backing(0.01F, 0.01F, 0.02F, 0.85F);
-            if (row.colour < resources.palette.size()) {
-                const auto& rgb = resources.palette[row.colour].rgb;
-                backing = Color(rgb[0] / 510.0F, rgb[1] / 510.0F, rgb[2] / 510.0F, 0.95F);
-            }
-            preview_seats.push_back({*row.team, row.faction, backing});
+            preview_seats.push_back({*row.team, row.faction});
         }
         state.start_icons.update(preview_seats);
         state.loading = false;
@@ -616,6 +612,14 @@ bool EawrLanLobby::run_action(const std::string& action) {
     };
     if (verb == "hover" || verb == "click" || verb == "click_row") return run_pointer_action(verb, argument);
     if (verb == "source") return action_source(argument);
+    // #8195: a joiner on a room whose host mods it cannot identify (a mod folder mounted by path has no workshop or Mods key) is
+    // held in the "Mods differ" box until it answers. A script answers it the way a click does: mod_review:yes continues joining,
+    // mod_review:no leaves. Without this step a scripted guest stays on "Connecting..." for ever.
+    if (verb == "mod_review") {
+        if (!impl.box || !impl.mod_review_box || (argument != "yes" && argument != "no")) return false;
+        impl.box->choose(argument == "yes" ? 1 : 0);
+        return true;
+    }
     if (verb == "cancel_join") return action_cancel_join();
     if (verb == "name" && page_ != Page::staging) return action_name(argument);
     if (verb == "colour" && page_ != Page::staging) return action_colour(argument, number);
@@ -677,6 +681,7 @@ bool EawrLanLobby::run_action(const std::string& action) {
     if (verb == "leave") return action_leave();
     if (page_ != Page::staging) return false;
     if (verb == "map" && impl.host) return action_map(impl, argument);
+    if (verb == "campaign" && impl.host) return action_campaign(impl, argument);
     if ((verb == "ai" || verb == "seat") && impl.host) return action_ai(argument, number);
     if (verb == "team" && page_ == Page::staging) return action_team(argument, number);
     if ((verb == "ready" || verb == "unready") && page_ == Page::staging && match_->lobby_state()) return action_ready(verb);
@@ -915,6 +920,23 @@ bool EawrLanLobby::action_map(Impl& impl, const std::string& argument) {
     return false;
 }
 
+// A Galactic Conquest room: the host picks a campaign from the list, as a click on its row does. `argument` is the campaign name, or
+// `coop` for the first campaign of the list with single-player (co-op) rules.
+bool EawrLanLobby::action_campaign(Impl& impl, const std::string& argument) {
+    const auto is_coop = [&](const std::string& name) {
+        if (!impl.galactic_backend || !impl.galactic_backend->content_ready()) return false;
+        for (const auto& entry : impl.galactic_backend->campaigns()) if (entry.name == name) return entry.single_player_rules;
+        return false;
+    };
+    for (std::size_t item = 0; item < impl.campaign_list.size(); ++item) {
+        if (argument == "coop" ? !is_coop(impl.campaign_list[item]) : impl.campaign_list[item] != argument) continue;
+        if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST")) list->select(static_cast<int>(item));
+        on_item_selected(static_cast<int64_t>(item), "IDC_STAGING_MAP_LIST");
+        return true;
+    }
+    return false;
+}
+
 bool EawrLanLobby::action_ai(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&)) {
     const auto split = argument.find_first_of(":=");
     std::uint32_t row{};
@@ -1064,13 +1086,23 @@ bool EawrLanLobby::condition(const std::string& wanted) const {
             && shown != "Reading saved game" && !shown.starts_with("Checking mod files");
     }
     if (key == "listing_pending") return impl.checkpoint_listing.valid();
+    if (key == "restore_stopped") return !impl.checkpoint_prepare.active() && !impl.checkpoint_prepare.finishing();
+    if (key == "history_recovered") return !impl.checkpoint_recover.valid() && !impl.checkpoint_recoverable;
     if (key == "content_ready") return impl.galactic_backend && impl.galactic_backend->content_ready();
     if (key == "host_pending") return impl.host_pending;
     if (key == "box") return impl.box != nullptr;
+    if (key == "mod_review") return impl.box != nullptr && impl.mod_review_box;
     if (key == "prompt") return impl.prompt.has_value();
     if (key == "prompt_ready") return impl.prompt && !impl.prompt->waiting;
     if (key == "prompt_error") return impl.prompt && impl.prompt->error.find(value) != std::string::npos;
     if (key == "hosting") return model::online_hosting_name(impl.hosting) == value;
+    if (key == "room") return match_->lobby_state().has_value(); // the room exists (a campaign room is created after its content loads)
+    if (key == "capacity") {
+        // The seats of the room (a re-opened campaign room has the capacity of its new campaign).
+        const auto room = match_->lobby_state();
+        std::uint32_t count{};
+        return room && count_of(count) && room->snapshot.capacity == count;
+    }
     if (key == "rooms") {
         std::uint32_t count{};
         return count_of(count) && impl.online_rooms_total == count;

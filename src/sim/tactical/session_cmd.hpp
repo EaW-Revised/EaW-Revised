@@ -157,6 +157,10 @@ struct Tick::PlanLanes final {
     core::Result<void> finish();
     core::Result<void> scripted_damage(const PlayerCommand& command, const DamagePayload* damage, const EntityId unit_id, const DurabilityProfile* profile);
     core::Result<void> scripted_teleport(const ScriptTeleportPayload& teleport, const EntityId unit_id);
+    core::Result<void> scripted_teleport_position(const ScriptTeleportPositionPayload& teleport, const EntityId unit_id);
+    core::Result<void> scripted_hyperspace_in(const ScriptHyperspaceInPayload& hyperspace, const EntityId unit_id);
+    core::Result<void> scripted_cancel_hyperspace(const EntityId unit_id);
+    core::Result<void> place_scripted(const EntityId unit_id, const math::Vec3& position, const math::Quat* rotation, const bool squadron_part = false);
     core::Result<void> scripted_change_owner(const ScriptChangeOwnerPayload& change, const std::vector<EntityId>& units);
     core::Result<void> apply_cinematic(const PlayerCommand& command, const RetreatCinematicPayload* cinematic, const PlayerId issuer);
     core::Result<void> apply_retreat(const PlayerCommand& command, const RetreatPayload* retreat, const PlayerId issuer);

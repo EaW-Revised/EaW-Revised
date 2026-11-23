@@ -194,7 +194,7 @@ Integration: **new persistent hero/result state and scheduled creation**, existi
 |---|---|---|---|
 | WGM-78 | Hero defeat attributes final blow to the explicit attacker or missing attribution from its parent container, emits story defeat and health-zero, locates the parent conflict planet, then requests respawn with `Default_Hero_Respawn_Time` (**360 s** stock). Faction-leader defeat also checks enemy GC homeworld/leader and leader-kill victories. Eligibility of a hero uses the existing [WHE-01](heroes.md) definition. | debug build EGM-34; XML EGM-37 | missing |
 | WGM-79 | Respawn scheduling rejects multiplayer tactical (the standalone tactical-game test of WGM-64, **not** the galactic multiplayer flag: heroes killed in a multiplayer GC battle respawn as in solo, GCMP-24) and rejects nonnamed heroes unless tied to a respawn structure. Structure-tied cases require more owned backing structures than other owned instances of that hero type. Named heroes reject duplicate scheduled creation. Unless explicitly bypassed, a team parent rejects while another member is not deletion-pending **or** not dead; transport/nested-squadron parents reject another member that is both live and not deletion-pending. `Respawn_Whole_Team_When_Killed` instead destroys live transport contents and the transport, or live nested-squadron companions. | debug build EGM-35 | missing |
-| WGM-80 | Respawn type resolves to a containing ground company or squadron type when appropriate, otherwise company type. Schedule at supplied planet, otherwise current system, otherwise first owned planet; no eligible location rejects. Nonpositive requested time uses **360 s** default. Record owner/final-blow player and deadline `galactic frame + int(logical FPS × seconds + 0.5)`. Actual scheduled creation/placement and capture of its planet are WGM-U08. | debug build EGM-35; XML EGM-37 | missing |
+| WGM-80 | Respawn type resolves to a containing ground company or squadron type when appropriate, otherwise company type. Schedule at supplied planet, otherwise current system, otherwise first owned planet; no eligible location rejects. Nonpositive requested time uses **360 s** default. Record owner/final-blow player and deadline `galactic frame + int(logical FPS × seconds + 0.5)`. Actual scheduled creation/placement and capture of its planet are WGM-U08. | debug build EGM-35; XML EGM-37 | applied: `src/sim/galactic/hero_return.cpp#schedule_hero_return`; a hero in a team company takes the company type in `src/sim/galactic/ability_host.cpp#prepare_ability_defeat` (squadron and transport parents keep the hero type: unverified) |
 | WGM-81 | Corruption-mission return follows a separate branch: success starts the authored corruption transition and handles usage/speech/story completion; failure emits its own failed-story event; clear mission state and end conflict. The inspected branch does not use ordinary survivor/base/conquest reconciliation. Linked tutorial/sandbox exceptions must remain explicit at the result boundary. | debug build EGM-24 | missing |
 | WGM-82 | **Unverified:** the inspected return path consumes persistent object IDs and death state but does not establish whether tactical wreck/salvage objects or surviving ship damage/shields are exported, repaired or discarded elsewhere. Do not implement a wreck transfer or full-heal policy from this absence; resolve WGM-U07 with readers and a two-battle capture. | unverified; bounded debug-build inspection EGM-24, EGM-25 | missing |
 
@@ -945,8 +945,25 @@ peer, using the existing skirmish AI setup and prepared tactical host for the AI
 conflicts with no human side, and all MP land conflicts (D3 until ground combat), auto-resolve
 without a prompt or display countdown. Co-op teammates share one side: the first choice of any
 of the side's seats is the side's vote and a teammate's later choice is refused. An
-agreed authored campaign difficulty maps through the mounted AI player type into the existing
-conflict replay slot; child AI, restored preparation and presentation read that recorded level.
+agreed authored campaign difficulty becomes a level (easy, normal or hard) once, when the campaign is prepared: first the
+entry the campaign's own lobby list offers for a level, then the one level every mounted AI player type that authors that
+entry name maps it to, then the stock names of the three levels, and Normal when none knows it. Each AI slot then looks
+that level up in its OWN faction's AI player type (its `Basic_AI`) and records it in the existing conflict replay slot;
+child AI, restored preparation and presentation read that recorded level. An entry name never has to match across player
+types (a skirmish-style type maps its own names, a stock type `Normal_Default`). A player type with no entry for the
+level runs its Normal entry, and one with neither (or an unknown type) runs the engine default (every multiplier 1); the
+slot is never refused over its difficulty. Only entries the mounted difficulty data defines count (an entry naming an undefined
+adjustment plays as the engine default, so it is treated as absent), and the chosen entry's health, shield and damage
+multipliers apply at Normal as at any other level (a neutral stock Normal entry binds none). One info line per AI slot (human, non-playable and neutral slots have none) names
+the faction, player type, agreed level and adjustment and states each fallback. Any other refusal to enter the battle in a
+multiplayer game (the AI slot's side, tactical content, staging) is reported once per peer as an entry warning and the
+conflict settles through the shared auto-resolver on every peer; the game never ends over a battle entry. The fallback is
+saved state: the conflict's route becomes auto-resolve and each human side's vote becomes Auto-Resolve, so the per-tick
+route recompute keeps it, a checkpoint taken during the solve saves and resumes the solver, and neither the tick of the
+decision nor a restore re-enters the battle, repeats the warning or steps the solver twice. The branch is decided from the agreed session state and the entry's own result, which is computed from frozen
+preparation data only (no filesystem, clock or local configuration), so all peers choose the same branch; a multiplayer live
+start or restore refuses to run without its auto-resolver, and a recorded child selection is never re-decided. In a solo game
+the refusal stands as before. An auto-resolver failure still ends the match (follow-up).
 The conflict's tactical seed is shared by all peers. An
 uninvolved human team defaults to spectating, so the deferred role dialog cannot hold that
 AI battle pending. Other callers retain the explicit role-choice flow. Agreed departures and

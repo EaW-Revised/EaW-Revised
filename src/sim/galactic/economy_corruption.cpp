@@ -330,12 +330,27 @@ void GalacticSession::Impl::execute_black_market(const GameCommand& command,
             // WGEP-99: GC always adds the faction adjustment, no clamp or AI/tutorial branch.
             const auto displayed = economy->players[i].current_tech + p.displayed_tech_adjustment;
             if (displayed < std::numeric_limits<int>::min() || displayed > std::numeric_limits<int>::max())
-                return reject(GalacticRejectReason::resource_limit);
+                return reject(GalacticRejectReason::market_cannot_price);
             players.push_back({p.player, p.faction, static_cast<int>(displayed)});
             if (p.player == player->player) buyer_tech = static_cast<int>(displayed);
         }
         auto offers = cf::offers(context, staged.items, players, player->unlocks);
-        if (!offers || offers.value().empty()) return reject(GalacticRejectReason::unknown_value);
+        if (!offers) return reject(GalacticRejectReason::market_cannot_price); // a price left the fixed-point range
+        if (offers.value().empty()) {
+            // #8157: tell the player which test of the offer predicate (WGEP-58) emptied the menu, in the order offers() tests them.
+            if (!context.opposing_planet) return reject(GalacticRejectReason::market_not_opposing_planet);
+            if (!context.playable_faction) return reject(GalacticRejectReason::market_owner_not_playable);
+            if (!context.black_market_corruption) {
+                const auto* content = setup.ability_host
+                    ? find(setup.ability_host->corruption_planets, prepare->planet, [](const auto& p) { return p.planet; }) : nullptr;
+                const bool authored = content && std::any_of(content->slots.begin(), content->slots.end(),
+                    [](const auto& slot) { return slot.type == cf::Type::black_market; });
+                if (!authored) return reject(GalacticRejectReason::market_cannot_host);
+                return reject(planet->corruption == cf::Type::none ? GalacticRejectReason::market_not_established
+                                                                   : GalacticRejectReason::market_other_corruption);
+            }
+            return reject(GalacticRejectReason::market_nothing_to_offer);
+        }
         Fixed draw;
         // WGEP-81: displayed buyer tech indexes absence, not selected item tech.
         if (buyer_tech >= 1 && buyer_tech <= 5

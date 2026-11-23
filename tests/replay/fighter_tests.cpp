@@ -132,6 +132,7 @@ int main() {
     test_finite_reserve_boundary();
     test_formation_catch_up();
     test_coordinate_limit();
+    test_teamless_idle();
     test_launch_state();
     test_out_of_combat();
     test_approach();

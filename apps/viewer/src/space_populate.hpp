@@ -278,6 +278,8 @@ public:
     [[nodiscard]] std::span<const sim::EntityId> live_ship_entities(std::size_t ship) const override;
     // FW-19: propagate only changed ship opacity, including currently gated pieces.
     void set_live_opacity(GodotRenderer& renderer, std::size_t ship, float opacity) override;
+    void set_live_colour(GodotRenderer& renderer, std::size_t ship,
+        const std::optional<std::array<std::uint8_t, 3>>& colour) override;
     // One reusable lookup for a frame containing fog transitions.
     void prepare_fog_model_capture() override;
     // FW-26: independent non-shield pieces, retained uploads and frozen skin
@@ -463,7 +465,8 @@ private:
         bool cloak{};
         bool cloak_hidden{};
         std::optional<bool> blast_charged{}; // BP-74: false=buildup, true=charged
-        std::optional<std::array<std::uint8_t, 3>> colour; // immutable compose tint, restored on slot reuse
+        std::optional<std::array<std::uint8_t, 3>> colour; // current tint, restored on slot reuse
+        bool colorizable{};
     };
     // False while a death clone's pose hides the bone this piece's attached model hangs on (UA-12).
     [[nodiscard]] bool attached_art_shown(const GatedInstance& piece) const;

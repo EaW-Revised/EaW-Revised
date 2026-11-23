@@ -22,10 +22,17 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 
+def remake_mod_root():
+    """The mounted Remake chain: EAWR_REMAKE_MOD_CHAIN (every item folder, leaf first, ';'-separated), else the
+    single item EAWR_REMAKE_MOD_ROOT names. #8138: the CIS and Republic stations live in the parent items, so a single
+    base item lists only the three stock factions."""
+    return os.environ.get("EAWR_REMAKE_MOD_CHAIN") or os.environ["EAWR_REMAKE_MOD_ROOT"]
+
+
 def playable_factions(game_root, mod_root=None):
     """#7842: the faction names the effective installed XML marks Is_Playable and not Is_Neutral, read independently."""
     from tools.inventory.corpus import Corpus
-    corpus = Corpus(game_root, mod_root)
+    corpus = Corpus(game_root, mod_root.split(";") if mod_root else None)
     profile = "remake" if mod_root else "foc"
 
     def read(path):
@@ -111,9 +118,11 @@ class SkirmishSetupGpu(unittest.TestCase):
             for resolution in ("1280x720", "1920x1080"):
                 output = directory / resolution
                 self._popup_probe(script, output, resolution, ["--eawr-skirmish-setup", "--eawr-profile", "remake",
-                    "--eawr-mod-root", os.environ["EAWR_REMAKE_MOD_ROOT"]])
+                    "--eawr-mod-root", remake_mod_root()])
                 report = json.loads((output / "input.json").read_text(encoding="utf-8"))
                 with self.subTest(resolution=resolution):
+                    # The real list is the chain's five map-offered factions (the stock three alone means the chain is missing).
+                    self.assertGreaterEqual(report["real_count"], 5, report)
                     self.assertTrue(report["opened"], report)
                     self.assertGreater(report["wheel_value"], report["first_value"], report)
                     self.assertEqual(report["click_selected"], report["last_index"], report)
@@ -792,7 +801,7 @@ class SkirmishSetupGpu(unittest.TestCase):
                 os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
                 "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-skirmish-setup",
                 "--eawr-setup-test", "--eawr-setup-layout-test", "--eawr-profile", "remake",
-                "--eawr-mod-root", os.environ["EAWR_REMAKE_MOD_ROOT"],
+                "--eawr-mod-root", remake_mod_root(),
                 "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
                 "--eawr-capture", str(output / "remake-factions.png"), "--eawr-font-cache",
                 os.environ.get("EAWR_FONT_CACHE", str(ROOT / "out/fonts")), "--eawr-audio", "off"],
@@ -804,7 +813,7 @@ class SkirmishSetupGpu(unittest.TestCase):
             self.assertEqual(int(factions.group(1)), len(factions.group(2).strip().split("|")))
             # #7842: exactly the playable, non-neutral factions the selected map can start (every playable
             # faction on a legacy map that offers all), never a neutral or unplayable one.
-            expected = playable_factions(os.environ["EAWR_EAW_GAME_ROOT"], os.environ["EAWR_REMAKE_MOD_ROOT"])
+            expected = playable_factions(os.environ["EAWR_EAW_GAME_ROOT"], remake_mod_root())
             new_markers, offered = map_offer(result.stdout)
             self.assertTrue(offered <= expected, offered - expected)
             self.assertEqual(int(factions.group(1)), len(offered) if new_markers else len(expected), result.stdout[-3000:])
@@ -880,7 +889,7 @@ class SkirmishSetupGpu(unittest.TestCase):
             members = struct.unpack_from("<I", recorded, commands_start + 8)[0]
             commands_start += 16 + 8 * members
         one = 1 << 24
-        campaign = bytearray(struct.pack("<IqI", 5, one, len(accounts)))
+        campaign = bytearray(struct.pack("<IIqI", 7, 0, one, len(accounts)))  # version 7: not corrupted, price multiplier, accounts
         for index, player in enumerate(accounts):
             campaign += struct.pack("<IqIIqIIqqqq", player, (1234 + index) * one,
                                     1000, int(index != 0), 0, 1, 5, one, one, 1000000 * one, 0)
@@ -978,6 +987,48 @@ class SkirmishSetupGpu(unittest.TestCase):
             if starts == 1:
                 self.assertIn("EAWR setup custom map list: true; empty: true; start disabled: true", result.stdout)
                 self.assertIn("EAWR setup official map list: true; maps: 24; preview starts: 2; preview emblems: 2", result.stdout)
+            if starts == 1:
+                # #8101: the start emblems draw straight on the preview. Their corner pixels are
+                # transparent in the icon, so no solid seat-colour square may show there.
+                rects = re.findall(r"EAWR setup preview emblem rect: (\d+),(\d+),(\d+),(\d+)", result.stdout)
+                self.assertEqual(len(rects), 2, result.stdout[-3000:])
+                from PIL import Image
+                shot = Image.open(output / "setup.png").convert("RGB")
+                for x, y, w, h in map(lambda r: tuple(map(int, r)), rects):
+                    corners = [shot.getpixel((x + 1, y + 1)), shot.getpixel((x + w - 2, y + 1)),
+                               shot.getpixel((x + 1, y + h - 2)), shot.getpixel((x + w - 2, y + h - 2))]
+                    for pixel in corners:
+                        # The dark space preview: a 95 % opaque seat colour would be far brighter.
+                        self.assertLess(max(pixel), 150, f"emblem corner {pixel} at {(x, y)} is not transparent")
+                    lit = sum(1 for dx in range(w) for dy in range(h) if max(shot.getpixel((x + dx, y + dy))) > 180)
+                    self.assertGreater(lit, 40, "emblem logo pixels are drawn")
+                # #8101: each start number's measured text block is centred on its emblem, both ways
+                # (layout level, to a pixel), and drawn in the preview gadget's font role.
+                numbers = re.findall(r"EAWR setup preview number rect: (-?[\d.]+),(-?[\d.]+),([\d.]+),([\d.]+)",
+                                     result.stdout)
+                self.assertEqual(len(numbers), 2, result.stdout[-3000:])
+                for (ex, ey, ew, eh), (nx, ny, nw, nh) in zip(
+                        (tuple(map(float, r)) for r in rects), (tuple(map(float, n)) for n in numbers)):
+                    self.assertGreater(nw, 0)
+                    self.assertGreater(nh, 0)
+                    self.assertLessEqual(abs((nx + nw / 2) - (ex + ew / 2)), 1.0, "number centred horizontally")
+                    self.assertLessEqual(abs((ny + nh / 2) - (ey + eh / 2)), 1.0, "number centred vertically")
+                style = re.search(r"EAWR setup preview number style: outline=(\d) emboss=(\d)", result.stdout)
+                self.assertIsNotNone(style, result.stdout[-3000:])
+                if style.group(1) == "1":
+                    # The role outlines its glyphs: dark pixels ring the white ones inside the number block.
+                    for nx, ny, nw, nh in (tuple(map(float, n)) for n in numbers):
+                        x0, y0 = int(nx) - 2, int(ny) - 2
+                        box = [(x, y) for x in range(x0, x0 + int(nw) + 5) for y in range(y0, y0 + int(nh) + 5)]
+                        white = {p for p in box if min(shot.getpixel(p)) > 235}
+                        self.assertGreater(len(white), 20, "number glyph pixels are drawn")
+                        # Antialiased glyph edges sit between the white core and the black outline, so look
+                        # two pixels out from the core.
+                        ringed = sum(1 for (x, y) in white for q in ((x - 2, y), (x + 2, y), (x, y - 2), (x, y + 2))
+                                     if q not in white and max(shot.getpixel(q)) < 120)
+                        grid = chr(10).join(" ".join("%3d" % max(shot.getpixel((x, y))) for x in range(x0, x0 + int(nw) + 5))
+                                            for y in range(y0, y0 + int(nh) + 5))
+                        self.assertGreater(ringed, 5, "number glyphs carry an outline; brightest channel:" + chr(10) + grid)
             data = json.loads(report.read_text(encoding="utf-8"))
             live = data["live_session"]
             self.assertEqual(live["start_map"], "data/art/maps/_mp_space_kessel.ted")

@@ -312,11 +312,11 @@ void bad_entry_skips_only_its_type() {
     write_fixture(tree.root, with_second_frigate(layer_xml("15", "0.8")));
     auto tables = load_layers({tree.root});
     if (!tables) return;
-    // Out of bounds (|multiplier| <= 64), as an authored Eclipse-style value is for its own type (#4629).
+    // Out of bounds (ordinary modifiers: WAB-65 limit; damage modes: 64), as an authored Eclipse-style value is for its own type (#4629).
     const auto bad = std::find_if(tables->units.begin(), tables->units.end(), [](const auto& unit) { return unit.id == "Test_Frigate"; });
     expect(bad != tables->units.end() && !bad->abilities.empty(), "#4666: the frigate authors an ability to break");
     if (bad == tables->units.end() || bad->abilities.empty()) return;
-    for (auto& modifier : bad->abilities.front().modifiers) modifier.value = eawr::units::Fixed::from_raw(raw(1000));
+    for (auto& modifier : bad->abilities.front().modifiers) modifier.value = eawr::units::Fixed::from_raw(raw(5000));
 
     expect(!eawr::units::ability_table(*tables, std::vector<t::PlayerId>{1}),
         "#4666: strict still refuses the table on one bad ability entry");

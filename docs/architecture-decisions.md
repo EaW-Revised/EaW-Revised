@@ -248,7 +248,8 @@ tech, the pool, victory and defeat. A command is authorized when its seat is act
 in the owning player. The new galactic envelope uses an explicit `SeatId`, separate from
 owning `PlayerId` (A1).
 The original galactic scope allows one to eight humans sharing one side against AI or
-forming two human sides. The owner decision of 2026-10-15 reserves shared ownership
+forming up to eight human sides (one faction each, bounded by the campaign's playable
+factions; at most eight humans in total; the lobby offers more than two with the multi-faction lobby step). The owner decision of 2026-10-15 reserves shared ownership
 for Galactic Conquest: local, LAN and online space/ground skirmish give every human a
 separate owner with its own units, credits, base, faction and colour. Several owners
 may be allied through their per-row Team number. Up to nine human owners fit the

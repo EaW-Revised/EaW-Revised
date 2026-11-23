@@ -227,7 +227,7 @@ their linked walk evidence.
 | Campaign `Good_Victory_Conditions`, `Evil_Victory_Conditions`, `Good_Victory_Cycle_Limit`, `Evil_Victory_Cycle_Limit`, `Good_Victory_Planet_Names`, `Galactic_Control_Percentage_For_Victory` | Legacy-looking names; the two conditions are still authored in the Underworld tutorial | `foc-ignores` with registry evidence DB-NOTAG. Do not translate them to modern human/AI runtime lists merely because they occur in XML |
 | Planet `Galactic_Position`, `Galactic_Influence_Range` | WGS-09 neutral placement and influence-radius query; political internals WGM-65..77 | `land-or-galactic`; galaxy model/control owners (legacy EAWR-680, EAWR-1114) |
 | Faction `Multiplayer_Campaign_Heroes`, `Home_Planet` | WGS-14 hero generation; WGS-23 homeworld victory context | `land-or-galactic`; session G1/victory G2 |
-| Faction `Displayed_Tech_Level_Adjustment` | WGS-13 custom tech uses its nonzero flag; stock Rebel value **+1** | `todo`, economy tag owner (legacy EAWR-654); session G1 |
+| Faction `Displayed_Tech_Level_Adjustment` | WGS-13 custom tech uses its nonzero flag; stock Rebel value **+1** | `applied`: the galactic HUD adds the faction adjustment to internal tech (WGEP-99); WGS-13 uses its nonzero flag for custom setup |
 | Faction `Primary_Enemy`, `Faction_Leader`, `Faction_Leader_Company` | WGS-23/24 enemy, homeworld and leader matching | `todo`, combat tag owner (legacy EAWR-650); victory G2 |
 | Unit `Is_Super_Weapon_Killer` | WGS-28 winner-survivor superweapon destruction | HeroUnit/UniqueUnit `todo`, combat tag owner (legacy EAWR-650); victory G2 |
 | GameConstants `Object_Max_Speed_Multiplier_Galactic` **5.0** | WGS-05 galactic base speed initialization | `land-or-galactic`; model/clock (legacy EAWR-680) |

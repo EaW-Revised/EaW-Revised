@@ -179,6 +179,8 @@ struct SpaceEntryPreparation {
     std::map<gc::PlayerId, std::vector<sim::EntityId>> initial_forces;
     std::map<gc::PlayerId, std::pair<Fixed, sim::EntityId>> flagships;
     std::vector<const ConflictForce*> source_roster;
+    // A reserve transport whose passengers are all unique ships arrives as that ship, as in the first wave.
+    std::map<sim::EntityId, decltype(ConflictForce::tactical_type)> reserve_unique_arrival;
 
     SpaceEntryPreparation(const ConflictRecord& conflict, const SpaceEntryInputs& inputs,
         sim::EntityId first, std::uint64_t seed)
@@ -511,6 +513,16 @@ core::Result<void> SpaceEntryPreparation::attach_passengers() {
         rider.force.tactical_type = battle::type_id(rider.tactical);
         rider.force.carrier = rider.transport;
         rider.force.role = transport->role == ForceRole::retained ? ForceRole::retained : ForceRole::reinforcement;
+        if (transport->role == ForceRole::reinforcement && !type->unique_space_unit.empty()
+            && !reserve_unique_arrival.contains(rider.transport)
+            && std::all_of(input.riders.begin(), input.riders.end(), [&](const auto& other) {
+                const auto* other_type = type_of(input, other.force.type);
+                return other.transport != rider.transport || (other_type && !other_type->unique_space_unit.empty());
+            })) {
+            const auto* container = named_type(input, type->unique_space_unit);
+            if (!container) return fail<void>("passenger unique container has no binding");
+            reserve_unique_arrival.emplace(rider.transport, battle::type_id(container->tactical));
+        }
         if (transport->role == ForceRole::deployed) {
             rider.force.role = ForceRole::rider;
             const auto owner = transport->owner;
@@ -559,6 +571,8 @@ core::Result<void> SpaceEntryPreparation::finalize_forces() {
         if (!type) return fail<void>("missing final tactical type binding");
         force.tactical_type = battle::type_id(type->tactical);
         force.purchase_type = type->purchase_type;
+        if (const auto unique = reserve_unique_arrival.find(force.id); unique != reserve_unique_arrival.end())
+            force.tactical_type = unique->second;
     }
     // WGT-113/114: allocate child-only objects in the final creation sequence,
     // including unique passenger ships created inside their transport entry.

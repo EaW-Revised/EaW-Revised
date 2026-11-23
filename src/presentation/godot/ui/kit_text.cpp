@@ -150,11 +150,23 @@ void EawrUiLabel::set_wrap(const bool wrap) {
     queue_redraw();
 }
 
+void EawrUiLabel::set_centre_vertically(const bool centre) {
+    centre_vertically_ = centre;
+    queue_redraw();
+}
+
+void EawrUiLabel::set_ink(const Color& ink) {
+    ink_ = ink;
+    has_ink_ = true;
+    queue_redraw();
+}
+
 void EawrUiLabel::_draw() {
     const CharString role = role_.utf8();
-    const KitTextStyle style = kit_text_style(*this, std::string_view(role.get_data(), role.length()));
-    caption_.draw(*this, style, text_, Rect2(Vector2(), get_size()), alignment_, false, wrap_, piece_scale(*this),
-                  1.0F);
+    KitTextStyle style = kit_text_style(*this, std::string_view(role.get_data(), role.length()));
+    if (has_ink_) style.top = style.bottom = ink_;
+    caption_.draw(*this, style, text_, Rect2(Vector2(), get_size()), alignment_, centre_vertically_, wrap_,
+                  piece_scale(*this), 1.0F);
 }
 
 // --- Check and radio ---------------------------------------------------------

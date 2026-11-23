@@ -3,12 +3,15 @@
 #include "galactic/fleet_panels.hpp"
 #include "galactic/fleet_traits.hpp"
 #include "galactic/hero_map_bar.hpp"
+#include "eawr/presentation/ui/hud_shell.hpp"
+#include "eawr/presentation/ui/layout.hpp"
 #include "eawr/sim/galactic/session.hpp"
 
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
 #include <cassert>
+#include <cmath>
 #include <algorithm>
 #include <array>
 #include <map>
@@ -1005,9 +1008,9 @@ void hero_map_collection_is_local_stable_and_live() {
     };
     const auto collect = [&] { return collect_map_heroes(*snapshot(), 1, names, art); };
     auto entries = collect();
-    // Equal ranks: retail slot order is ascending name CRC ("HERO" 0x675b8332 < "SECOND_HERO" 0x994b6bc4), slot 0 is
-    // the right-most portrait, so the display (left to right) order is the reverse.
-    assert((entries == std::vector<HeroMapEntry>{{11, 21, 1}, {7, 22, 1}}));
+    // Equal ranks: retail slot order is ascending name CRC ("HERO" 0x675b8332 < "SECOND_HERO" 0x994b6bc4); the entries
+    // are the slot list, slot 0 first.
+    assert((entries == std::vector<HeroMapEntry>{{7, 22, 1}, {11, 21, 1}}));
     assert(collect() == entries); // Stable type order, independent of first-seen type.
     const std::array pending{gc::HeroReturnView{7, 1, 1, 0, 100}};
     assert(collect_map_heroes(*snapshot(), 1, names, art, pending) == entries); // Live entry wins a duplicate schedule.
@@ -1015,7 +1018,7 @@ void hero_map_collection_is_local_stable_and_live() {
     ranked_art.at("hero").hero_rank = 10;
     ranked_art.at("second_hero").hero_rank = 90;
     const auto ranked = collect_map_heroes(*snapshot(), 1, names, ranked_art);
-    assert((ranked == std::vector<HeroMapEntry>{{11, 21, 1, 90}, {7, 22, 1, 10}}));
+    assert((ranked == std::vector<HeroMapEntry>{{7, 22, 1, 10}, {11, 21, 1, 90}}));
     assert(collect_map_heroes(*snapshot(), 3, names, art).empty());
     actors[2].dead = true; actors[3].delete_pending = true;
     assert((collect() == std::vector<HeroMapEntry>{{11, 21, 1}}));
@@ -1058,12 +1061,98 @@ void hero_map_order_follows_retail_slots() {
         for (const auto& row : rows) result.push_back(row.type);
         return result;
     };
-    // Retail slots ascending: d10 b20 g25 h25 a30 c40 | e50 f60 are cut. Display = reversed: c a h g b d.
-    assert((types(collect()) == std::vector<gc::TypeId>{23, 21, 28, 27, 22, 24}));
+    // Retail slots ascending: d10 b20 g25 h25 a30 c40 e50 f60; every authored slot is filled (no cut at six).
+    assert((types(collect()) == std::vector<gc::TypeId>{24, 22, 27, 28, 21, 23, 25, 26}));
     // Ranks below 1 never order against ranked heroes (retail) and here sort after every positive rank, CRC order.
     art.at("d").hero_rank = 0; art.at("e").hero_rank = -5;
-    // Slots: b20 g25 h25 a30 c40 f60 | d0(CRC a3b36a04) e(-5, CRC d4b45a92) cut. Display reversed.
-    assert((types(collect()) == std::vector<gc::TypeId>{26, 23, 21, 28, 27, 22}));
+    // Slots: b20 g25 h25 a30 c40 f60, then d0 (CRC a3b36a04) and e(-5, CRC d4b45a92).
+    assert((types(collect()) == std::vector<gc::TypeId>{22, 27, 28, 21, 23, 26, 24, 25}));
+}
+// A hero frame as the shell authors it: a first row of six slots and a second row of five centred under it, in shell
+// units (the stock frame has eleven slots, hero_slot_good00..10).
+eawr::presentation::ui::HudHeroFrame two_row_hero_frame() {
+    eawr::presentation::ui::HudHeroFrame frame;
+    // As the stock frame component authors it: a hidden manual shell with model offsets, centred.
+    frame.placement.configured = true;
+    frame.placement.model_offset_x = frame.placement.model_offset_y = frame.placement.manual_offset = true;
+    frame.placement.manual_origin = eawr::presentation::ui::ShellOrigin::centre;
+    for (std::size_t slot = 0; slot < 11; ++slot) {
+        eawr::presentation::ui::HudHeroSlot entry;
+        entry.button.scale = 0.8F;
+        const bool second = slot >= 6;
+        const float column = static_cast<float>(second ? slot - 6 : slot);
+        entry.button.origin = {-column * 50.0F - (second ? 25.0F : 0.0F), second ? -40.0F : 0.0F};
+        frame.slots.push_back(entry);
+    }
+    return frame;
+}
+void hero_strip_shows_every_hero_in_rows() {
+    namespace ui = eawr::presentation::ui;
+    namespace gc = eawr::sim::galactic;
+    const ui::HudHeroFrame frame = two_row_hero_frame();
+    // The collector never cuts: every named hero the player has gets an entry, in the retail slot order.
+    struct Look { bool named_hero{true}; std::string icon{"x.tga"}; bool hero{true}; std::int64_t hero_rank{25}; };
+    constexpr std::size_t most = 100;
+    std::map<gc::TypeId, std::string> names;
+    std::map<std::string, Look> art;
+    std::vector<gc::CensusObject> actors;
+    for (gc::TypeId i = 0; i < most; ++i) {
+        const std::string id = "hero_" + std::to_string(i);
+        names.emplace(100 + i, id);
+        Look look; look.hero_rank = 1 + static_cast<std::int64_t>(i);
+        art.emplace(id, look);
+        actors.push_back({1000 + i, 100 + i, 1, 1, 10, false, false, 100 + i});
+    }
+    const auto base = std::make_shared<const gc::GalacticSnapshot>(0, gc::GalacticClock{},
+        std::vector<gc::GalacticPlayer>{}, std::vector<gc::Planet>{{1, {}, 1}},
+        std::vector<gc::Route>{}, std::vector<gc::Fleet>{{10, 1, 1, {{30, 8}}}}, std::vector<gc::GalacticEvent>{});
+    for (const std::size_t count : {6U, 7U, 11U, 12U, 20U, 30U, 50U, 100U}) {
+        gc::NativeSnapshotChanges changes;
+        changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(
+            std::vector<gc::CensusObject>(actors.begin(), actors.begin() + static_cast<std::ptrdiff_t>(count)));
+        const auto snapshot = gc::GalacticSnapshot::native_view(base, std::move(changes));
+        const auto entries = collect_map_heroes(*snapshot, 1, names, art);
+        assert(entries.size() == count); // None dropped.
+        for (std::size_t slot = 0; slot < entries.size(); ++slot) assert(entries[slot].type == static_cast<gc::TypeId>(100 + slot));
+    }
+    // 16:9 and ultrawide: heroes 1..11 sit exactly on the authored bones, 12 and later fill the rows below in order,
+    // and nothing passes the bounds (right half of the safe area, above the planet card).
+    for (const ui::Viewport viewport : {ui::Viewport{1920, 1080}, ui::Viewport{3440, 1440}, ui::Viewport{1280, 720}}) {
+        const ui::ReferenceSpace space = ui::reference_space(viewport);
+        const auto placement = ui::hero_frame_placement(space, frame, 46.9, 29.9, false);
+        const ui::HeroStripBounds bounds{(space.safe_left + space.safe_width / 2.0) * space.scale, space.height * 0.45 * space.scale};
+        const auto bone = [&](std::size_t slot) {
+            return ui::shell_point_to_screen(frame.slots[slot].button.origin.x, frame.slots[slot].button.origin.y, placement);
+        };
+        for (const std::size_t count : {0U, 6U, 7U, 11U, 12U, 20U, 30U, 50U, 100U}) {
+            const auto layout = ui::hero_strip_layout(frame, placement, count, bounds, 50.0);
+            assert(layout.centres.size() == count); // Every hero is placed.
+            for (std::size_t hero = 0; hero < std::min<std::size_t>(count, 11); ++hero) {
+                assert(std::abs(layout.centres[hero].x - bone(hero).x) < 1e-6 && std::abs(layout.centres[hero].y - bone(hero).y) < 1e-6);
+            }
+            if (count > 11) {
+                // Past the authored slots: rows below, filled left to right and then down, in the hero order.
+                for (std::size_t hero = 11; hero < count; ++hero) {
+                    const auto& was = layout.centres[hero - 1];
+                    const auto& now = layout.centres[hero];
+                    assert(now.y >= was.y - 1e-6);                           // never back up the strip
+                    if (hero > 11 && std::abs(now.y - was.y) < 1e-6) assert(now.x < was.x);   // along a row
+                    assert(now.y >= bone(10).y - 1e-6);                      // at or below the authored rows
+                    assert(now.x >= bounds.far_x - 1e-6 && now.y <= bounds.bottom + 1e-6);
+                }
+                for (std::size_t other = 0; other < count; ++other) {
+                    // No two heroes share a place unless the space ran out and the rows packed closer.
+                    if (count <= 30) for (std::size_t hero = other + 1; hero < count; ++hero)
+                        assert(std::abs(layout.centres[hero].x - layout.centres[other].x) > 1e-6
+                            || std::abs(layout.centres[hero].y - layout.centres[other].y) > 1e-6);
+                }
+            }
+        }
+        // The authored first slot sits at its inset from the right edge of the safe area and from the top.
+        const auto first = ui::hero_strip_layout(frame, placement, 1, bounds, 50.0).centres.front();
+        assert(std::abs(first.x - (space.safe_left + space.safe_width - 46.9) * space.scale) < space.scale); // the shell offset snaps to whole units
+        assert(std::abs(first.y - 29.9 * space.scale) < space.scale);
+    }
 }
 void scheduled_hero_map_uses_published_frames() {
     namespace gc = eawr::sim::galactic;
@@ -1212,27 +1301,40 @@ void surface_world_orbit_targets() {
     assert(!surface_orbit_target(snapshot, 1, 1, 1, 1, 0, std::nullopt));
     assert(!surface_orbit_target(snapshot, 1, 1, 1, 1, 0, std::uint8_t{3}));
 }
-// #6120: each refusal of Neutralize Hero gets its own plain notice; the old catch-all stays for other abilities only.
-void neutralize_refusals_have_their_own_text() {
+// #6120/#8157: every refusal a hero ability can answer with has its own text key, and the catch-all key is for reasons the
+// sim does not name for an ability. The keys resolve in the project's text table (tests/ui/text_database_tests.cpp).
+void ability_refusals_have_their_own_text() {
     using R = eawr::sim::galactic::GalacticRejectReason;
     const std::array reasons{R::neutralize_no_hero, R::neutralize_allied_hero, R::neutralize_not_targetable,
         R::neutralize_unavailable, R::insufficient_credits, R::incompatible_location, R::invalid_path, R::cannot_depart,
-        R::movement_blocked, R::movement_ability_required, R::invalid_membership, R::ability_target_undiscovered};
-    std::set<std::string_view> texts;
-    for (const auto reason : reasons) texts.insert(ability_refusal_text(reason));
-    assert(texts.size() == reasons.size());
-    assert(!texts.contains(ability_refusal_text(R::unknown_value)));
-    assert(ability_refusal_text(R::unknown_value).find("allied or unavailable target") != std::string_view::npos);
+        R::movement_blocked, R::movement_ability_required, R::invalid_membership, R::ability_target_undiscovered,
+        R::market_not_opposing_planet, R::market_owner_not_playable, R::market_cannot_host, R::market_other_corruption,
+        R::market_not_established, R::market_nothing_to_offer, R::market_cannot_price,
+        R::inactive_seat, R::unknown_subject, R::not_authorized, R::resource_limit, R::ability_unavailable,
+        R::ability_disabled, R::ability_not_usable_here};
+    std::set<std::string_view> keys;
+    for (const auto reason : reasons) {
+        const auto key = ability_refusal_key(reason);
+        assert(key.starts_with("TEXT_EAWR_ABILITY_"));
+        keys.insert(key);
+    }
+    assert(keys.size() == reasons.size());
+    // The catch-all names no cause and is none of the above; it is what a reason outside the ability set falls to.
+    const auto fallback = ability_refusal_key(R::unknown_value);
+    assert(fallback == "TEXT_EAWR_ABILITY_REFUSED" && !keys.contains(fallback));
+    // Every market cause has its own sim reason name, so the AI inbox and the event log accept it.
+    for (const auto reason : reasons) assert(eawr::sim::galactic::to_string(reason) != "unknown");
 }
 int main() {
     wheel_stays_blocked_until_widget_gestures_end();
-    neutralize_refusals_have_their_own_text();
+    ability_refusals_have_their_own_text();
     unused_wheel_follows_focus_and_advanced_states();
     surface_world_orbit_targets();
     space_proof_selects_reachable_authored_defenders();
     scheduled_hero_map_uses_published_frames();
     hero_map_collection_is_local_stable_and_live();
     hero_map_order_follows_retail_slots();
+    hero_strip_shows_every_hero_in_rows();
     selection_and_caller_gates(); deferred_revalidation(); navigation_and_heroes();
     rectangle_and_widget_drop_order(); wheel_radar_and_typed_commands();
     inward_refocus_immediately_focuses();

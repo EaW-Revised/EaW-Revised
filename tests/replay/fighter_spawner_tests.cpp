@@ -257,6 +257,36 @@ void test_formation_catch_up() {
         "FM-12: a follower 200 behind a leader at 5.4 keeps accelerating past 1.5 times its speed");
 }
 
+// WSQ-05 (#8117): a craft that is its own whole container (a carrier-hull type with the fighter locomotor,
+// Min_Speed 0) idles by itself: it never turns toward a hold point. A fighter in a squadron still
+// circles its hold point (FM-20).
+void test_teamless_idle() {
+    auto profile = motion().squadrons.craft.front();
+    profile.min_speed = Fixed{};
+    const auto run = [&](const bool teamless) {
+        tactical::CraftView craft{1, at(0, 0), {}, &profile};
+        craft.state.velocity = {profile.max_speed, Fixed{}, Fixed{}};
+        tactical::CraftFrame frame;
+        frame.self = &craft;
+        frame.leader = &craft;
+        frame.hold = craft.position;
+        frame.teamless = teamless;
+        Fixed worst_yaw{};
+        for (int tick = 0; tick < 400; ++tick) {
+            const auto stepped = tactical::step_craft(frame);
+            expect(static_cast<bool>(stepped), "the idle craft advances");
+            if (!stepped) return worst_yaw;
+            craft.position = stepped.value().position;
+            craft.state = stepped.value().state;
+            const Fixed yaw = craft.state.yaw.raw() < 0 ? Fixed::from_raw(-craft.state.yaw.raw()) : craft.state.yaw;
+            if (yaw > worst_yaw) worst_yaw = yaw;
+        }
+        return worst_yaw;
+    };
+    expect(run(true).raw() == 0, "WSQ-05: a teamless craft idles straight, with no turn");
+    expect(run(false) > units(5), "FM-20: a squadron craft still circles its hold point");
+}
+
 void test_coordinate_limit() {
     auto profile = motion().squadrons.craft.front();
     tactical::CraftView craft{1, at(-262144, -262144), {}, &profile};

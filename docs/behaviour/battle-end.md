@@ -61,7 +61,7 @@ The existing recordings list and playback path consume the saved file.
 | Rule | Choice |
 |---|---|
 | BEP-01 | The viewer's live battle shows the BE-02 message from the first presented frame that carries the outcome, drawn by the HUD as BE-03 describes (the font's pixel size follows UI-F1 like the other HUD text). |
-| BEP-02 | The live session halts at `end_tick`: the last tick it runs is `end_tick`, the presented tick holds there, and the time buttons and orders stop. Its replay ends at `end_tick`, so a headless run of it matches. |
+| BEP-02 | The live session halts at `end_tick`: the last tick it runs is `end_tick`, the presented tick holds there, and the time buttons stop. Keyboard orders can still be queued after the halt but do not run; this input path is unverified in a run. Its replay ends at `end_tick`, so a headless run of it matches. |
 | BEP-03 | At `end_tick` a minimal end panel replaces the battle end dialog: `TEXT_VICTORY` ("Victory!") or `TEXT_DEFEAT` ("Defeat!") over a `TEXT_BUTTON_QUIT_GAME` ("Quit Game") button that closes the viewer. The message stays behind it. |
 | BEP-04 | The live session report lists the display (`live_session.battle_end`: the message key and the tick it was first shown, whether the session halted and the tick the panel opened). |
 

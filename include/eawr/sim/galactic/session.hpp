@@ -483,6 +483,11 @@ public:
     // the galaxy has no political-control model, or a native barrier is open (its staged view has no owner change). The
     // caller journals a request that returned true (native effect story_reward); this call is the shared apply and replay path.
     [[nodiscard]] core::Result<bool> set_planet_faction(PlanetId planet, PlayerId new_owner);
+    // WGEP-139 GIVE_BLACK_MARKET: adds one registered item (its 1-based authored ordinal) to the player's independent,
+    // deduplicated black-market unlock list. No debit, production, buyer despawn or purchase feedback. Returns false with
+    // nothing changed when the galaxy has no corruption economy, the player or item is unknown, or a native barrier is
+    // open (its staged view has no unlock list). The caller journals a request that returned true.
+    [[nodiscard]] core::Result<bool> grant_black_market_item(PlayerId player, std::uint32_t item);
     // WGA-23/24/99: trusted AI admission at an ordered native barrier. The
     // build identity lives in the ordinary queue; handlers are rebound on load.
     struct NativeProductionRequest { PlayerId player{}; PlanetId planet{}; TypeId type{}; std::optional<math::Fixed> mark_cost; };
@@ -625,6 +630,8 @@ public:
         void stage_script_journal(NativeEffectKind, std::vector<std::uint8_t>);
         // The command-journal entries this batch will add when published (journal steps and removals).
         [[nodiscard]] std::size_t script_journal_entries() const noexcept;
+        // AI-usage entries before filtering actors removed by a script.
+        [[nodiscard]] std::size_t script_usage_entries() const noexcept;
         [[nodiscard]] std::span<const NativeActorChange> actor_changes() const noexcept;
         // #6378: a world script's AI-usage write on an actor of this batch's view (existing or created by it), staged as a
         // `changed` notification in call order among the batch's births. It changes no world row.

@@ -162,7 +162,7 @@ void cases(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& h
         order(refused, 1, gc::DeployGroundAbility{neutralizer(unlisted), unlisted.planets[0].id});
         hashes.push_back(take(refused.step(pool)).state_hash.get());
         expect(refused.galaxy().ability_state()->preparations.empty(), "an unlisted profile prepares nothing on a drop");
-        expect(refusal(refused) == gc::GalacticRejectReason::unknown_value, "the unlisted drop is still refused for the seat");
+        expect(refusal(refused) == gc::GalacticRejectReason::ability_not_usable_here, "the unlisted drop is still refused for the seat, with its own reason");
     }
     {   // #6270 (WGCH-24/93): an AI seat chooses among the valid options its credits cover and executes the same step;
         // nothing valid or affordable leaves the hero where it is. A human is given the menu instead (above).

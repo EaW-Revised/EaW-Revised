@@ -50,7 +50,7 @@ struct GalacticPlayer {
 // human seats in one player; every AI player and each script host get a seat of their own, so all
 // input has the same shape. `active` is the tick-zero state; a seat leaving or rejoining is a
 // session command (coop seats work). The human roster is at most eight seats on one coop side
-// or exactly two versus sides, explicitly grouped independently of owning player/faction.
+// or up to galactic_max_human_sides versus sides, explicitly grouped independently of owning player/faction.
 // AI/script players do not consume human seats or sides.
 struct Seat {
     SeatId seat_id{};
@@ -998,6 +998,9 @@ struct RemovalAbilityProfile {
 struct SiphonAbilityProfile {
     std::string name, text_identity;
     math::Fixed minimum, maximum;
+    // WGCH-70/40: the authored absence (seconds) the consumed bearer's respawn is scheduled with; a nonpositive endpoint
+    // (or an unauthored pair) selects the default hero absence.
+    math::Fixed respawn_minimum, respawn_maximum;
     std::uint32_t cycles{};
     bool initially_enabled{true}, causes_despawn{}, hero{};
     friend bool operator==(const SiphonAbilityProfile&, const SiphonAbilityProfile&) = default;
@@ -1336,6 +1339,10 @@ inline constexpr std::size_t galactic_max_seats = 256;
 // Galactic admission has its own human-seat limit within the shared match capacity.
 inline constexpr std::size_t galactic_max_human_seats = 8;
 static_assert(galactic_max_human_seats <= sim::max_match_seats);
+// One human faction per side (#8071 D1): the side count is bounded by the seat count here and by the campaign's
+// playable factions at a higher layer.
+inline constexpr std::size_t galactic_max_human_sides = galactic_max_human_seats;
+static_assert(galactic_max_human_sides <= galactic_max_human_seats);
 inline constexpr std::uint64_t galactic_max_commands = 10'000'000;
 
 // Rejects, with a named EAWR-SIM-05xx diagnostic, any setup that breaks the rules above.

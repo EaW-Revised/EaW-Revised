@@ -74,6 +74,12 @@ template <> struct Fields<BattleProduction> {
     }
 };
 
+template <> struct Fields<CombatModProfile> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.enabled, v.stat, v.value, v.duration_frames, v.categories, v.key);
+    }
+};
+
 template <> struct Fields<BlastProfile> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.damage, v.radius, v.dropoff, v.tiers, v.max_victims, v.immune_faction, v.max_delay);
@@ -124,7 +130,7 @@ template <> struct Fields<CompletedBuild> {
 
 template <> struct Fields<Access::ConcentrateEffect> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.target, v.source, v.category, v.defense, v.speed, v.kind, v.cause);
+        a(v.target, v.source, v.category, v.defense, v.speed, v.kind, v.cause, v.modifier, v.stat, v.amount, v.expires);
     }
 };
 
@@ -132,6 +138,10 @@ template <> struct Fields<ConstructionState> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.parent, v.builder, v.finish_frame, v.increment, v.start_frame);
     }
+};
+
+template <> struct Fields<ScriptViewState> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.hidden, v.unselectable); }
 };
 
 template <> struct Fields<CorruptSystemsState> {
@@ -232,6 +242,7 @@ template <> struct Fields<session_detail::LiveUnit> {
         a(v.upgraded_durability, v.asteroid_contact, v.nebula, v.corrupt, v.waypoints, v.garrison_unit, v.sighting, v.position_history);
         if (a.script_invulnerable) a(v.script_invulnerable);
         if (a.hold_fire) a(v.hold_fire);
+        if (a.script_view) a(v.script_view);
     }
 };
 
@@ -335,6 +346,8 @@ template <> struct Fields<session_detail::PopulationShare> {
 template <> struct Fields<Projectile> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.id, v.shooter, v.owner, v.weapon, v.target, v.target_hardpoint, v.position, v.step, v.speed, v.travelled, v.max_travel, v.damage, v.damage_type, v.shield_damage, v.hitpoint_damage, v.allow_diminishing_firepower, v.internal_damage_misc, v.homing, v.locked, v.turn_rate, v.yaw, v.pitch, v.offset, v.energy_damage, v.ion_stun, v.blast, v.explosion_requested, v.source_damage_factor, v.disable_engines_frames, v.flight, v.muzzle_delay_until, v.damage_delay, v.profile_key, v.reflected);
+        if (a.random_hardpoints) a(v.damages_random_hardpoints);
+        if (a.combat_mods) a(v.combat_mod);
     }
 };
 

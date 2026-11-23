@@ -21,6 +21,7 @@
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/data/ui/dialog_catalog.hpp"
 #include "eawr/data/ui/text_database.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
 #include "eawr/presentation/ui/theme.hpp"
 
@@ -615,7 +616,7 @@ void EawrOptionsScreen::rebuild_page() {
         // Project-owned page; reuse the loaded dialog's skin and button styles.
         data::Dialog performance = service;
         // Performance: four rows end at 178, the footer follows at 192 (Tweaks: rows end at 238).
-        performance.rect.height = page_ == Page::tweaks ? 314 : 262;
+        performance.rect.height = page_ == Page::tweaks ? 380 : 262;
         performance.controls.clear();
         const int width = performance.rect.width;
         const auto label = [&](const char* id, const char* caption, const data::RcRect rect) {
@@ -671,6 +672,21 @@ void EawrOptionsScreen::rebuild_page() {
             check.id_name = "IDC_GALACTIC_BUILD_TRAY";
             check.text = "TEXT_EAWR_GALACTIC_BUILD_TRAY"; check.rect.y = 246;
             performance.controls.push_back(check);
+            int colours_y = 278;
+            int colours_label_y = 280;
+            if (auto layout = eawr::data::load_document(*resources.filesystem, "data/xml/RevisedTweaks.xml")) {
+                for (const auto& node : layout.value().root.children) {
+                    int y{};
+                    const auto result = std::from_chars(node.raw_text.data(), node.raw_text.data() + node.raw_text.size(), y);
+                    if (result.ec != std::errc{} || result.ptr != node.raw_text.data() + node.raw_text.size() || y < 0 || y > 300) continue;
+                    if (node.name == "IDC_GC_BATTLE_COLOURS") colours_y = y;
+                    if (node.name == "IDC_GC_BATTLE_COLOURS_LABEL") colours_label_y = y;
+                }
+            }
+            label("IDC_GC_BATTLE_COLOURS_LABEL", "TEXT_EAWR_GC_BATTLE_COLOURS", {12, colours_label_y, width / 2 - 18, 24});
+            combo.id_name = "IDC_GC_BATTLE_COLOURS";
+            combo.rect = {width / 2, colours_y, width / 2 - 12, 26};
+            performance.controls.push_back(combo);
         }
 
         const auto button = [&](const char* id, const char* caption, const int column, const int row) {
@@ -688,7 +704,7 @@ void EawrOptionsScreen::rebuild_page() {
             control.id_name = id; control.id.reset();
             if (caption != nullptr) control.text = caption;
             const int button_width = (width - 36) / 2;
-            control.rect = {12 + column * (button_width + 12), (page_ == Page::tweaks ? 244 : 192) + row * 30, button_width, 24};
+            control.rect = {12 + column * (button_width + 12), (page_ == Page::tweaks ? 312 : 192) + row * 30, button_width, 24};
             performance.controls.push_back(std::move(control));
         };
         button("IDC_RESTORE_DEFAULT", "TEXT_EAWR_DEFAULTS", 0, 0);
@@ -1150,6 +1166,12 @@ void EawrOptionsScreen::wire_page() {
         break;
     }
     case Page::tweaks: {
+        if (auto* combo = Object::cast_to<EawrUiCombo>(state.controls["IDC_GC_BATTLE_COLOURS"])) {
+            combo->add_item(text(resources_->text ? data::to_utf8(resources_->text->text("TEXT_EAWR_GC_FACTION_UNITS")) : "Faction units, player icons"));
+            combo->add_item(text(resources_->text ? data::to_utf8(resources_->text->text("TEXT_EAWR_GC_PLAYER_UNITS")) : "Player-coloured units"));
+            combo->select(draft_.gameplay.gc_battle_colours);
+            combo->set_tooltip_text(text(resources_->text ? data::to_utf8(resources_->text->text("TEXT_EAWR_GC_COLOURS_TOOLTIP")) : "This choice applies only to your view."));
+        }
         if (auto* combo = Object::cast_to<EawrUiCombo>(state.controls["IDC_SELECTION_HOTKEYS"])) {
             combo->add_item(text(resources_->text ? data::to_utf8(resources_->text->text("TEXT_EAWR_OFF")) : "TEXT_EAWR_OFF"));
             combo->add_item(text(resources_->text ? data::to_utf8(resources_->text->text("TEXT_EAWR_ON")) : "TEXT_EAWR_ON"));
@@ -1348,6 +1370,7 @@ void EawrOptionsScreen::update_tweaks_dirty() {
         || draft_.selection_hotkeys_authored != committed_.selection_hotkeys_authored
         || draft_.gameplay.fit_radar_to_galaxy != committed_.gameplay.fit_radar_to_galaxy
         || draft_.gameplay.space_pauses_galactic != committed_.gameplay.space_pauses_galactic
+        || draft_.gameplay.gc_battle_colours != committed_.gameplay.gc_battle_colours
         || draft_.gameplay.galactic_build_tray != committed_.gameplay.galactic_build_tray
         || draft_.gameplay.animated_loading_background != committed_.gameplay.animated_loading_background
         || draft_.gameplay.hover_owner_names != committed_.gameplay.hover_owner_names
@@ -1452,6 +1475,11 @@ void EawrOptionsScreen::on_value_changed(const double value, String id) {
 void EawrOptionsScreen::on_item_selected(const int64_t index, String id) {
     if (loading_ || !state_) return;
     const std::string name = utf8(id);
+    if (page_ == Page::tweaks && name == "IDC_GC_BATTLE_COLOURS" && (index == 0 || index == 1)) {
+        draft_.gameplay.gc_battle_colours = static_cast<int>(index);
+        update_tweaks_dirty();
+        return;
+    }
     if (page_ == Page::save_game && name == "IDC_SAVE_GAME_LIST") {
         const auto found = state_->controls.find("IDC_SAVE_GAME_NAME_EDIT");
         auto* edit = found != state_->controls.end() ? Object::cast_to<LineEdit>(found->second) : nullptr;
@@ -1683,6 +1711,7 @@ void EawrOptionsScreen::commit_page(const bool leave) {
         committed_.selection_hotkeys = draft_.selection_hotkeys; committed_.selection_hotkeys_authored = draft_.selection_hotkeys_authored;
         committed_.gameplay.fit_radar_to_galaxy = draft_.gameplay.fit_radar_to_galaxy;
         committed_.gameplay.space_pauses_galactic = draft_.gameplay.space_pauses_galactic;
+        committed_.gameplay.gc_battle_colours = draft_.gameplay.gc_battle_colours;
         committed_.gameplay.galactic_build_tray = draft_.gameplay.galactic_build_tray;
         committed_.gameplay.animated_loading_background = draft_.gameplay.animated_loading_background;
         committed_.gameplay.hover_owner_names = draft_.gameplay.hover_owner_names;
@@ -1741,6 +1770,7 @@ void EawrOptionsScreen::defaults_page() {
         draft_.selection_hotkeys_authored = false;
         draft_.gameplay.fit_radar_to_galaxy = defaults.gameplay.fit_radar_to_galaxy;
         draft_.gameplay.space_pauses_galactic = defaults.gameplay.space_pauses_galactic;
+        draft_.gameplay.gc_battle_colours = defaults.gameplay.gc_battle_colours;
         draft_.gameplay.galactic_build_tray = defaults.gameplay.galactic_build_tray;
         draft_.gameplay.animated_loading_background = defaults.gameplay.animated_loading_background;
         draft_.gameplay.hover_owner_names = defaults.gameplay.hover_owner_names;

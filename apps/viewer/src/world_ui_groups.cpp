@@ -264,7 +264,11 @@ void WorldUiView::draw_identity(const Frame& frame, const RID canvas_item, const
     const auto aligned_inner = rectangle(inner_size);
     // WU-21: the gripper frame tinted by the owner's lobby colour (else its faction's `Color`, #3076),
     // or the yellow select frame while selected or under the pointer; the entity's icon inside it.
-    const ui::Rgb tint = frame.live->owner_ui_colour(owner).value_or(ui::Rgb{255, 255, 255});
+    const auto snapshot = frame.live->battle_frame().latest;
+    const auto* instance = instance_of(snapshot.get(), entity);
+    const ui::Rgb tint = instance
+        ? frame.live->participant_colour(instance->controller_seat, owner).value_or(ui::Rgb{255, 255, 255})
+        : frame.live->owner_ui_colour(owner).value_or(ui::Rgb{255, 255, 255});
     identity_geometry_.push_back({entity, screen, aligned_frame, aligned_inner, tint, owner});
     const Rect2 frame_rect(aligned_frame.x, aligned_frame.y, aligned_frame.width, aligned_frame.height);
     if (art_texture(frame_name).is_valid()) {
@@ -278,7 +282,7 @@ void WorldUiView::draw_identity(const Frame& frame, const RID canvas_item, const
     }
     draw_identity_bar(canvas_item, {x, y}, fraction, ui_scale);
     icons_.push_back({entity, battle::type_id(type.name), owner == frame.live->local_player() && frame.live->can_control(entity), hostile,
-                      type.selectable, frame_rect.position.x, frame_rect.position.y,
+                      type.selectable && !frame.live->snapshot_index().script_unselectable_contains(entity), frame_rect.position.x, frame_rect.position.y,
                       frame_rect.position.x + frame_rect.size.x, frame_rect.position.y + frame_rect.size.y});
     icon_rows_.push_back(std::to_string(entity) + ":" + (selected ? "selected" : hovered ? "hovered" : "normal")
                          + ":" + std::to_string(level) + ":y=" + std::to_string(std::lround(y)));
@@ -557,7 +561,8 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
         // Portrait identity is display-only; type selection still uses the carrier.
         icons_.back().type = unit.type;
         if (const auto carrier = types_.find(unit.type); carrier != types_.end())
-            icons_.back().selectable = carrier->second.selectable;
+            icons_.back().selectable = carrier->second.selectable
+                && !frame.live->snapshot_index().script_unselectable_contains(unit.entity);
         if (!icon_rows_.empty()) icon_rows_.back() += ":rider=" + std::to_string(rider->entity_id)
             + ":type=" + types_.at(rider->type_id).name;
     }

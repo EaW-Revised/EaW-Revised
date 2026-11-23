@@ -326,7 +326,10 @@ void GalacticMode::State::service_ability_notice() {
         }
         if (event.kind != Kind::command_rejected || !destruction_hud.dropped.answered(event.subject, container)) continue;
         if (destruction_hud.refusal_reasons.size() < 16) destruction_hud.refusal_reasons.push_back(static_cast<std::uint8_t>(event.reason));
-        refuse_hero_ability(std::string(galactic_view::ability_refusal_text(event.reason)));
+        // The notice text comes from the text table (the project's TEXT_EAWR_ABILITY_* keys), not a literal (#8157).
+        const auto key = galactic_view::ability_refusal_key(event.reason);
+        const auto text = battle_text ? battle_text(key) : std::string{};
+        refuse_hero_ability(text.empty() ? std::string(key) : text);
     }
     if (!ability_notice_text.empty() && Time::get_singleton()->get_ticks_msec() >= ability_notice_until_msec) ability_notice_text.clear();
     if (ability_notice_text == ability_notice_shown) return; // No native call on an idle frame.
@@ -354,7 +357,12 @@ bool GalacticMode::State::drop_hero_ability(galactic_view::ObjectId source, bool
     // Every refusal on a real release says why; a preview (submit=false) stays silent.
     const auto refuse = [&](const char* text) { if (submit) refuse_hero_ability(text); return false; };
     const auto drop = hero_ability_drop(source, target ? target : state.drop ? state.drop->planet : fleet_drag_planet);
-    if (!drop) return refuse("This hero has no ability it can use on that planet.");
+    if (!drop) {
+        // The same notice as the host's answer to a drop no listed kind takes (ability_not_usable_here).
+        const auto key = galactic_view::ability_refusal_key(sim::galactic::GalacticRejectReason::ability_not_usable_here);
+        const auto text = battle_text ? battle_text(key) : std::string{};
+        return refuse((text.empty() ? std::string(key) : text).c_str());
+    }
     galactic_view::DropIntent intent;
     intent.kind = galactic_view::DropKind::ability;
     intent.source = drop->supplied; intent.planet = drop->planet;

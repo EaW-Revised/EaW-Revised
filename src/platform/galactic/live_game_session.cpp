@@ -468,6 +468,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
                 players.types.emplace_back(location.original_type, ++next);
                 players.planets.emplace_back(location.original_type, location.planet->id);
             }
+            campaign::assign_unplaced_object_types(catalog, next, players);
             units::LoadInput input; input.catalog = &catalog; input.filesystem = &filesystem;
             for (const auto& [name, id] : players.types) { (void)id; input.types.push_back(name); }
             // The shared load answers only when it was made from these files and catalog and requested with exactly this list; otherwise load for this step.
@@ -479,7 +480,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
                 own_vocabulary.emplace(std::move(vocabulary).value());
             }
             if (core::gc_load::trace.active()) core::gc_load::trace.mark(std::string("prep.ai_runtime.object_query_unit_tables.shared=") + (shared_hit ? "hit" : "own"));
-            auto query_catalog = campaign::make_galactic_object_query_catalog(shared_hit ? shared_tables->tables() : *own_vocabulary, players.types);
+            auto query_catalog = campaign::make_galactic_object_query_catalog(shared_hit ? shared_tables->tables() : *own_vocabulary, players.types, players.unplaced_types);
             if (!query_catalog) return Result::failure(query_catalog.error());
             campaign::GalacticObjectEffectsFactory effects = [starting = services.value().stock_starting_forces,
                 query_catalog = std::move(query_catalog).value(), players, perception = content.value()->perception()](galactic::GalacticSession& world,
@@ -2533,6 +2534,9 @@ core::Result<std::unique_ptr<PreparedLiveRestore>> LiveGameSession::prepare_load
         const ThreadWorkerAdapter executor(impl_->options_.workers);
         auto restored = checkpoint::load_game_checkpoint(bytes, identities, options, executor, name);
         if (!restored) return Result::failure(restored.error());
+        // #8171: a multiplayer restore settles an unenterable battle through the auto-resolver on every peer.
+        if (restored.value().session.galaxy().multiplayer() && !restored.value().session.has_auto_resolver())
+            return Result::failure(diagnostic("EAWR-SAVE-0104", "A multiplayer game needs an auto-resolver to settle a battle that cannot be entered."));
         auto retained = services ? std::make_shared<CampaignServiceConfiguration>(*services)
             : std::make_shared<CampaignServiceConfiguration>();
         retained->restore = std::move(options);

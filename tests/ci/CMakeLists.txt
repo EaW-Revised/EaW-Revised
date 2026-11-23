@@ -60,6 +60,9 @@ add_test(
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_evidence_io.py"
 )
 
+# Linux x64 player fresh-user gate: verdict parser, zip modes, evidence shape.
+
+
 # #825: no FoC engine class/method names in tracked files (tools/cleanroom_check.py).
 add_test(
     NAME ci_cleanroom_check

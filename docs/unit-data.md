@@ -93,8 +93,9 @@ single/list selection still differs where this section says so.
   are listed as `inactive_abilities` (SK-31).
 - A craft's object weapon (`Projectile_Types`) has one recharge time,
   `Projectile_Fire_Recharge_Seconds`, which is stored as both its minimum and its maximum.
-- Spawners: only `Tech_0` lists load (SK-23). `reserves` are read and `reserves_used` is
-  always false (SK-36).
+- Spawners load starting and reserve lists for tech 0 through 5. For a campaign
+  owner, each list independently selects the first nonempty tier at or below internal
+  tech (WGT-58/59); skirmish also builds tier profiles.
 - A field that a row requires but the data lacks, or a reference that does not resolve,
   becomes an `Unresolved` row. It never becomes a default value.
 

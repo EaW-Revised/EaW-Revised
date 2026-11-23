@@ -324,8 +324,8 @@ void test_checks_against_the_category_enum() {
 
 void test_stale_assignments() {
     presentation::ui::build_tray::TypeIndex types;
-    types.add({"Warlord_Choice_One", {}, {}, false});
-    types.add({"X-Wing", {}, {}, false});
+    types.add({"Warlord_Choice_One", {}, {}, false, {}, {}});
+    types.add({"X-Wing", {}, {}, false, {}, {}});
     tray::GroupDefinition definition;
     definition.assignments = {{"Warlord_Choice_*", "G", std::nullopt}, {"x-wing", "G", std::nullopt},
         {"Gone", "G", std::nullopt}, {"Removed_*", "G", std::nullopt}};

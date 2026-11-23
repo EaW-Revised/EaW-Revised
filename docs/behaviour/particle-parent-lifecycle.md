@@ -22,7 +22,8 @@ normalize the parent velocity and scale it by the lesser of scaled speed and
 the authored limit. The V1 death creator disables this inheritance. PS-24 keeps
 sampled velocity separate from birth-direction radial motion. Native dependent
 velocity/alignment inheritance is still U03, without a new fidelity claim.
-The MIT alo-viewer provenance is revision
+Reference-derived rules without a specific particle-walk citation remain
+unverified against FoC. The MIT alo-viewer provenance is revision
 `9bb0053919cc5df8377610d4f91b11d956d6c2f4`.
 
 PS-19 admission uses independent per-emitter reserves within the caller's host

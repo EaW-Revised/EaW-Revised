@@ -39,12 +39,11 @@ CHECKED: Dict[str, Tuple[str, ...]] = {"S-45": ("shield", "hull"), "S-46": ("shi
 HULL_FOLLOWS_HARDPOINTS = ("S-45", "S-49", "S-50")
 HULL_CONSTRAINT = 0.2
 WINDOW = 0.15
-# Known gap, strict: S-45's shield empties late (1252 before #4885, 1309 after it; window 877..1290).
-# The recordings' muzzle draws are matched (WWP-22, FoC debug build walk in #4946); the lateness is the
-# far-side / battery hit gap of #536 (HS-02, G-W3), already 130 ticks above the recorded maximum before
-# the draws changed. Strict: when the shield comes back inside the window this check FAILS, so the
-# marker is removed and the plain window check re-armed.
-KNOWN_GAP = {("S-45", "shield"): "#4946, #536"}
+# Known gaps, strict: a (case, key) listed here must stay OUTSIDE its recorded window; when it comes back inside,
+# the check FAILS so the marker is removed and the plain window check re-armed. #8154: S-45's shield-empty tick
+# (late at 1252 before #4885 and 1309 after it, window 877..1290, far-side / battery hit gap of #536) is now 1213, inside
+# the window, so its marker is gone and the plain check holds it.
+KNOWN_GAP: Dict[Tuple[str, str], str] = {}
 FAILURES: List[str] = []
 
 

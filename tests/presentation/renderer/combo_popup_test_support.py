@@ -196,9 +196,19 @@ func run():
         await process_frame
         combo = root.find_child("IDC_PLAYER_FACTION_0",true,false)
         if combo != null: break
-    if combo == null or combo.item_count < 10:
+    if combo == null:
         quit(2)
         return
+    # #7842 lists only the factions the selected map can start: every listed map of the Remake chain offers five (the
+    # d15d54406 run walked the whole map list), fewer than the ten rows the long-list input path (wheel, last-row click,
+    # keyboard wrap) needs. The real count is recorded (real_count) and asserted by the case; the list is then padded
+    # with labelled rows only to exercise the scrolling popup mechanics.
+    await settle()
+    var real_count = combo.item_count
+    var padding = 0
+    while combo.item_count < 10:
+        padding += 1
+        combo.add_item("Padding faction %d" % padding)
     await settle()
     var popup = combo.get_popup()
     var last = combo.item_count-1
@@ -222,7 +232,7 @@ func run():
         popup.size.y - panel.get_content_margin(SIDE_BOTTOM)*scale - row/2.0)
     pointer(last_point,MOUSE_BUTTON_LEFT)
     await settle()
-    var report = {"opened":opened,"first_value":first_value,"wheel_value":wheel_value,
+    var report = {"real_count":real_count,"padding":padding,"opened":opened,"first_value":first_value,"wheel_value":wheel_value,
         "last_index":last,"expected_last":expected_last,"click_selected":combo.selected,
         "click_faction":combo.get_text(),"click_closed":not popup.visible}
     combo.grab_focus()

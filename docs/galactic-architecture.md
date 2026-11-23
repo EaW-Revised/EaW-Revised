@@ -20,8 +20,8 @@ Scope is FoC only. Land conflicts auto-resolve in M3 (playable land battles are 
 conflicts are fought in the M2 tactical engine or auto-resolved. Multiplayer GC ships in
 M6, but every M3 decision below keeps it possible: the galaxy is a lockstep simulation
 from its first commit. **Coop GC is supported from the start** (owner, 2026-10-07), tracked as coop GC
-(legacy EAWR-2013): up to eight human seats either share one side against AI or form exactly
-two human sides in versus play, in any split; no third human side. The seat model in
+(legacy EAWR-2013): up to eight human seats either share one side against AI or form up to eight
+human sides in versus play (one faction each, bounded by the campaign's playable factions). The seat model in
 [section 4](#seats-and-coop-galactic-conquest) is part of the command envelope, not a
 later add-on.
 
@@ -420,8 +420,10 @@ session commands. Tests prove recorded causal input reproduces every derived eff
 ### Seats and coop galactic conquest
 
 Owner requirement, tracked as coop GC (legacy EAWR-2013): one to eight humans play symmetrically,
-either all on one side against AI or on exactly two human sides in versus play (4v4, 3v1,
-or any other split up to eight). Setup refuses a third human side. Vanilla GC is the
+either all on one side against AI or on up to eight human sides in versus play (one faction
+each, bounded by the campaign's playable factions; at most eight humans in total, so 4v4, 3v1 or
+any other split up to eight). The lobby offers more than two sides with the multi-faction lobby step. Setup
+refuses a side beyond the cap (galactic_max_human_sides). Vanilla GC is the
 one-seat case; the faction table has no fixed count and includes non-playable owners.
 
 - **Players own, seats command.** A *player* is the simulation's owner of planets, fleets,
@@ -474,8 +476,14 @@ one-seat case; the faction table has no fixed count and includes non-playable ow
   presentation: the live game publishes it as a spectator of the agreed observer perspective,
   its battle feed follows that perspective's fog and ignores every order, and the viewer loads
   the battle for it like for a playing seat (read-only; presentation only, no state or hash
-  change). The choice dialog (spectate, join the player team, or join the opponent) is not in
-  the viewer yet: online multiplayer applies the spectate default. Reconciliation applies casualties to original persistent owners
+  change). That view is read-only for real (legacy EAWR-8182): the simulation refuses every battle
+  order of a seat without a battle player, and the viewer shows no order controls, selects no
+  unit and sends no order in it. A pending role never yields a battle view at all: the seat
+  stays on the galaxy until the role is set. The choice dialog (spectate, join the player team,
+  or join the opponent) is not in the viewer yet: when exactly one fighting side is human and
+  another human team exists, a network game (online or LAN, with or without a vote timeout)
+  applies the spectate default when the battle starts, so a role never stays pending and holds
+  the battle. Reconciliation applies casualties to original persistent owners
   and removes every temporary assignment on return. Checkpoint and child-log restore retain
   the assignment and pending choice so save/load cannot silently grant or lose control.
 - **Per-seat presentation.** Selection, control groups and camera are per seat and live in the

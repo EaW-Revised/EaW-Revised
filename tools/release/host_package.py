@@ -259,6 +259,21 @@ def packager_command(packager, *, expect_identity: str, build_dir, version: str,
     return command
 
 
+def linux_player_command(packager, *, expect_identity: str, build_dir, version: str, out, linux_engine, linux_viewer,
+                         revised_layer=None, allow_missing_revised_layer=False, public=False, python=None) -> list[str]:
+    """The Linux x64 player's packager line: the patched Linux engine file, the separately built Linux viewer extension
+    (the native Linux viewer leg), no launcher, no symbols, no mods manager (they are Windows only)."""
+    command = [python or sys.executable, str(packager), "--expect-identity", expect_identity, "--build-dir", str(build_dir),
+               "--platform", "linux-x64", "--version", version, "--out", str(out), "--godot", str(linux_engine),
+               "--linux-viewer", str(linux_viewer)]
+    if revised_layer:
+        command += ["--revised-layer", str(revised_layer)]
+    for flag, enabled in (("--allow-missing-revised-layer", allow_missing_revised_layer), ("--public", public)):
+        if enabled:
+            command.append(flag)
+    return command
+
+
 def release_file_lines(out) -> list[str]:
     """`EAWR-RELEASE FILE <path> <bytes> <sha256>` for every file the packager wrote: what the cut parses on either route."""
     return [f"EAWR-RELEASE FILE {f} {f.stat().st_size} {sha256_file(f)}" for f in sorted(Path(out).iterdir()) if f.is_file()]

@@ -28,7 +28,8 @@ is allocated atomically in source order, so the allocated sum never exceeds the
 aggregate budget. No capacity or variant is inferred.
 
 Every failure has one status and cause. Selector mismatch or authored invisible
-proxy/bone is `hidden`. Missing scene reference, unresolved effect path, or
+proxy/bone is `hidden`. A proxy hidden by its hardpoint state is also
+`hidden`, with cause `hardpoint_state`. Missing scene reference, unresolved effect path, or
 unknown particle classification is `unresolved`. Missing selected variant,
 unknown visibility, malformed selector, nonparticle reference, absent bone/frame,
 zero capacity, budget exhaustion, and fixed-frame overflow are `unsupported`.

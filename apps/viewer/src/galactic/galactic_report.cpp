@@ -705,6 +705,18 @@ void GalacticMode::State::write_report_galaxy(std::ostringstream& output) const 
                    << ", \"title\": " << json(planet.ability.title)
                    << ", \"description\": " << json(planet.ability.description) << "}"
                    << ", \"layer\": " << json(galactic_view::to_string(static_cast<galactic_view::SceneLayer>(planet_layer(planet.id))));
+            // #8158: the radius the planet hides its neighbours' controls with, and the model extents behind it (every planet).
+            output << ", \"body_radius\": " << planet_body_radius(planet);
+            if (const auto drawn = planet_models.find(planet.id); drawn != planet_models.end() && drawn->second) {
+                const auto& drawn_model = models[*drawn->second];
+                output << ", \"body_half_extents\": [" << drawn_model.body_half_extents[0] << ", " << drawn_model.body_half_extents[1]
+                       << ", " << drawn_model.body_half_extents[2] << "]";
+                if (drawn_model.model_bounds) {
+                    const auto& box = *drawn_model.model_bounds;
+                    output << ", \"model_half_extents\": [" << (box[3] - box[0]) * 0.5F << ", " << (box[4] - box[1]) * 0.5F << ", "
+                           << (box[5] - box[2]) * 0.5F << "]";
+                }
+            }
             if (content && content->art.contains(planet.id)) {
                 const auto& art = content->art.at(planet.id);
                 const auto appearance = affiliations.find(planet.id);

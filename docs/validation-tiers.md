@@ -9,8 +9,8 @@ arm64 run in the public repository's cloud CI (`tools/oss/public/.github/workflo
 In this repository, native Linux arm64 runs only when someone dispatches the CI workflow by hand
 with `arm64` set (a GitHub-hosted runner); no pull request, push or nightly runs it.
 
-The weekly Visual Studio generator workflow uses clang-cl. A separate nightly MSVC
-compile-only watch outside CI covers MSVC warnings.
+The weekly Visual Studio generator workflow uses clang-cl. No MSVC build or check runs:
+the nightly MSVC compile-only watch was retired on 2026-11-23 (owner) and must not be re-added.
 
 ## Which tier
 

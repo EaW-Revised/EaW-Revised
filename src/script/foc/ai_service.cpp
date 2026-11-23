@@ -677,7 +677,7 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
         }
         if (command.verb != verb_ai) {
             // U-05: direct object-script orders replace the retained positioning destination too.
-            if ((command.verb == verb_move || command.verb == verb_attack_move || command.verb == verb_guard
+            if ((command.verb == verb_move || command.verb == verb_face || command.verb == verb_attack_move || command.verb == verb_guard
                     || command.verb == verb_attack) && command.arguments.size() > 1) {
                 if (const auto unit = handle_id(command.arguments[1], handle_game_object)) {
                     if (auto* retained = positioning(*unit))

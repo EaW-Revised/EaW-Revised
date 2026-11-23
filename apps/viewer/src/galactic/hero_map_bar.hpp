@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace eawr::viewer::galactic {
 
@@ -33,11 +35,12 @@ struct HeroMapEntry {
 
 // WGUI-89: live locally owned named heroes with icons and parents, once per type.
 // Debug-build evidence indicates retail sorts the slot list ascending by authored rank, equal
-// ranks by ascending type-name CRC, keeps the first six slots, and slot 0 is the right-most portrait. The returned
-// vector is in DISPLAY order (left to right) = that slot list reversed, so the bar reads high rank to low rank
-// (2026-10-20 captures, ranks 90/50/10) and with more than six heroes the six LOWEST ranks stay. Retail leaves
-// ranks below 1 unordered against other ranks; we place them after all positive ranks (CRC order) so the sort is a
-// strict weak ordering.
+// ranks by ascending type-name CRC, and fills the authored hero slots in that order (slot 0 first, the one at the
+// frame's top right). The returned vector is that whole slot list, never cut: the hero strip places the first heroes
+// on the frame's authored slots and the rest in rows below them. The earlier cut to six was the retail clamp of the
+// frame art variant, not of the slot list (the headless walk of the strip's update shows the slot loop running to the
+// last authored slot). Retail leaves ranks below 1 unordered against other
+// ranks; we place them after all positive ranks (CRC order) so the sort is a strict weak ordering.
 // Scheduled rows come only from copied local owner publications.
 template<class Art>
 [[nodiscard]] std::vector<HeroMapEntry> collect_map_heroes(
@@ -93,8 +96,6 @@ template<class Art>
         const auto left_crc = crc(left), right_crc = crc(right);
         return left_crc != right_crc ? left_crc < right_crc : left.type < right.type;
     });
-    if (result.size() > 6) result.resize(6); // WGUI-89 slot limit, after the retail sort.
-    std::reverse(result.begin(), result.end()); // Slot 0 is the right-most portrait.
     return result;
 }
 

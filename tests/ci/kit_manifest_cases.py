@@ -41,6 +41,7 @@ class KitRepo:
         run_git(self.root, 'config', 'user.email', 'test@example.invalid')
         for name in kit_manifest.PAYLOAD_REQUIRED:
             self.write(name, f'content of {name}\n')
+        self.write('tools/engine_pins.json', (ROOT / 'tools/engine_pins.json').read_text(encoding='utf-8'))  # the real pins
         for name in ('finish_kit.py', 'kit_manifest.py'):  # finish refuses to run unless these are the kit commit's own bytes
             self.write('tools/release/' + name, (ROOT / 'tools/release' / name).read_text(encoding='utf-8'))
         self.write('tools/release/revised-layer-manifest.json', json.dumps(
@@ -109,6 +110,30 @@ class KitManifestTests(unittest.TestCase):
         self.assertIsNone(plan['version']['release_version'])
         for entry in plan['payload']:
             self.assertEqual(entry['git_blob'], run_git(self.repo.root, 'rev-parse', f"{self.repo.kit}:{entry['path']}"))
+
+    def test_linux_player_engine_pin_is_planned_and_verified_against_the_commits_pins(self):
+        pins = json.loads((ROOT / 'tools/engine_pins.json').read_text(encoding='utf-8'))
+        label, files = kit_manifest.linux_engine_identity(pins)
+        self.assertEqual(label, 'eawr-5b733a90f-linux-x64')
+        self.assertEqual(list(files), ['godot.linuxbsd.editor.x86_64'])
+        plan = self.repo.plan(linux_engine=(label, files))
+        self.assertEqual(plan['inputs']['linux_engine'], {'label': label, 'files': files})
+        self.assertNotIn('linux_engine', self.repo.plan()['inputs'])
+        manifest = kit_manifest.new_manifest(plan)
+        self.assertEqual(self.problems(manifest), [])
+        # A plan that pins another hash, or a malformed pin, is refused.
+        wrong = copy.deepcopy(plan)
+        wrong['inputs']['linux_engine']['files']['godot.linuxbsd.editor.x86_64'] = 'e' * 64
+        found = self.problems(kit_manifest.new_manifest(wrong))
+        self.assertTrue(any('linux-x64 pin in the kit commit' in p for p in found), found)
+        bad = copy.deepcopy(plan)
+        bad['inputs']['linux_engine']['label'] = 'eawr-5b733a90f-ltofull'
+        self.assertTrue(any('linux_engine pin is malformed' in p for p in kit_manifest.verify(kit_manifest.new_manifest(bad))))
+        # The host receipt must carry the pinned Linux engine file too.
+        receipt = {'inputs': {'Godot.exe': 'c' * 64, 'launcher.zip': 'b' * 64}}
+        self.assertTrue(any('Linux engine file the plan pinned' in p for p in kit_manifest._receipt_input_problems(receipt, plan)))
+        receipt['inputs']['godot.linuxbsd.editor.x86_64'] = files['godot.linuxbsd.editor.x86_64']
+        self.assertEqual(kit_manifest._receipt_input_problems(receipt, plan), [])
 
     def test_missing_required_payload_file_refuses_the_cut(self):
         run_git(self.repo.root, 'rm', '-q', 'tools/release/kit_engine.py')

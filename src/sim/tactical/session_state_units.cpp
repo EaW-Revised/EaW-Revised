@@ -99,6 +99,20 @@ void TacticalSession::Impl::append_canonical_hold_fire_state(std::vector<std::ui
             sim::detail::append_u64(bytes, unit.state.entity_id);
 }
 
+void TacticalSession::Impl::append_canonical_script_view_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
+        // SVEW v1: the units carrying a Hide or Set_Selectable flag, in stable ID order with both flags; absent while none does.
+        const auto flagged = counts ? counts->script_view_units : static_cast<std::uint64_t>(std::count_if(units.begin(), units.end(),
+            [](const auto& unit) { return unit.script_view.has_value(); }));
+        if (flagged == 0) return;
+        bytes.insert(bytes.end(), script_view_tag.begin(), script_view_tag.end());
+        sim::detail::append_u32(bytes, script_view_block_version);
+        sim::detail::append_u64(bytes, flagged);
+        for (const auto& unit : units) if (unit.script_view) {
+            sim::detail::append_u64(bytes, unit.state.entity_id);
+            sim::detail::append_u32(bytes, (unit.script_view->hidden ? 1U : 0U) | (unit.script_view->unselectable ? 2U : 0U));
+        }
+}
+
 void TacticalSession::Impl::append_canonical_heroes_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
         // Killed craft spinning away (#447); a session without any hashes as before.
         const auto heroes = (counts ? counts->heroes : static_cast<std::uint64_t>(std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {

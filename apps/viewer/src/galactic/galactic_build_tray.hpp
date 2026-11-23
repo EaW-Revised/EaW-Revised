@@ -8,6 +8,7 @@
 
 #include <godot_cpp/classes/canvas_item_material.hpp>
 #include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/input_event.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/variant/rid.hpp>
 #include <godot_cpp/variant/rect2.hpp>
@@ -45,6 +46,12 @@ public:
 
     // The tray entry under `control`, for the hover and encyclopedia lookup. Valid until the next service().
     [[nodiscard]] const viewer::galactic::BuildChoiceComponent* choice_under(const godot::Control* control) const;
+
+    // #8029: the pointer is over one of the tray's own controls (the open panel, its close mark, the handle). The ground
+    // input sits above the HUD's input mask and takes the pointer over the planet-view buttons, so it asks this first.
+    [[nodiscard]] bool holds(godot::Vector2 point) const;
+    // Counts a mouse button, wheel or held-button motion event the planet view received over the tray (it must stay 0).
+    void note_world_event(const godot::Ref<godot::InputEvent>& event);
 
     [[nodiscard]] bool open() const { return open_; }
     // GBT-07: the tray key acts like a click on the handle; it does nothing while no handle is shown (or the HUD is
@@ -90,6 +97,7 @@ private:
     void load(GalacticMode::State& state);
     void hide_all();
     void ensure_controls(GalacticMode::State& state);
+    [[nodiscard]] godot::Control* tray_layer(GalacticMode::State& state);
     void style_handle(GalacticMode::State& state, const data::ui::CommandBarComponent& component,
         const data::ui::ShellAnchor& anchor);
     void place_handle(GalacticMode::State& state, const godot::Rect2& bar);
@@ -117,6 +125,7 @@ private:
     presentation::ui::build_tray::TypeIndex types_;
     std::size_t type_count_{};
 
+    godot::Control* layer_{}; // the tray's layer over the HUD shells (#8029)
     godot::Control* panel_{};
     godot::TextureRect* panel_back_{};
     godot::TextureRect* panel_frame_{};
@@ -151,11 +160,13 @@ private:
     bool open_{};
     std::size_t omitted_{};
     std::size_t omitted_by_layout_{};
+    float header_line_{};  // the line the header labels draw (the strip height at either size step), for the report
     bool compact_{};
     bool handle_docked_{};
     bool dock_warned_{};
     std::uint64_t handle_presses_{};
     std::uint64_t key_presses_{};
+    std::uint64_t world_events_over_tray_{}; // #8029
     std::string bound_key_;          // the binding text the keycode below was resolved from
     std::int64_t bound_keycode_{};
     std::size_t groups_shown_{};

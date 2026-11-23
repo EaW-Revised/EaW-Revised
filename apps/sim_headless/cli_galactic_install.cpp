@@ -267,7 +267,9 @@ int run_installed_campaign(const InstalledCampaignRequest& request) {
         std::size_t largest{};
         std::string hostable; // every campaign a lobby could host, so a chain's big campaign can be named explicitly
         for (const auto& campaign : campaigns) {
-            const auto options = net::default_galactic_lobby_options(campaign, "normal", request.seed);
+            // A test harness choice, not the lobby's rule (D8, #8071: a room plans the host's row and players claim the others): the
+            // install run is a deliberate two-human run, so it plans two rows here and below. This only asks "could a room host it".
+            const auto options = net::default_galactic_lobby_options(campaign, "normal", request.seed, 3, 2);
             if (!options || std::none_of(options.value().rows.begin(), options.value().rows.end(),
                 [](const auto& row) { return row.human; })) continue;
             hostable += campaign.name + ":" + std::to_string(campaign.planet_points.size()) + ";";
@@ -284,7 +286,7 @@ int run_installed_campaign(const InstalledCampaignRequest& request) {
             report.note("lobby-campaign", false, "no hostable lobby campaign matches the requested name");
             return finish(3);
         }
-        auto options = net::default_galactic_lobby_options(*selected, "normal", request.seed);
+        auto options = net::default_galactic_lobby_options(*selected, "normal", request.seed, 3, 2); // harness choice: the install run seats two human sides on purpose (see above)
         if (!options) return fail("lobby-options", options.error());
         auto encoded = net::encode_galactic_lobby_game(options.value());
         if (!encoded) return fail("lobby-options", encoded.error());

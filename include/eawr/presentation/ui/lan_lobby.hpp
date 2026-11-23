@@ -462,8 +462,12 @@ struct GalacticRowFacts {
 // The campaign rows in display order, one entry per drawn dialog row (at most `capacity`). When every row fits, the
 // campaign's own order is kept as it is. Otherwise neutral rows are dropped and the planned players come first, then
 // the rows a player could still take, then the AI rows, each group in campaign order, so a player's row is never the
-// one that is cut. Each entry is an index into `rows`.
+// one that is cut. When rows are cut, the last dialog row is kept free for the "+N AI factions" line
+// (galactic_hidden_rows_line) unless that would cut a planned player. Each entry is an index into `rows`.
 [[nodiscard]] std::vector<std::size_t> galactic_row_order(std::span<const GalacticRowFacts> rows, std::size_t capacity);
+// The line that stands for the factions `order` does not draw (D8, #8071): "+3 AI factions" for rows that stay AI, "+2 more
+// factions" when a planned player's row is among them. Empty when every row that can be seated is drawn.
+[[nodiscard]] std::string galactic_hidden_rows_line(std::span<const GalacticRowFacts> rows, std::span<const std::size_t> order);
 // The campaign row drawn on dialog row `slot` (an index into the rows `order` was made from), or nothing past the drawn rows.
 [[nodiscard]] std::optional<std::size_t> galactic_row_at(std::span<const std::size_t> order, std::size_t slot) noexcept;
 // The player ID of the campaign row drawn on dialog row `slot` (`players` holds each campaign row's ID): what a dialog

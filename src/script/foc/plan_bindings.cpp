@@ -699,7 +699,7 @@ void register_targets(ScriptScheduler& scripts, const HostPtr& host, std::vector
     method("Get_Position", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const auto position = extract_position(*host, arguments[0]);
         if (!position) return none();
-        return one(position_value(*position));
+        return one(position_object(*position));
     });
     // The stock evaluators measure from their Target (GetDistanceToNearestSpaceField, EX-51): the
     // distance from the target's object or region centre to an object, AI target, TaskForce or position.
@@ -1075,6 +1075,16 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         }
         const std::uint64_t span = static_cast<std::uint64_t>(steps) + 1U;
         return one(number(LuaNumber(lo + static_cast<std::int64_t>(context.random().next_below(span)))));
+    });
+    // Create_Position(x, y, z): the retail global takes three numbers (fewer is one script error, a non-number among
+    // the first three another; extra arguments are ignored) and answers a position wrapper holding them as floats.
+    add("Create_Position", [](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() < 3) return fail("Create_Position: Expected 3 float parameters.");
+        const auto* x = std::get_if<LuaNumber>(&arguments[0].data);
+        const auto* y = std::get_if<LuaNumber>(&arguments[1].data);
+        const auto* z = std::get_if<LuaNumber>(&arguments[2].data);
+        if (x == nullptr || y == nullptr || z == nullptr) return fail("Create_Position: Invalid parameter, expected 3 floats.");
+        return one(position_handle(*x, *y, *z));
     });
     add("GameRandom.Get_Float", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         if (arguments.size() > 2) return fail("GameRandom.Get_Float expects zero, one or two numbers");

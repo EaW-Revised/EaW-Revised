@@ -59,6 +59,43 @@ function Find_Player(...)
 end
 )LUA";
 
+// The object host's weighted type list. The list is an object of the script's own state, so its weights are retained with the
+// instance (saved, hashed and rolled back with the Lua graph). Parse is called without a receiver: `list.Parse(names, weights)`.
+// Names are kept upper-case, like every type and category name the hosts compare; a name and its weight stay index-aligned.
+constexpr std::string_view weighted_list_module = "EAWR/Object/WeightedTypeList.lua";
+constexpr std::string_view weighted_list_source = R"LUA(
+WeightedTypeList = {}
+
+function WeightedTypeList.Create()
+    local list = {}
+    list.Names = {}
+    list.Weights = {}
+    list.Parse = function(...)
+        if arg.n ~= 2 or type(arg[1]) ~= "table" or type(arg[2]) ~= "table" then
+            error("WeightedTypeList.Parse expects a table of names and a table of weights")
+        end
+        local names = arg[1]
+        local weights = arg[2]
+        local count = table.getn(names)
+        if count ~= table.getn(weights) then
+            error("WeightedTypeList.Parse expects names and weights of one length")
+        end
+        local parsed_names = {}
+        local parsed_weights = {}
+        for index = 1, count do
+            if type(names[index]) ~= "string" or type(weights[index]) ~= "number" then
+                error("WeightedTypeList.Parse expects text names and numeric weights")
+            end
+            parsed_names[index] = string.upper(names[index])
+            parsed_weights[index] = weights[index]
+        end
+        list.Names = parsed_names
+        list.Weights = parsed_weights
+    end
+    return list
+end
+)LUA";
+
 core::Diagnostic problem(std::string message) {
     core::Diagnostic out;
     out.code = std::string(auth::codes::invalid_request);
@@ -91,6 +128,44 @@ std::optional<std::uint64_t> number_text(const auth::Value& value) {
     const auto parsed = std::from_chars(text->data(), text->data() + text->size(), out);
     if (parsed.ec != std::errc{} || parsed.ptr != text->data() + text->size()) return std::nullopt;
     return out;
+}
+
+// WST-91/92: prepare the full faction database once; the first matching player is the lowest player-table ID.
+// Project deviation from WST-91: a per-peer local player cannot enter the multiplayer lockstep simulation.
+// The shared co-op faction is the one deterministic exception: every peer derives the same value.
+auth::Binding make_player_lookup(const GalacticStoryPlayers& players, bool multiplayer) {
+    std::map<std::string, std::optional<sim::galactic::PlayerId>> factions;
+    for (const auto& name : players.factions) factions.try_emplace(lower(name), std::nullopt);
+    bool local_registered = false, shared_registered = false;
+    for (const auto& player : players.players) {
+        local_registered |= players.local_player && player.id == *players.local_player;
+        shared_registered |= players.shared_local_player && player.id == *players.shared_local_player;
+        const auto found = factions.find(lower(player.faction));
+        if (found != factions.end() && (!found->second || player.id < *found->second)) found->second = player.id;
+    }
+    const auto local = multiplayer ? (shared_registered ? players.shared_local_player : std::nullopt)
+                                   : (local_registered ? players.local_player : std::nullopt);
+    return [factions = std::move(factions), local](auth::BindingContext& context, const auth::ValueList& arguments) {
+        using Lookup = core::Result<auth::ValueList>;
+        const auto invalid = [&](std::string message) {
+            context.report(auth::codes::invalid_request, std::move(message));
+            context.request_exit();
+            return Lookup::success({});
+        };
+        // WST-90: string-only, exact arity; diagnostics stop this script even without a log sink.
+        if (arguments.size() != 1 || !std::holds_alternative<std::string>(arguments.front().data))
+            return invalid("Find_Player requires exactly one string argument");
+        const auto name = lower(std::get<std::string>(arguments.front().data));
+        auto player = local;
+        if (name != "local") {
+            const auto found = factions.find(name);
+            if (found == factions.end()) return invalid("Find_Player: unknown faction '" + std::get<std::string>(arguments.front().data) + "'");
+            player = found->second;
+        }
+        // WST-93: the sandbox interns each player's handle independently in each script's wrapper registry.
+        if (player) return Lookup::success({auth::Value{auth::Handle{script::foc::handle_player, *player}}});
+        return Lookup::success({});
+    };
 }
 
 // #7102/#7964: Player.Is_Human for a registered player (its seat is human-controlled in the setup, fixed for the session);
@@ -173,8 +248,31 @@ core::Result<void> GalacticStoryLink::commit(auth::ServiceReport& report) const 
     return failure;
 }
 
+void assign_unplaced_object_types(const data::Catalog& catalog, const sim::galactic::TypeId id_floor, GalacticStoryPlayers& players) {
+    std::vector<std::string> names;
+    for (const auto& definition : catalog.definitions())
+        if (definition.category == data::Category::game_object && definition.active && definition.namespace_winner && !definition.id.empty())
+            names.push_back(definition.id);
+    assign_unplaced_object_types(names, id_floor, players);
+}
+
+void assign_unplaced_object_types(std::span<const std::string> names, const sim::galactic::TypeId id_floor, GalacticStoryPlayers& players) {
+    std::set<std::string> placed;
+    sim::galactic::TypeId highest = id_floor;
+    for (const auto& [name, id] : players.types) { placed.insert(upper_text(name)); highest = std::max(highest, id); }
+    std::set<std::string> extra;
+    for (const auto& name : names)
+        if (!name.empty() && !placed.contains(upper_text(name))) extra.insert(upper_text(name));
+    players.unplaced_types.clear();
+    for (const auto& name : extra) {
+        if (highest == std::numeric_limits<sim::galactic::TypeId>::max()) break;
+        players.unplaced_types.emplace_back(name, ++highest);
+    }
+}
+
 core::Result<GalacticObjectQueryCatalog> make_galactic_object_query_catalog(
-    const units::UnitTables& tables, std::span<const std::pair<std::string, sim::galactic::TypeId>> bindings) {
+    const units::UnitTables& tables, std::span<const std::pair<std::string, sim::galactic::TypeId>> bindings,
+    std::span<const std::pair<std::string, sim::galactic::TypeId>> unplaced) {
     using Result = core::Result<GalacticObjectQueryCatalog>;
     GalacticObjectQueryCatalog result;
     for (const auto& entry : tables.categories)
@@ -192,6 +290,13 @@ core::Result<GalacticObjectQueryCatalog> make_galactic_object_query_catalog(
         if (loaded) { type.categories = loaded->category_bits; type.properties = loaded->property_bits; }
         else type.qualified = false;
         if (!result.types.emplace(id, std::move(type)).second)
+            return Result::failure(problem("object query requires distinct type identities"));
+    }
+    // A catalog type no object has: it names no category or property flags here and no actor carries its identity.
+    for (const auto& [name, id] : unplaced) {
+        if (!id || name.empty()) return Result::failure(problem("object query requires names and nonzero type identities"));
+        result.names.emplace(upper_text(name), id);
+        if (!result.types.emplace(id, GalacticObjectQueryType{id, name, 0, 0, false}).second)
             return Result::failure(problem("object query requires distinct type identities"));
     }
     return Result::success(std::move(result));
@@ -501,6 +606,8 @@ core::Result<auth::ScriptScheduler> GalacticObjectScripts::create_scheduler(auth
         if (auto added = manifest.add(path, bytes); !added)
             return core::Result<auth::ScriptScheduler>::failure(added.error());
     }
+    if (auto added = manifest.add(weighted_list_module, std::string(weighted_list_source)); !added)
+        return core::Result<auth::ScriptScheduler>::failure(added.error());
     return auth::ScriptScheduler::create(std::move(config), std::move(manifest));
 }
 
@@ -604,11 +711,27 @@ core::Result<void> register_galactic_object_bindings(auth::ScriptScheduler& sche
         error.code = std::string(auth::codes::missing_api);
         return Values::failure(std::move(error));
     }); !added) return added;
+    // The weighted list is Lua (weighted_list_source), run in every instance before its script.
+    const bool weighted_lists = scheduler.has_module(weighted_list_module);
+    if (weighted_lists) if (auto added = scheduler.register_prelude(weighted_list_module); !added) return added;
+    // Find_Player: the story host's lookup. "local" is the shared co-op player where one exists, else the solo reference human.
+    if (auto added = scheduler.register_binding("Find_Player", make_player_lookup(players, players.shared_local_player.has_value())); !added)
+        return added;
     std::map<std::string, sim::galactic::TypeId> names;
+    std::map<std::string, sim::galactic::PlanetId> planet_names;
+    for (const auto& [name, id] : players.planets) {
+        const auto [at, inserted] = planet_names.try_emplace(upper_text(name), id);
+        if (!inserted && id < at->second) at->second = id;
+    }
     std::map<sim::galactic::TypeId, std::string> type_names;
     for (const auto& [name, id] : players.types) {
         const auto [at, inserted] = names.try_emplace(lower(name), id);
         if (!inserted && id < at->second) at->second = id;
+        type_names.try_emplace(id, name);
+    }
+    // Retail resolves any defined type by name, also one nothing has built yet; such a type simply has no objects.
+    for (const auto& [name, id] : players.unplaced_types) {
+        names.try_emplace(lower(name), id);
         type_names.try_emplace(id, name);
     }
     if (auto added = scheduler.register_binding("Get_Game_Mode", [](auth::BindingContext&, const auth::ValueList&) {
@@ -623,6 +746,33 @@ core::Result<void> register_galactic_object_bindings(auth::ScriptScheduler& sche
             return Values::failure(problem("Game_Message requires exactly one text key"));
         context.report(auth::codes::unsupported_api, "Game_Message presentation is unavailable; object script continues");
         return Values::success({});
+    }); !added) return added;
+    // Find_First_Object: the story host's rule (register_galactic_first_object) over the world query: a planet of that name, else the
+    // lowest live identity of the type of that name. Both are candidates; the lowest identity wins.
+    if (auto added = scheduler.register_binding("Find_First_Object", [names, planet_names = std::move(planet_names)](
+            auth::BindingContext& context, const auth::ValueList& args) -> Values {
+        const auto* name = args.empty() ? nullptr : std::get_if<std::string>(&args[0].data);
+        if (!name) return Values::failure(problem("Find_First_Object requires a string first argument"));
+        const auto key = upper_text(*name);
+        std::optional<std::uint64_t> selected;
+        const auto consider = [&](std::uint64_t id) { if (id && (!selected || id < *selected)) selected = id; };
+        if (const auto planet = planet_names.find(key); planet != planet_names.end()) {
+            auto valid = context.query_immediate("galactic.object_valid",
+                {auth::Value{auth::Handle{script::foc::handle_game_object, planet->second}}});
+            if (!valid) return valid;
+            const auto* alive = valid.value().empty() ? nullptr : std::get_if<bool>(&valid.value().front().data);
+            if (alive && *alive) consider(planet->second);
+        }
+        if (const auto type = names.find(lower(*name)); type != names.end()) {
+            auto found = context.query_immediate("galactic.object_find_all",
+                {auth::Value{auth::Handle{script::foc::handle_type, type->second}}});
+            if (!found) return found;
+            const auto* rows = found.value().empty() ? nullptr : std::get_if<auth::ValueList>(&found.value().front().data);
+            if (rows) for (const auto& row : *rows)
+                if (const auto* handle = std::get_if<auth::Handle>(&row.data)) consider(handle->id);
+        }
+        if (!selected) return Values::success({});
+        return Values::success({auth::Value{auth::Handle{script::foc::handle_game_object, *selected}}});
     }); !added) return added;
     if (auto added = scheduler.register_binding("Find_Object_Type", [names = std::move(names)](
             auth::BindingContext&, const auth::ValueList& args) -> Values {
@@ -639,11 +789,13 @@ core::Result<void> register_galactic_object_bindings(auth::ScriptScheduler& sche
         const auto found = type_names.find(type->id);
         return found == type_names.end() ? Values::success({}) : Values::success({auth::Value::text(found->second)});
     }); !added) return added;
-    if (auto added = scheduler.register_method(script::foc::handle_type, "Is_Valid", [types = players.types](
+    if (auto added = scheduler.register_method(script::foc::handle_type, "Is_Valid", [types = players.types, unplaced = players.unplaced_types](
             auth::BindingContext&, const auth::ValueList& args) -> Values {
         const auto* type = args.size() == 1 ? std::get_if<auth::Handle>(&args[0].data) : nullptr;
-        const bool found = type && type->kind == script::foc::handle_type
-            && std::any_of(types.begin(), types.end(), [&](const auto& row) { return row.second == type->id; });
+        const auto has = [&](const auto& rows) {
+            return std::any_of(rows.begin(), rows.end(), [&](const auto& row) { return row.second == type->id; });
+        };
+        const bool found = type && type->kind == script::foc::handle_type && (has(types) || has(unplaced));
         return Values::success({auth::Value{found}});
     }); !added) return added;
     if (auto added = scheduler.register_method(script::foc::handle_type, "Get_Build_Cost", [costs = players.type_build_costs](
@@ -733,7 +885,8 @@ core::Result<void> register_galactic_object_bindings(auth::ScriptScheduler& sche
                 return Values::success({}); }); !added) return added;
     if (auto added = scheduler.register_binding("Script.Debug_Should_Issue_Event_Alert",
             [](auth::BindingContext&, const auth::ValueList&) { return Values::success({auth::Value{false}}); }); !added) return added;
-    std::vector<std::string_view> implemented{"Get_Game_Mode", "Find_Object_Type", "Find_All_Objects_Of_Type", "Spawn_Unit", "EvaluatePerception", "Game_Message",
+    std::vector<std::string_view> implemented{"Get_Game_Mode", "Find_Object_Type", "Find_All_Objects_Of_Type", "Find_Player", "Find_First_Object",
+        "WeightedTypeList.Create", "Spawn_Unit", "EvaluatePerception", "Game_Message",
         "_OuputDebug", "_ScriptMessage", "_CustomScriptMessage", "_MessagePopup", "DumpCallStack",
         "Script.Debug_Should_Issue_Event_Alert"};
     if (story_link) {
@@ -1196,42 +1349,9 @@ static core::Result<auth::ScriptScheduler> build_story_scheduler(const GalacticS
     // RGC-190..199: the weighted list and the two random calls. Everything else the stock and mod story starts need
     // that this host does not implement faults by name below.
     if (auto added = story_random::register_story_random(scheduler.value(), multiplayer); !added) return Result::failure(added.error());
-    // WST-91/92: prepare the full faction database once; the first matching player is the lowest player-table ID.
-    std::map<std::string, std::optional<sim::galactic::PlayerId>> factions;
-    for (const auto& name : players.factions) factions.try_emplace(lower(name), std::nullopt);
-    bool local_registered = false, shared_registered = false;
-    for (const auto& player : players.players) {
-        local_registered |= players.local_player && player.id == *players.local_player;
-        shared_registered |= players.shared_local_player && player.id == *players.shared_local_player;
-        const auto found = factions.find(lower(player.faction));
-        if (found != factions.end() && (!found->second || player.id < *found->second)) found->second = player.id;
-    }
-    // Project deviation from WST-91: a per-peer local player cannot enter the multiplayer lockstep simulation.
-    // The shared co-op faction is the one deterministic exception: every peer derives the same value.
-    const auto local = multiplayer ? (shared_registered ? players.shared_local_player : std::nullopt)
-                                   : (local_registered ? players.local_player : std::nullopt);
-    if (auto added = scheduler.value().register_binding("EAWR_Story_Player.Lookup", [factions = std::move(factions), local](
-            auth::BindingContext& context, const auth::ValueList& arguments) {
-        using Lookup = core::Result<auth::ValueList>;
-        const auto invalid = [&](std::string message) {
-            context.report(auth::codes::invalid_request, std::move(message));
-            context.request_exit();
-            return Lookup::success({});
-        };
-        // WST-90: string-only, exact arity; diagnostics stop this script even without a log sink.
-        if (arguments.size() != 1 || !std::holds_alternative<std::string>(arguments.front().data))
-            return invalid("Find_Player requires exactly one string argument");
-        const auto name = lower(std::get<std::string>(arguments.front().data));
-        auto player = local;
-        if (name != "local") {
-            const auto found = factions.find(name);
-            if (found == factions.end()) return invalid("Find_Player: unknown faction '" + std::get<std::string>(arguments.front().data) + "'");
-            player = found->second;
-        }
-        // WST-93: the sandbox interns each player's handle independently in each script's wrapper registry.
-        if (player) return Lookup::success({auth::Value{auth::Handle{script::foc::handle_player, *player}}});
-        return Lookup::success({});
-    }); !added) return Result::failure(added.error());
+    // WST-91/92/93 and the project deviation live in make_player_lookup, shared with the object-script host.
+    if (auto added = scheduler.value().register_binding("EAWR_Story_Player.Lookup", make_player_lookup(players, multiplayer)); !added)
+        return Result::failure(added.error());
     std::map<std::uint64_t, std::string> difficulties;
     for (const auto& player : players.players) {
         const auto level = lower(player.difficulty);

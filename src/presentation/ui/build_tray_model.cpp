@@ -49,6 +49,32 @@ void collect_categories(const TypeIndex& index, const std::string_view name, con
     append_unique(out, facts->categories);
 }
 
+ClassFacts find_class(const TypeIndex& index, const std::string_view name, const int depth) {
+    const auto* facts = index.find(name);
+    if (!facts) return {};
+    if (!facts->encyclopedia_class.empty()) return {facts->encyclopedia_class, facts->class_text};
+    if (depth >= kMemberDepth) return {};
+    for (const auto& member : facts->members)
+        if (auto found = find_class(index, member, depth + 1); !found.key.empty()) return found;
+    return {};
+}
+
+// GBT-05: the header of a class group. The mod's class text often reads "Class: Droid" (the card's line); the header
+// keeps what follows the first colon, language-independent punctuation, so no word of any language is known to the
+// code. A class whose text the mod lacks shows its key. Empty: the type has no class.
+std::string class_label(const ClassFacts& facts) {
+    if (facts.key.empty()) return {};
+    if (facts.text.empty()) return facts.key;
+    const auto colon = facts.text.find(':');
+    if (colon == std::string::npos) return facts.text;
+    auto rest = facts.text.substr(colon + 1);
+    const auto first = rest.find_first_not_of(' ');
+    if (first == std::string::npos) return facts.text;
+    rest.erase(0, first);
+    while (!rest.empty() && rest.back() == ' ') rest.pop_back();
+    return rest;
+}
+
 bool never_a_category(const std::string_view name) noexcept {
     return equal(name, "All") || equal(name, "None");
 }
@@ -113,6 +139,10 @@ std::vector<std::string> TypeIndex::categories_of(const std::string_view name) c
     return result;
 }
 
+ClassFacts TypeIndex::class_of(const std::string_view name) const {
+    return find_class(*this, name, 0);
+}
+
 std::optional<std::size_t> CategoryEnum::index_of(const std::string_view name) const noexcept {
     if (never_a_category(name)) return std::nullopt;
     for (std::size_t index = 0; index < names.size(); ++index) if (equal(names[index], name)) return index;
@@ -160,11 +190,17 @@ std::string handle_label(const std::string_view caption, const std::size_t omitt
 }
 
 std::vector<Group> classify(const std::span<const std::string> choice_types, const TypeIndex& types,
-    const CategoryEnum& categories, const GroupDefinition& definition) {
+    const CategoryEnum& categories, const GroupDefinition& definition,
+    const std::span<const std::pair<std::string, std::string>> category_headers) {
     struct Placed final {
         Group group;
         std::uint64_t order{};
-        std::vector<std::pair<std::size_t, std::optional<std::int64_t>>> entries;
+        struct Entry final {
+            std::size_t choice{};
+            std::optional<std::int64_t> sort_key;
+            std::string class_label; // the class group's header; empty: no class
+        };
+        std::vector<Entry> entries;
     };
     constexpr std::uint64_t step = 1'000'000;
     std::vector<Placed> units;
@@ -201,7 +237,7 @@ std::vector<Group> classify(const std::span<const std::string> choice_types, con
             std::uint64_t order = (categories.names.size() + 2) * step + sequence;
             if (extra.where == ExtraGroup::Where::start) order = sequence;
             else if (extra.where == ExtraGroup::Where::after) {
-                if (const auto at = categories.index_of(extra.after)) order = (*at + 1) * step + 1 + sequence;
+                if (const auto at = categories.index_of(extra.after)) order = (*at + 1) * step + step / 2 + sequence;
             }
             auto placed = make(GroupKind::extra, extra.name, order);
             if (placed.group.caption_key.empty()) placed.group.caption_key = extra.caption;
@@ -238,19 +274,76 @@ std::vector<Group> classify(const std::span<const std::string> choice_types, con
             else if (category) target = &category_group(*category);
             else target = &misc_group();
         }
-        target->entries.emplace_back(choice, sort_key);
+        target->entries.push_back({choice, sort_key, class_label(types.class_of(type))});
     }
+
+    // GBT-05 (legacy #8160): a category group whose choices carry more than one encyclopedia class splits into one group
+    // per class (classes that read the same are one), in the order each first appears in the choice list, headed by the class text; choices
+    // without a class stay in the category's own group after them. A group with one class, or none, stays whole.
+    std::vector<Placed> parts;
+    for (auto& placed : units) {
+        if (placed.group.kind != GroupKind::category) continue;
+        std::vector<std::string> classes;
+        for (const auto& entry : placed.entries) {
+            if (entry.class_label.empty()) continue;
+            if (std::none_of(classes.begin(), classes.end(), [&](const auto& label) { return equal(label, entry.class_label); }))
+                classes.push_back(entry.class_label);
+        }
+        if (classes.size() < 2) continue;
+        std::vector<Placed::Entry> rest;
+        std::vector<Placed> split(classes.size());
+        for (std::size_t index = 0; index < classes.size(); ++index) {
+            split[index].group.kind = GroupKind::category;
+            split[index].group.name = placed.group.name;
+            split[index].group.label = classes[index];
+            split[index].order = placed.order + 1 + index;
+        }
+        for (auto& entry : placed.entries) {
+            const auto at = std::find_if(classes.begin(), classes.end(),
+                [&](const auto& label) { return equal(label, entry.class_label); });
+            if (at == classes.end()) { rest.push_back(std::move(entry)); continue; }
+            auto& part = split[static_cast<std::size_t>(at - classes.begin())];
+            part.entries.push_back(std::move(entry));
+        }
+        placed.entries = std::move(rest);
+        placed.order += step / 4; // the choices without a class follow the classes
+        for (auto& part : split) parts.push_back(std::move(part));
+    }
+    for (auto& part : parts) units.push_back(std::move(part));
 
     std::vector<Group> result;
     const auto finish = [&](Placed& placed) {
         std::stable_sort(placed.entries.begin(), placed.entries.end(), [](const auto& left, const auto& right) {
-            if (left.second.has_value() != right.second.has_value()) return left.second.has_value();
-            return left.second && *left.second < *right.second;
+            if (left.sort_key.has_value() != right.sort_key.has_value()) return left.sort_key.has_value();
+            return left.sort_key && *left.sort_key < *right.sort_key;
         });
-        for (const auto& entry : placed.entries) placed.group.choices.push_back(entry.first);
+        for (const auto& entry : placed.entries) placed.group.choices.push_back(entry.choice);
         result.push_back(std::move(placed.group));
     };
     std::stable_sort(units.begin(), units.end(), [](const auto& left, const auto& right) { return left.order < right.order; });
+    // GBT-05: a class group and another category group whose headers read the same are one group, so no two identical headers
+    // sit in one tray. Only a class group triggers it: category groups without classes keep their own headers. The merged
+    // entries go back in choice list order (the sort keys then put the keyed ones first, as for any group).
+    const auto header_of = [&](const Placed& placed) {
+        if (!placed.group.label.empty()) return placed.group.label;
+        for (const auto& [name, text] : category_headers) if (equal(name, placed.group.name)) return text;
+        return derived_caption(placed.group.name);
+    };
+    for (std::size_t later = 1; later < units.size(); ++later) {
+        auto& current = units[later];
+        if (current.group.kind != GroupKind::category || current.entries.empty()) continue;
+        for (std::size_t earlier = 0; earlier < later; ++earlier) {
+            auto& target = units[earlier];
+            if (target.group.kind != GroupKind::category || target.entries.empty()) continue;
+            if (target.group.label.empty() && current.group.label.empty()) continue;
+            if (!equal(header_of(target), header_of(current))) continue;
+            for (auto& entry : current.entries) target.entries.push_back(std::move(entry));
+            current.entries.clear();
+            std::stable_sort(target.entries.begin(), target.entries.end(),
+                [](const auto& left, const auto& right) { return left.choice < right.choice; });
+            break;
+        }
+    }
     for (auto& placed : units) if (!placed.entries.empty()) finish(placed);
     if (misc && !misc->entries.empty()) finish(*misc);
     if (buildings && !buildings->entries.empty()) finish(*buildings);
@@ -312,13 +405,34 @@ void place_groups(const std::vector<Group>& all, const std::vector<std::size_t>&
     }
 }
 
-float height_of(const Metrics& metrics, const std::size_t rows) noexcept {
-    if (rows == 0) return 0.0F;
-    return 2.0F * metrics.padding + metrics.top_reserve + static_cast<float>(rows) * metrics.row_height()
-        + static_cast<float>(rows - 1) * metrics.row_gap;
+float height_of(const Metrics& metrics, const std::vector<Row>& rows) noexcept {
+    if (rows.empty()) return 0.0F;
+    const float category_gap = category_gap_of(metrics, rows);
+    std::size_t headed{};
+    for (std::size_t index = 1; index < rows.size(); ++index) headed += has_header(rows[index]);
+    return 2.0F * metrics.padding + metrics.top_reserve + static_cast<float>(rows.size()) * metrics.row_height()
+        + static_cast<float>(rows.size() - 1) * metrics.row_gap + static_cast<float>(headed) * category_gap;
 }
 
 } // namespace
+
+bool has_header(const Row& row) noexcept {
+    return std::any_of(row.runs.begin(), row.runs.end(), [](const Run& run) { return run.header; });
+}
+
+float category_gap_of(const Metrics& metrics, const std::vector<Row>& rows) noexcept {
+    std::size_t headed{};
+    for (std::size_t index = 1; index < rows.size(); ++index) headed += has_header(rows[index]);
+    return headed == 0 ? 0.0F : std::max(0.0F, metrics.category_gap);
+}
+
+float header_lift_of(const Metrics& metrics, const float category_gap, const bool first_row) noexcept {
+    // The first row's label may rise into the strip kept for the close icon, but never past the row gap that separates that
+    // icon's band from the row (the reserve puts the first row one row gap under the icon): never onto the close icon (GBT-07).
+    const float room = first_row ? (metrics.top_reserve > 0.0F ? metrics.row_gap : metrics.padding)
+                                 : metrics.row_gap + category_gap;
+    return std::max(0.0F, std::min(metrics.header_lift, room));
+}
 
 Packed pack(std::vector<Group> groups, const Metrics& metrics, const PackOptions& options) {
     Packed packed;
@@ -422,7 +536,7 @@ Packed pack(std::vector<Group> groups, const Metrics& metrics, const PackOptions
         }
     }
     packed.building_rows = building_count;
-    packed.height = height_of(metrics, packed.rows.size());
+    packed.height = height_of(metrics, packed.rows);
     return packed;
 }
 

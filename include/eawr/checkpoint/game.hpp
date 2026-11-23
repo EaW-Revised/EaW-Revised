@@ -31,7 +31,8 @@ namespace eawr::checkpoint {
 // production state and the owner barrier carry one table index per planet (docs/checkpoint-format.md, Offer pool).
 // v57: optional galactic object-script scheduler.
 // v60: authored credit-siphon profiles and their live enabled/cancelled service state.
-inline constexpr std::uint16_t galaxy_section_version = 60;
+// v61: the credit-siphon profile stores its authored respawn-time endpoints.
+inline constexpr std::uint16_t galaxy_section_version = 61;
 inline constexpr std::uint16_t mod_list_section_version = 1;
 
 // Transport starts a fresh epoch at completed_tick. Both cursors denote the first

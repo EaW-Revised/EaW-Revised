@@ -63,6 +63,18 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
     if(NOT eawr_protobuf_source_POPULATED)
         FetchContent_Populate(eawr_protobuf_source)
     endif()
+    # Protobuf forces MultiThreaded<Debug> for a static runtime whatever the caller passes. Let the caller's runtime
+    # (EAWR_PROTOBUF_MSVC_RUNTIME, passed below) decide, so EAWR_DEBUG_CRT=OFF links no Debug CRT.
+    file(READ "${eawr_protobuf_source_SOURCE_DIR}/CMakeLists.txt" _eawr_pb_cmake)
+    set(_eawr_pb_forced "set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded$<$<CONFIG:Debug>:Debug>)")
+    string(FIND "${_eawr_pb_cmake}" "${_eawr_pb_forced}" _eawr_pb_at)
+    if(NOT _eawr_pb_at EQUAL -1)
+        string(REPLACE "${_eawr_pb_forced}"
+            "if(EAWR_PROTOBUF_MSVC_RUNTIME)\n        set(CMAKE_MSVC_RUNTIME_LIBRARY \"\${EAWR_PROTOBUF_MSVC_RUNTIME}\")\n    else()\n        ${_eawr_pb_forced}\n    endif()"
+            _eawr_pb_cmake "${_eawr_pb_cmake}")
+        file(WRITE "${eawr_protobuf_source_SOURCE_DIR}/CMakeLists.txt" "${_eawr_pb_cmake}")
+    endif()
+    unset(_eawr_pb_cmake)
 
     # Source pin changes must invalidate external-project stamps and installed
     # binaries, including reused offload trees. FetchContent replaces sources
@@ -102,7 +114,9 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
         # GNS 1.6 uses CMake's runtime selection, replacing MSVC_CRT_STATIC.
         # Pass it explicitly because the separately configured viewer uses MT.
         if(_eawr_gns_static_crt)
-            set(_eawr_gns_runtime "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+            # The runtime follows EAWR_DEBUG_CRT; the protobuf "d" library suffix below follows the build type.
+            include("${CMAKE_CURRENT_LIST_DIR}/EawrMsvcRuntime.cmake")
+            set(_eawr_gns_runtime "${EAWR_MSVC_RUNTIME}")
         else()
             set(_eawr_gns_runtime "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
         endif()
@@ -130,6 +144,7 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
             -Dprotobuf_BUILD_SHARED_LIBS:BOOL=OFF
             -Dprotobuf_WITH_ZLIB:BOOL=OFF
             "-Dprotobuf_MSVC_STATIC_RUNTIME:BOOL=${_eawr_gns_static_crt}"
+            "-DEAWR_PROTOBUF_MSVC_RUNTIME:STRING=${_eawr_gns_runtime}"
         BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config ${_eawr_gns_config} --parallel 2
         INSTALL_COMMAND "${CMAKE_COMMAND}" --install <BINARY_DIR> --config ${_eawr_gns_config}
         BUILD_BYPRODUCTS "${_eawr_gns_protobuf_lib}" "${_eawr_gns_protoc}"
@@ -150,6 +165,12 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
         set(_eawr_host_protoc_args "-DGNS_HOST_PROTOC:FILEPATH=${_eawr_host_protoc}")
         set(_eawr_host_protoc_dep eawr_gns_host_protoc)
     endif()
+    # GNS insists on exactly one of NDEBUG/_DEBUG on MSVC. _DEBUG would pull the Debug CRT in through the STL/CRT headers (RuntimeLibrary pragma), so without the Debug CRT its Debug flags carry NDEBUG (third-party asserts only).
+    set(_eawr_gns_debug_flags)
+    if(WIN32 AND NOT EAWR_DEBUG_CRT)
+        set(_eawr_gns_debug_flags "-DCMAKE_C_FLAGS_DEBUG:STRING=/Zi /Ob0 /Od /DNDEBUG /D_ITERATOR_DEBUG_LEVEL=0"
+            "-DCMAKE_CXX_FLAGS_DEBUG:STRING=/Zi /Ob0 /Od /DNDEBUG /D_ITERATOR_DEBUG_LEVEL=0")
+    endif()
     ExternalProject_Add(eawr_gns_build
         SOURCE_DIR "${eawr_gns_source_SOURCE_DIR}"
         BINARY_DIR "${_eawr_gns_prefix}/gns-build"
@@ -165,6 +186,7 @@ elseif(EAWR_GNS_PROVIDER STREQUAL "FETCH")
             -DBUILD_EXAMPLES:BOOL=OFF -DBUILD_TESTS:BOOL=OFF -DBUILD_TOOLS:BOOL=OFF
             -DENABLE_ICE:BOOL=ON -DUSE_STEAMWEBRTC:BOOL=OFF -DLTO:BOOL=OFF
             -DProtobuf_USE_STATIC_LIBS:BOOL=ON
+            ${_eawr_gns_debug_flags}
         BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config ${_eawr_gns_config} --parallel 2
         INSTALL_COMMAND "${CMAKE_COMMAND}" --install <BINARY_DIR> --config ${_eawr_gns_config}
         BUILD_BYPRODUCTS "${_eawr_gns_library}"

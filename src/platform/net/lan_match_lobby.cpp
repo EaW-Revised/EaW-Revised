@@ -179,19 +179,34 @@ bool TcpLanMatch::set_galactic_game(net::GalacticLobbyOptions options) {
         return true;
     }
 
-bool TcpLanMatch::lobby_galactic_game(const net::GalacticLobbyOptions& options) {
+bool TcpLanMatch::lobby_galactic_game(const net::GalacticLobbyOptions& requested) {
         if (!lobby_mutable() || !view().host || !galactic_room() || !galactic_) return false;
-        auto encoded = net::encode_galactic_lobby_game(options);
-        if (!encoded) return lobby_feedback(core::Result<void>::failure(encoded.error()));
+        auto options = requested;
         auto assignments = lobby_->snapshot().seats;
         const auto previous = net::decode_galactic_lobby_game(lobby_->snapshot().game);
         const bool changing_campaign = previous && previous.value().campaign != options.campaign;
-        const auto first_human = std::find_if(options.rows.begin(), options.rows.end(), [](const auto& row) { return row.human; });
+        if (changing_campaign) {
+            // D8 (#8071): a newly chosen campaign has other factions. The host takes the first planned row; every guest keeps a row of its
+            // own, claiming the next playable AI faction (the room plans it) while the human rows allow, and shares the emptiest planned
+            // row (a co-op seat) only when no row is left or the campaign is a co-op one.
+            const sim::galactic::MpLobbyCampaign* campaign = nullptr;
+            for (const auto& candidate : galactic_->campaigns()) if (candidate.name == options.campaign) campaign = &candidate;
+            if (campaign == nullptr)
+                return lobby_feedback(lobby_fail<void>(net::LobbyReason::invalid_choice, "This room does not list that campaign."));
+            // The seats of the room cannot change while guests are connected: a campaign with fewer playable factions than the room has
+            // seats could never start.
+            if (const auto refusal = net::galactic_lobby_switch_refusal(*campaign, lobby_->snapshot()))
+                return lobby_feedback(lobby_fail<void>(net::LobbyReason::invalid_choice, *refusal));
+            auto reseated = net::galactic_lobby_reseat(options, *campaign, lobby_->snapshot(), galactic_->dialog_rows());
+            if (!reseated)
+                return lobby_feedback(lobby_fail<void>(net::LobbyReason::invalid_choice, "The campaign has no row left for every player."));
+            options = std::move(reseated->options);
+            for (std::size_t index = 0; index < assignments.size() && index < reseated->slots.size(); ++index)
+                assignments[index].selection.slot = reseated->slots[index];
+        }
+        auto encoded = net::encode_galactic_lobby_game(options);
+        if (!encoded) return lobby_feedback(core::Result<void>::failure(encoded.error()));
         for (auto& seat : assignments) {
-            // A newly chosen campaign can have different playable factions. Move seats whose
-            // previous row is unavailable to its first human row in the same room revision.
-            if (changing_campaign && !net::galactic_lobby_side(options, seat.selection.slot) && first_human != options.rows.end())
-                seat.selection.slot = first_human->player;
             const auto side = net::galactic_lobby_side(options, seat.selection.slot);
             const auto row = std::find_if(options.rows.begin(), options.rows.end(), [&](const auto& value) { return value.player == seat.selection.slot; });
             // A row holding a human keeps its control; the host removes a guest with the kick action.
@@ -202,7 +217,7 @@ bool TcpLanMatch::lobby_galactic_game(const net::GalacticLobbyOptions& options) 
         // Validate the whole proposed revision against the installed campaign catalog.
         auto proposed = lobby_->snapshot();
         proposed.game = encoded.value(); proposed.seats = assignments;
-        if (auto valid = net::validate_galactic_lobby(proposed, false, galactic_->campaigns()); !valid)
+        if (auto valid = net::validate_galactic_lobby(proposed, false, galactic_->campaigns(), galactic_->dialog_rows()); !valid)
             return lobby_feedback(std::move(valid));
         return lobby_feedback(lobby_->configure_game(std::move(encoded).value(), std::move(assignments), lobby_->snapshot().revision));
     }
@@ -576,11 +591,16 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
             return changed;
         };
         hooks.validate = [this](const net::LobbySnapshot& state, bool starting) { return validate_lobby(state, starting); };
-        // #6134: a guest who picks a free playable faction takes its row with it (two human sides at most). Not while a saved game
-        // is selected: that room's rows belong to the save.
+        // #6134, D8 (#8071): a guest who picks a free playable faction (or is seated on one when it joins) takes its row with it, up
+        // to the human side ceiling. A seat that leaves gives its row back to the AI when nobody else holds it. Not while a saved
+        // game is selected: that room's rows belong to the save.
         hooks.follow_choice = [this](const net::LobbySnapshot& before, net::LobbySnapshot& candidate, net::PeerIndex peer) {
             if (!galactic_ || galactic_->checkpoint_view()) return core::Result<void>::success();
-            return net::follow_galactic_choice(before, candidate, peer, galactic_->campaigns());
+            return net::follow_galactic_choice(before, candidate, peer, galactic_->campaigns(), galactic_->dialog_rows());
+        };
+        hooks.follow_departure = [this](const net::LobbySnapshot& before, net::LobbySnapshot& after, net::PeerIndex peer) {
+            if (!galactic_ || galactic_->checkpoint_view()) return;
+            net::follow_galactic_departure(before, after, peer, galactic_->campaigns());
         };
         hooks.offer = [this](const net::LobbySnapshot& state, const std::vector<net::SetupSeat>& seats) -> core::Result<net::SetupOffer> {
             if (net::lobby_game_mode(state.game) == net::LobbyGameMode::galactic) {
@@ -1060,22 +1080,36 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
                     closing_peers_.insert(peer); continue;
                 }
                 if (galactic_options) {
-                    // GC: a new peer joins the human row with the fewest seats (ties to the lowest faction); it edits its own pick after.
+                    // An earlier newcomer of this pass may have claimed a row: read the rows as the room holds them now.
+                    if (auto current = net::decode_galactic_lobby_game(lobby_->snapshot().game)) galactic_options = std::move(current).value();
+                    // GC (D8): a new peer is seated on a planned row nobody holds, else it claims the first playable row that is still an
+                    // AI faction (the room plans it with the seat), else it joins the planned row with the fewest seats (a co-op seat; a
+                    // saved game's rows belong to the save, so there it never claims). It edits its own pick after.
                     const net::GalacticLobbyRow* best = nullptr;
-                    std::ptrdiff_t best_count = 0;
-                    for (const auto& candidate : galactic_options->rows) {
-                        if (!candidate.human) continue;
-                        const auto count = std::count_if(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(),
-                            [&](const auto& seat) { return seat.selection.slot == candidate.player; });
-                        if (!best || count < best_count) { best = &candidate; best_count = count; }
+                    const sim::galactic::MpLobbyCampaign* campaign = nullptr;
+                    if (galactic_ && !galactic_->checkpoint_view())
+                        for (const auto& candidate : galactic_->campaigns())
+                            if (candidate.name == galactic_options->campaign) campaign = &candidate;
+                    if (campaign) {
+                        const auto row = net::galactic_lobby_newcomer_row(*galactic_options, *campaign, lobby_->snapshot(), galactic_->dialog_rows());
+                        if (row) for (const auto& candidate : galactic_options->rows) if (candidate.player == *row) best = &candidate;
+                    } else {
+                        std::ptrdiff_t best_count = 0;
+                        for (const auto& candidate : galactic_options->rows) {
+                            if (!candidate.human) continue;
+                            const auto count = std::count_if(lobby_->snapshot().seats.begin(), lobby_->snapshot().seats.end(),
+                                [&](const auto& seat) { return seat.selection.slot == candidate.player; });
+                            if (!best || count < best_count) { best = &candidate; best_count = count; }
+                        }
                     }
+                    // A row that is still an AI faction has no side yet: the room plans it when the seat is admitted.
                     const auto side = best ? net::galactic_lobby_side(*galactic_options, best->player) : std::nullopt;
-                    if (!best || !side) {
+                    if (!best) {
                         if (online_options_) { set_failure(diagnostic("EAWR-NET-1535", "Online staging has no player faction for this seat.")); return; }
                         continue;
                     }
                     auto admitted = lobby_->admit(peer, admission_identity(peer, edge),
-                        {lan_admission_name(lobby_->snapshot(), peer), best->faction, 0, *side, best->player}, best->player, lobby_->snapshot().revision);
+                        {lan_admission_name(lobby_->snapshot(), peer), best->faction, 0, side ? *side : 0U, best->player}, best->player, lobby_->snapshot().revision);
                     if (!admitted) {
                         const auto reason = lan_lobby_reason(admitted.error());
                         auto rejected = net::encode_lobby_frame(net::LobbyRejected{{lobby_->snapshot().room, lobby_->snapshot().revision, reason, admitted.error().message}});

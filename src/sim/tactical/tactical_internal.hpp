@@ -66,7 +66,12 @@ inline constexpr std::uint8_t opcode_script_create_object = 39; // SSU-03, coord
 inline constexpr std::uint8_t opcode_script_teleport = 41; // Lua Teleport_And_Face: target unit
 inline constexpr std::uint8_t opcode_script_hold_fire = 42; // Lua Prevent_All_Fire: enabled flag and zero reserved word
 inline constexpr std::uint8_t opcode_script_change_owner = 43; // Lua Change_Owner: new owner and zero reserved word
-inline constexpr std::uint8_t max_command_opcode = opcode_script_change_owner;
+inline constexpr std::uint8_t opcode_script_teleport_position = 44; // Lua Teleport(position): world point
+inline constexpr std::uint8_t opcode_script_hide = 45; // Lua Hide: flag and zero reserved word
+inline constexpr std::uint8_t opcode_script_cancel_hyperspace = 46; // Lua Cancel_Hyperspace: two zero reserved words
+inline constexpr std::uint8_t opcode_script_hyperspace_in = 47; // Lua Cinematic_Hyperspace_In: frames and zero reserved word
+inline constexpr std::uint8_t opcode_script_selectable = 48; // Lua Set_Selectable: flag and zero reserved word
+inline constexpr std::uint8_t max_command_opcode = opcode_script_selectable;
 
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,

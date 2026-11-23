@@ -45,6 +45,8 @@ public:
         viewer_ = viewer;
         visible_.clear();
         alive_.clear();
+        script_hidden_.clear();
+        script_unselectable_.clear();
         revealers_.clear();
         teams_.clear();
         observer_team_.reset();
@@ -66,6 +68,8 @@ public:
         for (const auto& instance : snapshot_->instances()) {
             ++work_.instance_rows;
             alive_.push_back(instance.entity_id);
+            if (instance.script_hidden) script_hidden_.push_back(instance.entity_id);
+            if (instance.script_unselectable) script_unselectable_.push_back(instance.entity_id);
             // WST-13 (WSU-03): a stealth-invisible enemy is out of the viewer's sight for draw, fade,
             // selection, minimap and economy alike; the owner and allies keep seeing it.
             const bool stealth_hidden = instance.stealth_invisible
@@ -83,6 +87,16 @@ public:
     }
     [[nodiscard]] const std::vector<sim::EntityId>& visible() const noexcept { return visible_; }
     [[nodiscard]] const std::vector<sim::EntityId>& alive() const noexcept { return alive_; }
+    // TL-14/TL-15: the units whose Lua Hide / Set_Selectable(false) flags are set, ascending.
+    [[nodiscard]] const std::vector<sim::EntityId>& script_hidden() const noexcept { return script_hidden_; }
+    [[nodiscard]] const std::vector<sim::EntityId>& script_unselectable() const noexcept { return script_unselectable_; }
+    [[nodiscard]] bool script_unselectable_contains(const sim::EntityId entity) const noexcept {
+        return !script_unselectable_.empty()
+            && std::binary_search(script_unselectable_.begin(), script_unselectable_.end(), entity);
+    }
+    [[nodiscard]] bool is_script_hidden(const sim::EntityId entity) const noexcept {
+        return !script_hidden_.empty() && std::binary_search(script_hidden_.begin(), script_hidden_.end(), entity);
+    }
     [[nodiscard]] const std::vector<FogFieldRevealer>& revealers() const noexcept { return revealers_; }
     [[nodiscard]] const Work& work() const noexcept { return work_; }
 
@@ -116,6 +130,8 @@ private:
     sim::tactical::PlayerId viewer_{};
     std::vector<sim::EntityId> visible_;
     std::vector<sim::EntityId> alive_;
+    std::vector<sim::EntityId> script_hidden_;
+    std::vector<sim::EntityId> script_unselectable_;
     std::vector<FogFieldRevealer> revealers_;
     Work work_;
     std::optional<sim::tactical::TeamId> observer_team_;

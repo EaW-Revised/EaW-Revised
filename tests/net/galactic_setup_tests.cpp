@@ -628,7 +628,18 @@ void roster_refusals() {
         return static_cast<bool>(net::encode_galactic_setup(payload));
     };
     expect(accepted([](auto&) {}), "the unchanged payload is accepted");
-    expect(!accepted([](auto& p) { p.roster.seats.push_back(mk_human(103, 3, 3, 2)); }), "a third human side is refused");
+    // A third human side (#8071): the AI seat on faction 3 becomes a human seat of its own side, which needs its lead entry.
+    const auto third_side = [](net::GalacticSetupPayload& p) {
+        p.roster.seats[2] = mk_human(3, 3, 3, 2);
+        p.roster.players[2].ai_configuration.clear();
+    };
+    expect(accepted([&](auto& p) { third_side(p); p.roster.teams.push_back({3, sim::SeatId{3}, false}); }),
+        "a third human side with its lead entry is accepted");
+    auto without_lead = require(net::decode_galactic_setup(base.setup));
+    third_side(without_lead);
+    const auto no_lead = gc::validate_mp_roster(without_lead.roster);
+    expect(!no_lead && no_lead.error().message.find("every human side needs exactly one lead entry") != std::string::npos,
+        "a third human side without a lead entry is refused for the missing lead");
     expect(!accepted([](auto& p) { p.roster.seats[1].human_side_id = 1; }), "one side may not hold two factions");
     expect(!accepted([](auto& p) { p.roster.seats[2].seat_id = p.roster.seats[0].seat_id; }), "duplicate seat IDs are refused");
     expect(!accepted([](auto& p) { std::swap(p.roster.seats[0], p.roster.seats[1]); }), "seat IDs must ascend");

@@ -1,6 +1,6 @@
 # CI on GitHub-hosted runners only. Every action is GitHub-owned and pinned by commit SHA; the token is
 # read-only and no job uses a secret. Tests that need the game data report "skipped" here, and the
-# graphical viewer tests (they need a GPU) are not run: the viewer extension is built, not exercised.
+# graphical viewer tests (they need a GPU) are not run: the Linux viewer extension is built, not exercised.
 name: CI
 
 on:
@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   GODOT_CPP_TAG: 10.0.0-stable
@@ -80,10 +80,7 @@ jobs:
           - { name: linux-x64-gcc, preset: linux-x64-gcc, os: ubuntu-latest, experimental: false }
           - { name: linux-x64-clang, preset: linux-x64-clang, os: ubuntu-latest, experimental: false }
           - { name: linux-arm64-gcc, preset: linux-arm64-gcc, os: ubuntu-24.04-arm, experimental: false }
-          # The Windows presets require the VS 2022 toolchain on this image.
-          - { name: windows-msvc, preset: windows-msvc, os: windows-2022, experimental: false }
-          - { name: windows-clang, preset: windows-clang, os: windows-2022, experimental: false }
-          # No macOS preset or platform layer exists yet; this job reports how far a plain build gets.
+          # No macOS preset exists yet; this job reports how far a plain build gets.
           - { name: macos-clang (experimental), preset: "", os: macos-latest, experimental: true }
     steps:
       - name: Check out source
@@ -106,7 +103,7 @@ jobs:
 
       - name: Install the macOS toolchain
         if: ${{ runner.os == 'macOS' }}
-        run: brew install ninja
+        run: brew install ninja llvm
 
       - name: Install the Python test dependencies
         run: python -m pip install -r requirements-dev.txt
@@ -136,10 +133,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          llvm="$(brew --prefix llvm)"
           cmake -S . -B out/build/macos -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
-            -DEAWR_WARNINGS_AS_ERRORS=ON -DEAWR_ENABLE_SIM_BOUNDARY_CHECK=ON
+            -DCMAKE_CXX_COMPILER="$llvm/bin/clang++" \
+            -DCMAKE_CXX_FLAGS="-fexperimental-library -nostdinc++ -isystem $llvm/include/c++/v1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-L$llvm/lib/c++ -Wl,-rpath,$llvm/lib/c++" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DEAWR_WARNINGS_AS_ERRORS=ON -DEAWR_ENABLE_SIM_BOUNDARY_CHECK=ON
           cmake --build out/build/macos
           ctest --test-dir out/build/macos --output-on-failure -LE "game-data|installed-required"
+
+  windows-clang:
+    name: windows-clang
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Configure and build focused contracts
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          cmake --preset windows-clang-ninja -DCMAKE_LINKER=lld-link
+          if errorlevel 1 exit /b 1
+          findstr /i /b /c:"CMAKE_LINKER:FILEPATH=" out\build\windows-clang-ninja\CMakeCache.txt | findstr /i /c:"lld-link"
+          if errorlevel 1 exit /b 1
+          cmake --build --preset windows-clang-ninja --target tests core_perf_diag_tests core_flat_id_map_tests
+          if errorlevel 1 exit /b 1
+          ctest --preset windows-clang-ninja -R "^(core_contracts|core_perf_diag_contracts|core_flat_id_map_contracts)$" --no-tests=error
 
   viewer:
     name: viewer-${{ matrix.platform }}
@@ -150,7 +173,6 @@ jobs:
       matrix:
         include:
           - { platform: linux-x64, os: ubuntu-latest }
-          - { platform: windows-x64, os: windows-2022 }
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -185,12 +207,6 @@ jobs:
         run: |
           cmake -S apps/viewer -B out/build/viewer -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14
           cmake --build out/build/viewer --target eawr_viewer
-
-      - name: Build the viewer extension (Windows)
-        if: ${{ runner.os == 'Windows' }}
-        run: |
-          cmake -S apps/viewer -B out/build/viewer -G "Visual Studio 17 2022" -A x64
-          cmake --build out/build/viewer --config Release --target eawr_viewer
 
       - name: The extension is where the Godot project loads it
         shell: bash

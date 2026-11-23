@@ -173,7 +173,9 @@ void PauseBannerWidget::service(GalacticMode::State& state) {
     if (!state.hud || !state.filesystem || !state.hud_fonts || !state.galaxy) return;
     if (!overlay_ && !tried_) build(state);
     if (!overlay_) return;
-    const bool shown = state.paused && !state.tactical && !state.loading;
+    const auto depth = state.displayed_snapshot ? state.displayed_snapshot->clock().pause_depth : 0U;
+    const bool player_paused = depth > (state.published_system_hold ? 1U : 0U);
+    const bool shown = player_paused && !state.tactical && !state.loading;
     overlay_->show_paused(shown);
     overlay_->set_resume_enabled(state.clock_controls_enabled);
     auto lines = countdown_lines(state);

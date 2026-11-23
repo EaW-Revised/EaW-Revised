@@ -61,6 +61,8 @@ destinations inside occupied space.
 - Inputs: the move (opcode 2), face (opcode 5, the Lua `Turn_To_Face`) and stop (opcode 1)
   orders of the unit's owner; attack, attack-move and guard orders plan through
   [space orders](space-orders.md) (attack approach, attack-move and guard). A move naming two or more tracked ships is a group move (FM-01).
+  The Lua host resolves an object or position to its current point when issuing `Turn_To_Face`, then stages the
+  existing face command through the ordered replay queue. It returns no value; completion-blocking status is not hosted.
 - Outputs: each unit's position and rotation per completed tick, in the state and the
   snapshot transform.
 - Cadence: every tick, before the tick's commands, each unit that follows a plan moves to
@@ -694,10 +696,10 @@ the ships of their layer that planned before them.
   `WaitOperatorSpeedCoefficient` (0.2): 82.94 for the corvette, 185.33 for the Nebulon-B.
 - **FM-05** (research E344-05, E344-06, E344-08) The first ship of a layer goes one occupation
   radius from the target along its direction (to the target itself when the layer has one ship).
-  Each later ship takes the first free point on the ray from the target along its direction,
-  trying the target and then a point every max(50, radius / 4) units outward, 30 points at most.
+  Each later ship takes the first free point on the ray from the shifted anchor (FM-05a) along its
+  direction, trying the anchor and then a point every max(50, radius / 4) units outward, 30 points at most.
   A point is free when a square of half size the ship's radius, held there from the order's
-  frame to the end of the tracking horizon, hits no tracked ship of its layer outside the group
+  frame to frame 2^32, hits no tracked ship of its layer outside the group
   and no static object, and when no slot already mapped in the layer lies closer than the two
   ships' radii (3D). When no point is free the ship takes the nearest open position to the
   anchor (FM-05a). The slot has the target's height; the path keeps the ship's
@@ -720,7 +722,12 @@ the ships of their layer that planned before them.
   the largest of all its ships, across layers.
 - **FM-07** (research E344-04) Within a layer the ships plan front first: in descending order of
   their offset from the layer's centroid projected on the direction from the centroid to the
-  target; ties keep the mapping order of FM-03.
+  shifted anchor (FM-05a); ties keep the mapping order of FM-03. Verified (debug build): FoC
+  orders by this direction too, after the whole layer is mapped. Its reference point is the
+  group's target plus the first ship's fallback displacement of FM-05a (the shifted anchor), so it
+  is the raw target whenever the first ship's point was free, and never the target pushed out by
+  a ship radius. The direction is taken in 3D, normalised, then projected to the XY plane for the
+  dot product. Not verified: how FoC breaks exact ties (its sort is not documented as stable).
 - **FM-08** (research E344-04, E344-10; data `SpacePathfindFrameDelayDelta` 2) The k-th ship of a
   layer plans 2k frames after the order's first frame (MV-02): the front ship of every layer at
   once, the next 2 frames later, and so on; each layer starts again at 0.

@@ -3,6 +3,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "eawr/diagnostics/gc_memory.hpp"
 #include "eawr/vfs/vfs.hpp"
+#include "eawr/campaign/planet_economy.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/campaign/shared_unit_tables.hpp"
 #include "eawr/campaign/space_entry.hpp"
@@ -1024,7 +1025,9 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     if (auto installed = game.install_story(std::move(story_config), std::move(plots.value().plots),
         std::move(plots.value().subplots), std::move(plots.value().notes)); !installed) return installed;
     // #683 part 2: the galaxy-changing rewards of those plots (WST-40/41/64) and their journal replayer.
-    if (auto bound = bind_story_rewards(game, plan, data); !bound) return bound;
+    auto market_names = load_black_market_item_names(filesystem);
+    if (!market_names) return core::Result<void>::failure(market_names.error());
+    if (auto bound = bind_story_rewards(game, plan, data, std::move(market_names).value()); !bound) return bound;
     detail.emplace("prep.ai_usability.conflict_setup.auto_resolver");
     const auto& census = game.galaxy().setup().census;
     std::pair<GameSession::AutoResolveStateWriter, GameSession::AutoResolveStateReader> checkpoint;
@@ -1032,6 +1035,7 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     if (!adapters) return core::Result<void>::failure(adapters.error());
     detail.emplace("prep.ai_usability.conflict_setup.space_services");
     GameSession::ConflictLayerServices layer;
+    if (content && !space) layer.script_requirement = ScriptRequirement::none;
     if (!content || space) {
         if (!space) {
             auto prepared = prepare_stock_space_entry(filesystem, catalog, data, types, plan);
@@ -1063,6 +1067,10 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     game.set_auto_resolve_progress_reader(std::move(adapters.value().progress));
     game.set_auto_resolve_withdrawal(std::move(adapters.value().withdraw));
     game.set_auto_resolver(std::move(adapters.value().resolve));
+    // #8171: a multiplayer game falls back to this resolver on every peer when a battle cannot be entered; it is a required
+    // piece of its setup.
+    if (game.galaxy().multiplayer() && !game.has_auto_resolver())
+        return fail<void>("a multiplayer game needs an auto-resolver to settle a battle that cannot be entered");
     game.set_auto_resolve_checkpoint_services(std::move(checkpoint.first), std::move(checkpoint.second));
     game.set_auto_resolve_outcome_services(std::move(adapters.value().outcomes));
     layer.admission = std::move(adapters.value().admission);

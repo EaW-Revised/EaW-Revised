@@ -62,6 +62,9 @@ core::Result<galactic::GalacticSetup> build_synthetic_campaign(const SyntheticCa
     put_u32(definition, options.members_per_fleet);
     definition.push_back(options.debug_commands ? 1U : 0U);
     definition.push_back(options.coop_seat ? 1U : 0U);
+    // Appended only when it is not the default of two sides, so every existing synthetic campaign identity and
+    // corpus entry stays byte-identical.
+    if (options.human_sides != 2) put_u32(definition, options.human_sides);
     put_u64(definition, campaign.fiscal_cycle_seconds ? static_cast<std::uint64_t>(campaign.fiscal_cycle_seconds->raw()) : 0U);
     definition.push_back(campaign.fiscal_cycle_seconds ? 1U : 0U);
     setup.campaign_identity = core::sha256(definition);

@@ -400,6 +400,8 @@ private:
     std::map<sim::EntityId, particles::EffectHandle> energy_owner_effects_;
     std::map<std::uint64_t, sim::tactical::TypeId> spawned_projectile_types_;
     std::map<sim::tactical::TypeId, std::string> weaken_particles_;
+    // Projectile_Combat_Mod_Effect by the projectile type key (its name CRC): the status particle attached to a recipient.
+    std::map<std::uint32_t, std::string> combat_mod_particles_;
     std::map<std::pair<std::uint64_t, sim::EntityId>, particles::EffectHandle> weaken_effects_;
     std::uint64_t energy_beams_drawn_{}, tractor_beams_drawn_{};
     // WLD-12: point-defence zaps still inside their beam frames, and one additive batch per beam texture.

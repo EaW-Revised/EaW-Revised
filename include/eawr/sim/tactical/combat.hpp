@@ -32,6 +32,7 @@ inline constexpr std::uint32_t death_projectile_slot_flag = 0x40000000U;
 inline constexpr std::uint32_t retreat_explosion_slot_flag = 0x20000000U;
 inline constexpr std::uint32_t death_projectile_selection_slot = 0xfffe0007U; // coordinator-reserved
 inline constexpr std::uint32_t projectile_damage_delay_slot = 0xfffe0008U; // coordinator-reserved
+inline constexpr std::uint32_t random_hardpoint_slot = 0xfffe0012U; // coordinator-reserved
 
 // UA-05/WAD-39: shared authored geometry; ordinary and manual guns have separate aim rules.
 struct ManualTurretProfile {
@@ -87,11 +88,13 @@ struct ShotProfile {
     bool energy_damage{};
     std::optional<IonStunShot> ion_stun{};
     BlastProfile blast{};
+    CombatModProfile combat_mod{};
     // EN-08: engine shutdown on a positive energy drain; absent for ordinary large ions.
     std::optional<std::uint32_t> disable_engines_frames{};
     std::optional<FlightProfile> flight{};
     std::uint32_t appearance_delay_frames{}; // WAD-37/40: no movement before expiry; visible on expiry
     math::Fixed damage_delay{}; // WAD-26: positive per-delivery override
+    bool damages_random_hardpoints{}; // WAD-27: every delivery redirects to a random live destroyable hardpoint
     friend bool operator==(const ShotProfile&, const ShotProfile&) = default;
 };
 
@@ -698,6 +701,9 @@ enum class CombatEventKind : std::uint8_t {
     // `origin` to the shot's position `aim`; presentation only, not canonical state.
     point_defence_zap = 5,
     heal_pulse = 6, // WSH-08: weapon names the nested handler slot; presentation only.
+    // Projectile_Combat_Mod_*: `target` took a projectile combat modifier; `outcome` is the projectile type key
+    // (its name CRC), `shooter` the shooter; presentation attaches the status particle. Presentation only.
+    combat_modifier_applied = 7,
 };
 
 // Diagnostic terminal reasons, carried only by projectile_expired events.

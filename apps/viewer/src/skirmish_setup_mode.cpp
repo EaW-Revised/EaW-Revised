@@ -19,6 +19,7 @@
 #include "lobby_retry.hpp"
 #include "galactic_lobby_backend.hpp"
 #include "eawr/scene/scene.hpp"
+#include "eawr/sim/galactic/types.hpp"
 #include "profile_store.hpp"
 #include <godot_cpp/classes/ip.hpp>
 #include <godot_cpp/classes/scene_tree.hpp>
@@ -66,6 +67,7 @@
 #include <cmath>
 #include <fstream>
 #include <initializer_list>
+#include <numeric>
 #include <set>
 #include <sstream>
 #include <tuple>
@@ -135,6 +137,8 @@ struct SkirmishSetupMode::State final {
     EawrUiButton *official{}, *custom{};
     StagingPreview start_icons;
     TextureRect* preview{};
+    std::string preview_variation{"EawrUi"};
+    std::string preview_role{"Global_Default"}; // the font role the dialog authors for the preview gadget
     EawrUiLabel* status{};
     EawrUiButton* start{};
     EawrUiCombo* connection{};
@@ -149,6 +153,7 @@ struct SkirmishSetupMode::State final {
     bool lan_acceptance{};
     std::string gc_acceptance_campaign;
     std::uint64_t gc_acceptance_ticks{};
+    std::size_t gc_acceptance_peers{2};  // human peers in the scripted room: the host and N-1 joiners (2 to 8)
     std::optional<std::uint64_t> gc_acceptance_seed;  // explicit override; otherwise the host draws one
     std::filesystem::path gc_acceptance_out;
     std::optional<std::chrono::steady_clock::time_point> gc_acceptance_setup_started;
@@ -546,6 +551,14 @@ bool SkirmishSetupMode::State::load() {
                 failure = "Invalid GC acceptance final tick"; return false;
             }
         }
+        if (args[i] == "--eawr-gc-lan-peers" && i + 1 < args.size()) {
+            const auto value = utf8(args[++i]);
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), gc_acceptance_peers);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()
+                || gc_acceptance_peers < 2 || gc_acceptance_peers > sim::galactic::galactic_max_human_seats) {
+                failure = "--eawr-gc-lan-peers expects 2 to 8"; return false;
+            }
+        }
         if (args[i] == "--eawr-lan-trace" && i + 1 < args.size()) lan_trace = ViewerPath{utf8(args[++i])}.native();
         if (args[i] == "--eawr-lan-input-delay" && i + 1 < args.size()) {
             const auto value = utf8(args[++i]);
@@ -768,6 +781,8 @@ bool SkirmishSetupMode::State::build() {
     // The preview fills the dialog's image slot; the builder leaves the slot's rectangle.
     const auto* image = gadget_of(*staging, "IDC_IMAGE");
     const model::PixelRect slot = image != nullptr ? image->rect : model::PixelRect{};
+    if (image != nullptr) preview_role = preview_font_role(image->statement, image->class_name);
+    if (image != nullptr) preview_variation = image->variation;
     preview = memnew(TextureRect);
     preview->set_name("EawrSetupPreview");
     preview->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
@@ -1153,7 +1168,7 @@ void SkirmishSetupMode::State::refresh_map(const int index) {
     }
     preview->set_texture(image.is_valid() ? ImageTexture::create_from_image(image) : Ref<ImageTexture>());
     start_icons.rebuild(*preview, map, *filesystem, skirmish::setup_factions(*catalog),
-        atlas ? &*atlas : nullptr, textures.get());
+        atlas ? &*atlas : nullptr, textures.get(), preview_role, preview_variation);
     validate();
 }
 
@@ -1212,12 +1227,7 @@ void SkirmishSetupMode::State::validate() {
     for (const auto& record : selection.slots) colour[record.slot - 1]->select(static_cast<int>(*record.colour_index));
     std::vector<StagingPreviewSeat> preview_seats;
     for (const auto& record : selection.slots) {
-        Color backing(0.01F, 0.01F, 0.02F, 0.85F);
-        if (*record.colour_index < palette.size()) {
-            const auto& rgb = palette[*record.colour_index].rgb;
-            backing = Color(rgb[0] / 510.0F, rgb[1] / 510.0F, rgb[2] / 510.0F, 0.95F);
-        }
-        preview_seats.push_back({record.team, record.faction, backing});
+        preview_seats.push_back({record.team, record.faction});
     }
     start_icons.update(preview_seats);
     const auto options_result = skirmish::setup_options(selection, maps);
@@ -1263,7 +1273,17 @@ void SkirmishSetupMode::State::process_lan() {
                 UtilityFunctions::print(String::utf8(line.data(), static_cast<int64_t>(line.size())));
             });
             lan->configure_factions(scene::faction_order(*catalog));
-            lan->configure_lobby(lan_host_port ? "Acceptance host" : "Acceptance join", 0, maps,
+            // The transport's peer count follows the human seats, on the host and on every joiner (the lobby screen sets
+            // it from the room's human count); without this a room stays at two peers and a third joiner never connects.
+            std::vector<sim::tactical::PlayerId> owners(gc_acceptance_peers);
+            std::iota(owners.begin(), owners.end(), sim::tactical::PlayerId{1});
+            lan->configure_seats(std::move(owners));
+            // The two-peer room keeps its names. From three peers on, a room refuses two guests with one name (and names over 20
+            // characters), so each joiner is then named by its process.
+            const std::string lobby_name = lan_host_port ? std::string("Acceptance host")
+                : gc_acceptance_peers > 2 ? "Join " + std::to_string(OS::get_singleton()->get_process_id())
+                                          : std::string("Acceptance join");
+            lan->configure_lobby(lobby_name, 0, maps,
                 [](const skirmish::FixtureOptions&) {
                     return core::Result<sim::tactical::TacticalSetup>::failure(net::lobby_diagnostic(
                         net::LobbyReason::invalid_choice, "GC acceptance cannot prepare a skirmish"));
@@ -1287,7 +1307,9 @@ void SkirmishSetupMode::State::process_lan() {
                 const std::uint64_t seed = gc_acceptance_seed.value_or(net::draw_galactic_session_seed());
                 UtilityFunctions::print("EAWR GC acceptance seed=", static_cast<int64_t>(seed));
                 gc_acceptance_seed = seed;
-                auto game = net::default_galactic_lobby_options(*selected_campaign, "Normal_Default", seed, lan_delay);
+                // D8: the room opens with the host row only (planned_humans 1); every joiner claims the next playable row, so the scripted
+                // peers end on one human side each (the acceptance check reads one side and one faction per human).
+                auto game = net::default_galactic_lobby_options(*selected_campaign, "Normal_Default", seed, lan_delay, 1);
                 if (!game || !lan->set_galactic_game(game.value())) { failure = "GC acceptance room could not open"; return; }
             } else lan->join(lan_join_endpoint);
         }
@@ -1314,11 +1336,10 @@ void SkirmishSetupMode::State::process_lan() {
             } else state << " room=none";
             UtilityFunctions::print(text(state.str()));
         }
-        if (room && room->snapshot.seats.size() == 2) {
-            const auto local = std::find_if(room->snapshot.seats.begin(), room->snapshot.seats.end(), [&](const auto& row) {
-                return row.peer == (lan_host_port ? 0U : 1U);
-            });
-            if (local != room->snapshot.seats.end() && !local->ready && room->ready_enabled
+        // Every scripted peer readies its own seat once all N have joined; the host starts when the room says Start is
+        // enabled (all seats ready). A peer's id follows its connection order, so none is assumed here.
+        if (room && room->snapshot.seats.size() == gc_acceptance_peers) {
+            if (!room->local_ready && room->ready_enabled
                 && gc_acceptance_ready_retry.attempt(room->snapshot.revision, now)) {
                 const bool accepted = lan->lobby_ready(true);
                 if (log) UtilityFunctions::print("EAWR GC acceptance ready request accepted=", accepted);
@@ -1672,6 +1693,19 @@ void SkirmishSetupMode::process() {
     state.process_cancel();
     state.process_back(was_editing);
     ++state.frames;
+    if (state.test && state.frames == 77) {
+        // Pixel test input: the rectangles the setup capture (frame 78) later shows each emblem in.
+        for (const auto& rect : state.start_icons.emblem_rects())
+            UtilityFunctions::print("EAWR setup preview emblem rect: ", static_cast<int64_t>(rect.position.x),
+                ",", static_cast<int64_t>(rect.position.y), ",", static_cast<int64_t>(rect.size.x),
+                ",", static_cast<int64_t>(rect.size.y));
+        // The number blocks use sub-pixel centres; print them to a tenth of a pixel.
+        for (const auto& rect : state.start_icons.number_rects())
+            UtilityFunctions::print("EAWR setup preview number rect: ", rect.position.x, ",", rect.position.y, ",",
+                rect.size.x, ",", rect.size.y);
+        UtilityFunctions::print("EAWR setup preview number style: outline=", state.start_icons.number_outline() ? 1 : 0,
+            " emboss=", state.start_icons.number_emboss() ? 1 : 0);
+    }
     if (!state.captured && state.frames >= (state.layout_test || state.nine_players ? 40U : state.two_vs_two && state.test ? 94U : state.policy_test ? 114U : state.three_players ? 98U : state.test ? 78U : 30U) && !state.options.capture_path.empty()) {
         std::error_code directory_error;
         std::filesystem::create_directories(state.options.capture_path.parent_path(), directory_error);

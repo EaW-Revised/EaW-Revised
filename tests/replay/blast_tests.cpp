@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -499,6 +500,122 @@ void test_hardpoint_session_determinism() {
     }
 }
 
+// WAD-27: a random-hardpoint projectile redirects its direct hit and every blast share to a live destroyable
+// hardpoint, drawn in commit order from the projectile's own stream. Returns per-hardpoint health of the target.
+struct RandomTrace { std::vector<std::string> rows; std::array<Fixed, 3> hardpoints{}; Fixed hull{}; };
+RandomTrace random_hardpoint_trace(const std::uint64_t seed, const bool random, const bool delayed,
+    const eawr::sim::PartitionExecutor& executor) {
+    Battle battle(false, false);
+    battle.replay.setup.seed = seed;
+    battle.replay.final_tick_count = 600; // the first shot's initial countdown depends on the seed
+    auto& target = battle.combat.profiles[1];
+    target.hardpoints = {{0, at(0), true}, {1, at(20), false}, {2, at(40), false}};
+    target.hardpoint_meshes = {"primary", "secondary", "last"};
+    auto& health = battle.health.profiles[1];
+    health.hardpoints = {{t::HardpointRole::weapon, true, q(1000)},
+        {t::HardpointRole::weapon, true, q(1000)}, {t::HardpointRole::weapon, true, q(1000)}};
+    auto& shot = *battle.combat.profiles[0].weapons[0].shot;
+    shot.blast.max_delay = delayed ? q(1) : Fixed{};
+    shot.damages_random_hardpoints = random;
+    battle.combat.profiles[0].weapons[0].category_restrictions = 1;
+    battle.replay.setup.units[2].type_id = 3;
+    auto craft = target; craft.type_id = 3; craft.category_bits = 1;
+    craft.hardpoints.clear(); craft.hardpoint_meshes.clear(); craft.meshes.clear(); craft.aimed_routes.clear();
+    battle.combat.profiles.push_back(craft);
+    auto craft_health = health; craft_health.type_id = 3; craft_health.hardpoints.clear();
+    battle.health.profiles.push_back(craft_health); battle.sensors.push_back({3, q(20000)});
+    auto session = battle.make();
+    RandomTrace trace;
+    // Stop shortly after the first detonation (delayed shares land within a second), before the next shot.
+    std::uint64_t detonations{}, after{};
+    for (std::uint64_t tick = 0; tick < 500 && after < 60; ++tick) {
+        const auto step = session.step(executor);
+        expect(static_cast<bool>(step), "WAD-27: random-hardpoint battle steps"); if (!step) break;
+        detonations += step.value().blast_detonations;
+        if (detonations > 0) ++after;
+        trace.rows.push_back(step.value().state_sha256 + step.value().snapshot->sha256());
+    }
+    expect(detonations == 1, "WAD-27: exactly one blast detonation is observed");
+    if (const auto state = session.durability_state(2)) {
+        for (std::size_t i = 0; i < 3; ++i) trace.hardpoints[i] = state->hardpoints[i];
+        trace.hull = state->hull;
+    }
+    return trace;
+}
+
+void test_random_hardpoint_delivery() {
+    const eawr::sim::InlineExecutor inline_executor;
+    std::set<std::array<std::int64_t, 3>> patterns;
+    std::set<std::array<std::int64_t, 3>> fixed_patterns;
+    for (std::uint64_t seed = 1; seed <= 16; ++seed) for (const bool delayed : {false, true}) {
+        const auto reference = random_hardpoint_trace(seed, true, delayed, inline_executor);
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(random_hardpoint_trace(seed, true, delayed, executor).rows == reference.rows,
+                "WAD-27: random-hardpoint direct and share draws match with " + std::to_string(workers) + " workers");
+        }
+        // Every delivery landed on a hardpoint: the hull is untouched and the hardpoints lost health.
+        expect(reference.hull == q(1000)
+            && reference.hardpoints[0].raw() + reference.hardpoints[1].raw() + reference.hardpoints[2].raw() < q(3000).raw(),
+            "WAD-27: random deliveries reach hardpoints, never the hull");
+        std::array<std::int64_t, 3> pattern{};
+        for (std::size_t i = 0; i < 3; ++i) pattern[i] = reference.hardpoints[i].raw();
+        if (!delayed) patterns.insert(pattern);
+        const auto aimed = random_hardpoint_trace(seed, false, delayed, inline_executor);
+        std::array<std::int64_t, 3> aimed_pattern{};
+        for (std::size_t i = 0; i < 3; ++i) aimed_pattern[i] = aimed.hardpoints[i].raw();
+        if (!delayed) fixed_patterns.insert(aimed_pattern);
+    }
+    expect(patterns.size() > 1, "WAD-27: the draw spreads damage over different hardpoints between seeds");
+    expect(fixed_patterns.size() == 1, "WAD-27: without the flag the aimed route is seed independent");
+}
+
+// WAD-27: the flag is live projectile state. A checkpoint taken with such a projectile in flight uses the wider
+// layout (domain +32), restores byte for byte and continues with the same draws; without one the layout is unchanged.
+void test_random_hardpoint_checkpoint() {
+    const eawr::sim::InlineExecutor executor;
+    for (const bool random : {false, true}) {
+        Battle battle(false, false);
+        auto& shot = *battle.combat.profiles[0].weapons[0].shot;
+        shot.damages_random_hardpoints = random;
+        auto& target = battle.combat.profiles[1];
+        target.hardpoints = {{0, at(0), true}, {1, at(20), false}, {2, at(40), false}};
+        target.hardpoint_meshes = {"primary", "secondary", "last"};
+        auto& health = battle.health.profiles[1];
+        health.hardpoints = {{t::HardpointRole::weapon, true, q(1000)},
+            {t::HardpointRole::weapon, true, q(1000)}, {t::HardpointRole::weapon, true, q(1000)}};
+        auto live = battle.make();
+        bool in_flight = false;
+        for (std::uint64_t tick = 0; tick < 40 && !in_flight; ++tick) {
+            expect(static_cast<bool>(live.step(executor)), "WAD-27: checkpoint battle steps");
+            in_flight = !live.projectiles().empty();
+        }
+        expect(in_flight, "WAD-27: the checkpoint is taken with a projectile in flight");
+        if (!in_flight) continue;
+        expect(live.projectiles().front().damages_random_hardpoints == random, "WAD-27: the live projectile carries the profile flag");
+        // The domain is a little-endian uint32 at the start of the state: byte 0 is its low byte (values 37..100), byte 1 is zero.
+        const auto saved = live.save_checkpoint_state();
+        expect(static_cast<bool>(saved) && saved.value().size() > 4
+            && ((saved.value()[0] - 37U) % 64U >= 32U) == random && saved.value()[1] == 0U,
+            "WAD-27: only a live random-hardpoint projectile selects the wider checkpoint domain");
+        if (!saved) continue;
+        auto restored = battle.make();
+        const auto loaded = restored.load_checkpoint_state(saved.value());
+        expect(static_cast<bool>(loaded) && restored.canonical_state_bytes() == live.canonical_state_bytes(),
+            "WAD-27: the flag survives a checkpoint");
+        if (!loaded) continue;
+        const auto resaved = restored.save_checkpoint_state();
+        expect(resaved && resaved.value() == saved.value(), "WAD-27: the checkpoint round-trips byte for byte");
+        expect(restored.projectiles().front().damages_random_hardpoints == random, "WAD-27: the restored projectile keeps the flag");
+        for (int tick = 0; tick < 40; ++tick) {
+            const auto a = live.step(executor), b = restored.step(executor);
+            expect(a && b && a.value().state_sha256 == b.value().state_sha256,
+                "WAD-27: the restored continuation draws the same hardpoints as the live one");
+            if (!a || !b) break;
+        }
+    }
+}
+
 void test_shield_generator_split() {
     Battle battle(false, false);
     auto& target = battle.combat.profiles[1];
@@ -984,11 +1101,50 @@ void test_delayed_metadata() {
 }
 } // namespace
 
+void test_combat_mod_recipients() {
+    // WPCM-02: hostile players' objects inside the unscaled blast range, matching the category mask.
+    QueryFixture fixture;
+    fixture.profile.category_bits = 4;
+    for (t::PlayerId owner = 1; owner <= 5; ++owner) fixture.add(owner, owner, at(10));
+    fixture.add(10, 2, at(201));  // outside the 200 range
+    fixture.add(11, 2, at(200));  // on the edge: inside
+    fixture.build();
+    auto projectile = payload();
+    projectile.combat_mod.enabled = true;
+    projectile.combat_mod.categories = 4;
+    auto found = d::combat_mod_recipients(fixture.world, projectile, at(0));
+    if (found) std::sort(found.value().begin(), found.value().end());
+    expect(found && found.value() == std::vector<eawr::sim::EntityId>{2, 5, 11},
+        "WPCM-02: enemies inside the blast range, own/allied/neutral owners excluded");
+    if (found && found.value() != std::vector<eawr::sim::EntityId>{2, 5, 11}) {
+        std::cerr << "got:"; for (const auto id : found.value()) std::cerr << ' ' << id; std::cerr << std::endl;
+    }
+    projectile.combat_mod.categories = 2;
+    found = d::combat_mod_recipients(fixture.world, projectile, at(0));
+    expect(found && found.value().empty(), "WPCM-02: a category outside the mask receives nothing");
+    projectile.combat_mod.categories = 4;
+    projectile.blast.radius = Fixed{};
+    found = d::combat_mod_recipients(fixture.world, projectile, at(0));
+    expect(found && found.value().empty(), "WPCM-02: no blast range, no modifier reach");
+    projectile.blast.radius = q(200);
+    projectile.combat_mod.enabled = false;
+    found = d::combat_mod_recipients(fixture.world, projectile, at(0));
+    expect(found && found.value().empty(), "WPCM-02: a projectile without a modifier reaches nobody");
+    projectile.combat_mod.enabled = true;
+    projectile.blast.radius = q(50);
+    found = d::combat_mod_recipients(fixture.world, projectile, at(0));
+    if (found) std::sort(found.value().begin(), found.value().end());
+    expect(found && found.value() == std::vector<eawr::sim::EntityId>{2, 5}, "WPCM-02: the blast range is the radius, not a separate modifier radius");
+}
+
 int main() {
+    test_combat_mod_recipients();
     test_primary_and_cancellation(); test_tiers(); test_relationships_cap_and_source();
     test_bounds_refinement_and_delay(); test_session_determinism();
     test_source_death_between_players(); test_hardpoint_selection_and_routing(); test_hardpoint_session_determinism();
     test_shield_generator_split();
+    test_random_hardpoint_delivery();
+    test_random_hardpoint_checkpoint();
     test_rocket_blast_determinism();
     test_death_payloads();
     test_delayed_metadata();

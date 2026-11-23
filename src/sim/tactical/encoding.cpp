@@ -17,6 +17,11 @@ std::string_view to_string(const OrderKind kind) noexcept {
     case OrderKind::script_teleport: return "script_teleport";
     case OrderKind::script_hold_fire: return "script_hold_fire";
     case OrderKind::script_change_owner: return "script_change_owner";
+    case OrderKind::script_teleport_position: return "script_teleport_position";
+    case OrderKind::script_hide: return "script_hide";
+    case OrderKind::script_hyperspace_in: return "script_hyperspace_in";
+    case OrderKind::script_selectable: return "script_selectable";
+    case OrderKind::script_cancel_hyperspace: return "script_cancel_hyperspace";
     case OrderKind::battle_control: return "battle_control";
     case OrderKind::script_invulnerable: return "script_invulnerable";
     case OrderKind::script_despawn: return "script_despawn";
@@ -195,6 +200,7 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case 2:
     case opcode_beacon:
     case opcode_hazard_move:
+    case opcode_script_teleport_position:
         return 24;
     case 3:
         return 8;
@@ -218,6 +224,10 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case opcode_script_invulnerable: // TL-03: enabled flag and zero reserved word
     case opcode_script_despawn: // #7886: two zero reserved words
     case opcode_script_hold_fire: // enabled flag and zero reserved word
+    case opcode_script_hide: // flag and zero reserved word
+    case opcode_script_hyperspace_in: // frames and zero reserved word
+    case opcode_script_selectable: // flag and zero reserved word
+    case opcode_script_cancel_hyperspace: // two zero reserved words
     case opcode_script_teleport: // target unit
     case opcode_script_change_owner: // new owner and zero reserved word
     case 9:  // #530 buy: type
@@ -252,6 +262,11 @@ std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
     if (std::holds_alternative<ScriptCreateObjectPayload>(command.payload)) return opcode_script_create_object;
     if (std::holds_alternative<ScriptTeleportPayload>(command.payload)) return opcode_script_teleport;
     if (std::holds_alternative<ScriptHoldFirePayload>(command.payload)) return opcode_script_hold_fire;
+    if (std::holds_alternative<ScriptTeleportPositionPayload>(command.payload)) return opcode_script_teleport_position;
+    if (std::holds_alternative<ScriptHidePayload>(command.payload)) return opcode_script_hide;
+    if (std::holds_alternative<ScriptHyperspaceInPayload>(command.payload)) return opcode_script_hyperspace_in;
+    if (std::holds_alternative<ScriptSelectablePayload>(command.payload)) return opcode_script_selectable;
+    if (std::holds_alternative<ScriptCancelHyperspacePayload>(command.payload)) return opcode_script_cancel_hyperspace;
     if (std::holds_alternative<ScriptChangeOwnerPayload>(command.payload)) return opcode_script_change_owner;
     if (std::holds_alternative<TacticalSuperweaponPayload>(command.payload)) return opcode_tactical_superweapon;
     if (std::holds_alternative<LandGarrisonPayload>(command.payload)) return opcode_land_garrison;
@@ -399,6 +414,22 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         sim::detail::append_u32(bytes, 0);
     } else if (const auto* hold = std::get_if<ScriptHoldFirePayload>(&command.payload)) {
         sim::detail::append_u32(bytes, hold->enabled ? 1U : 0U);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* to_point = std::get_if<ScriptTeleportPositionPayload>(&command.payload)) {
+        sim::detail::append_i64(bytes, to_point->position.x.raw());
+        sim::detail::append_i64(bytes, to_point->position.y.raw());
+        sim::detail::append_i64(bytes, to_point->position.z.raw());
+    } else if (const auto* hide = std::get_if<ScriptHidePayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, hide->hidden ? 1U : 0U);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* hyperspace = std::get_if<ScriptHyperspaceInPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, hyperspace->frames);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* selectable = std::get_if<ScriptSelectablePayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, selectable->selectable ? 1U : 0U);
+        sim::detail::append_u32(bytes, 0);
+    } else if (std::holds_alternative<ScriptCancelHyperspacePayload>(command.payload)) {
+        sim::detail::append_u32(bytes, 0);
         sim::detail::append_u32(bytes, 0);
     } else if (const auto* gift = std::get_if<GiftPayload>(&command.payload)) {
         sim::detail::append_u32(bytes, gift->recipient.value);

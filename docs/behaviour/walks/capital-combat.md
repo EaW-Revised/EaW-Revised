@@ -107,9 +107,9 @@ separate: an immediate replacement shot does not prove a ship-scan reset.
 
 | Rule | Behaviour | Source | Existing | Ours |
 |---|---|---|---|---|
-| WCC-20 | A weapon hardpoint's service tries its attack target first. That target is the one handed by WCC-11, WCC-17 or a player order, with its hardpoint. On a failure it goes on only with `Allow_Opportunity_Fire_When_Targeting`. Without an attack target it fires only with `Allow_Opportunity_Fire_When_Idle` (R-01 to R-15). Walk 3 owns everything inside. | debug build WC-19, HO-06 | same (W-04) | does, with WCC-17's difference. |
+| WCC-20 | A weapon hardpoint's service tries its attack target first. That target is the one handed by WCC-11, WCC-17 or a player order, with its hardpoint. A restricted ordered-target category ends the service without opportunity fire (WWP-05). For other attempt failures it goes on only with `Allow_Opportunity_Fire_When_Targeting`. Without an attack target it fires only with `Allow_Opportunity_Fire_When_Idle` (R-01 to R-15). Walk 3 owns everything inside. | debug build WC-19, HO-06 | same (W-04) | does, with WCC-17's difference. |
 | WCC-21 | **A shot's aimed hardpoint.** A weapon given a hardpoint aims at that hardpoint's position and nowhere else, and its projectile carries that hardpoint. Without one it aims at the target's nearest hardpoint that is targetable and stands, measured from the shooter, and carries that one. When there is none it aims at the R-10 point and carries no hardpoint. | debug build WC-23, HO-07 | same (W-05, R-13, OR-25) | does (combat.cpp `attempt`; the shot's `target_hardpoint`). |
-| WCC-22 | **A hardpoint's own damage.** A hardpoint's `Projectile_Damage`, when above zero, replaces the projectile's `Projectile_Damage`. Its `Damage_Type` replaces the projectile's damage type (DG-12). In M2 the MC80's hardpoints author it: `HP_Calamari_Cruiser_Weapon_FL/FR` 40 on `Proj_Ship_Ion_Cannon_Large` (20), and `_BL/_BR/_ML/_MR` 20 on `Proj_Ship_Turbolaser_Red` (15). A `BLAST` charge multiplies it (not M2). | debug build WC-23; data | differs: DG-25 says no M2 hardpoint authors one | differs: the hardpoint's `Projectile_Damage` is not read; statuses.json: `HardPoint/Projectile_Damage` todo, combat tag coverage (legacy EAWR-650). The MC80's turbolasers do 15 instead of 20 and its ion cannons 20 instead of 40. |
+| WCC-22 | **A hardpoint's own damage.** A hardpoint's `Projectile_Damage`, when above zero, replaces the projectile's `Projectile_Damage`. Its `Damage_Type` replaces the projectile's damage type (DG-12). In M2 the MC80's hardpoints author it: `HP_Calamari_Cruiser_Weapon_FL/FR` 40 on `Proj_Ship_Ion_Cannon_Large` (20), and `_BL/_BR/_ML/_MR` 20 on `Proj_Ship_Turbolaser_Red` (15). A `BLAST` charge multiplies it (not M2). | debug build WC-23; data | same (DG-25) | does: the loader reads hardpoint damage and the shot profile prefers a positive value and the hardpoint damage type (DG-25). |
 | WCC-23 | A shot's travel limit is the hardpoint's `Fire_Range_Distance` (else the projectile's `Projectile_Max_Flight_Distance`), plus the target's soft radius, plus its squadron's for a craft target, plus the height between the aim point and the fire bone. | debug build WC-23 | same (DG-23) | does, with soft radii zero (P-04). |
 
 ### Hull cap and hardpoint drag (step 7, once per service)
@@ -125,7 +125,7 @@ A projectile's hit, a delayed hit and scripted damage (the Lua `Take_Damage`, HD
 
 | Rule | Behaviour | Source | Existing | Ours |
 |---|---|---|---|---|
-| WCC-40 | **Gates.** Nothing happens when any of these holds: the type is immune to damage; the unit is in limbo; objects are globally set not to take damage (a debug switch); **a victory is pending**; the unit is flagged immune; its health is already 0; or the damage is 0 or less. After a battle is decided, nothing takes damage during the 210 frames before it ends (VT-11). | debug build WC-04 | differs: DG-02 mentions a pending victory only as a damage scale | Matches: the ordered destruction hook sets pending victory before later direct, area, delayed, beam or scripted damage; projectiles continue to fly and are spent. |
+| WCC-40 | **Gates.** Nothing happens when any of these holds: the type is immune to damage; the unit is in limbo; objects are globally set not to take damage (a debug switch); **a victory is pending**; the unit is flagged immune; its health is already 0; or the damage is 0 or less. After a battle is decided, nothing takes damage during the 210 frames before it ends (VT-11). | debug build WC-04 | same (DG-02) | Matches: the ordered destruction hook sets pending victory before later direct, area, delayed, beam or scripted damage; projectiles continue to fly and are spent. |
 | WCC-41 | **Scales.** In order: the target's take-damage unit-mode multiplier; the shooter's cause-damage multiplier; base-shield vulnerability; the diminishing-firepower curve (DG-05); the under-construction multiplier; the retreat multiplier. | debug build WC-04, PD-07 | same (DG-01, DG-02, DG-05) | Applies damage modes, DG-05 and the authored construction multiplier for space `TACTICAL_UNDER_CONSTRUCTION` recipients; construction scaling is shared by projectile, script, area and environmental deliveries before shields/armor. Completed types are unaffected. |
 | WCC-42 | **The aimed hardpoint decides.** When the projectile's original target is this unit and it carries an aimed hardpoint (WCC-21), the damage goes to that hardpoint's `Collision_Mesh`, whatever mesh the projectile met. Otherwise the met mesh decides. On land, a hit with no mesh goes to the hardpoint nearest the shooter. | debug build WC-04, WC-13 | differs: DG-11 routes by the mesh met; DG-39 in hardpoint hit routing (hardpoint-directed damage routing) adds this rule | lacks on the integration branch. Hardpoint hit routing (`aimed_routes`) implements it. |
 | WCC-43 | **Lucky shot** (`LUCKY_SHOT`): scales the hit and may move a hull hit to the nearest hardpoint. No M2 unit has it. | debug build WC-04 | missing there (listed by hardpoint hit routing) | lacks; not M2. |
@@ -178,7 +178,7 @@ A projectile's hit, a delayed hit and scripted damage (the Lua `Take_Damage`, HD
 |---|---|---|---|
 | G-1 | WCC-42 | lacks: routing by the aimed hardpoint | High: the hull dies with hardpoints standing (hardpoint-directed damage routing). **hardpoint hit routing** implements it; no new ticket. |
 | G-2 | WCC-17 | differs: a scanned target and a hardpoint are not handed to the weapon hardpoints | High: in FoC every weapon of a ship in a formation fires at one hardpoint of its ship-level target. Ours spreads the weapons over opportunity targets, so they focus less and pick other hardpoints. The retail time-to-kill comparison tracks this gap (legacy EAWR-536). |
-| G-3 | WCC-22 | differs: a hardpoint's `Projectile_Damage` is ignored | High for the MC80: its turbolasers do 75 % and its ion cannons 50 % of FoC's damage. The retail time-to-kill comparison tracks this gap (legacy EAWR-536). |
+| G-3 | WCC-22 | Closed: hardpoint damage overrides are applied (DG-25) | The MC80 uses its authored 20/40 base damage. |
 | G-4 | WCC-47 with BP-19 | Closed: the shield mesh no longer collides while the depletion effect or an ion storm runs (DG-38) | Shots in the depletion window pass the shield mesh and meet the hull or hardpoint mesh behind it. |
 | G-5 | WCC-14, WCC-15, WCC-82 | Closed: target stickiness and damage tracking for every `DAMAGE_TRACKING` unit | A ship finishes a target that will die within its threshold (5 s for every M2 ship) instead of switching, as FoC does. |
 | G-6 | WCC-18 | Closed: the best hardpoint ranks by `Hard_Point_Priorities`, skips `Hard_Point_Exclusions` and takes destroyable hardpoints, targetable or not | Which set the AI uses when stays with the tactical-AI walk; the hand-off to the weapon hardpoints is G-2. |
@@ -205,8 +205,8 @@ Tickets, under the tracking issue capital-ship combat rule walk (legacy EAWR-707
 | G-10 | ion weapons, energy drain and stun (legacy EAWR-561) |
 | G-11 | WCC-54, WCC-63, WCC-70 | Warning callers are implemented for durable units; team-container aggregate health warning remains a sourced follow-up (SND-33). | Low (audio); audible acceptance requires a capture. |
 
-Totals over the 45 rules. **Same: 37**:
-- WCC-03, -12, -13, -19, -20, -21, -23, -25;
+Totals over the 45 rules. **Same: 38**:
+- WCC-03, -12, -13, -19, -20, -21, -22, -23, -25;
 - WCC-30, -31, -41, -44, -46, -48, -49, -50, -51, -52, -53;
 - WCC-47 (G-4 closed);
 - WCC-14, -15 and -82 (G-5 closed);
@@ -216,7 +216,7 @@ Totals over the 45 rules. **Same: 37**:
 - WCC-70 in outline;
 - WCC-71 (BP-37).
 
-**Differs: 6**: WCC-01, -02, -17, -18, -22, -54.
+**Differs: 5**: WCC-01, -02, -17, -18, -54.
 
 **Missing in ours: 2**: WCC-42 (in hardpoint hit routing), -63.
 
@@ -226,7 +226,6 @@ All are todo in the combat tag report (legacy EAWR-650) unless marked otherwise.
 
 | Tag | Rule | Note |
 |---|---|---|
-| `HardPoint/Projectile_Damage` | WCC-22 | G-3 |
 | `HardPoint/Death_Breakoff_Prop` | WCC-62 | read by the viewer, not by a traced loader |
 | `HardPoint/Allows_Special_Weapon_Use` | WCC-61 | not M2 (no superweapons, SK-35) |
 | `GameConstants/Health_Critical_Percent_Threshold` | WCC-54 | Applied by the SND-33 presentation consumer. |

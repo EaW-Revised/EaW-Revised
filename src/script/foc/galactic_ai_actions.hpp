@@ -6,6 +6,7 @@
 #include "galactic_ai_freestore.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <functional> // include-guard: keep
 #include <map>
 #include <optional>
@@ -70,6 +71,16 @@ public:
     // Bound only for the body scope, cleared before its window input is released.
     const WorldReader* bind_world_reader(const WorldReader* reader) noexcept {
         return std::exchange(world_reader_, reader);
+    }
+    gc::GalacticSession* bind_lane_session(gc::GalacticSession* session) noexcept { return std::exchange(lane_session_, session); }
+    // Called on the sim side at the cut, before any body service can query the game owner.
+    void capture_conflict_inputs() {
+        cut_admission_ = admission_pending_ && admission_pending_();
+        cut_conflict_ = conflict_pending_ && conflict_pending_();
+    }
+    struct LiveAccesses { std::uint64_t reads{}, writes{}, window_reads{}; };
+    LiveAccesses take_body_live_accesses() noexcept {
+        return {live_reads_.exchange(0), live_writes_.exchange(0), native_window_reads_.exchange(0)};
     }
     // Serial root phase: per-key purchase/movement undo, moved result scratch,
     // scalar cursors and the qualified freestore's sparse savepoint. World and
@@ -325,7 +336,7 @@ public:
     [[nodiscard]] core::Result<ai::GalacticBuildStatus> build_status(gc::PlayerId, sim::EntityId build) const;
     [[nodiscard]] core::Result<sim::EntityId> build_actor(gc::PlayerId, sim::EntityId build) const;
     [[nodiscard]] core::Result<sim::math::Fixed> generic_build_cost(gc::TypeId type) const;
-    [[nodiscard]] std::shared_ptr<const gc::GalacticSnapshot> snapshot() const { return world_reader_ ? world_reader_->snapshot() : world_.snapshot(); }
+    [[nodiscard]] std::shared_ptr<const gc::GalacticSnapshot> snapshot() const { return world_reader_ ? read_input().snapshot() : read_live().snapshot(); }
     // W1 S6 (async lane): a sink that takes a runtime load note raised inside the AI window (published with it and appended by
     // the world at its apply tick). False: not taken, the note goes to the world at once.
     using LoadNoteSink = std::function<bool(core::LoadNote&)>;
@@ -339,10 +350,10 @@ public:
         note.effective_value = "unavailable AI battle notification skipped; battle continues";
         note.diagnostic_code = diagnostic.code; note.message = diagnostic.message;
         if (load_note_sink_ && load_note_sink_(note)) return;
-        world_.add_runtime_load_notes(std::span<const core::LoadNote>(&note, 1));
+        admission_session().add_runtime_load_notes(std::span<const core::LoadNote>(&note, 1));
     }
     // Direct native actions can allocate after the AI perception view was bound.
-    [[nodiscard]] sim::EntityId next_entity_id() const { return world_reader_ ? world_reader_->next_entity_id() : world_.next_entity_id(); }
+    [[nodiscard]] sim::EntityId next_entity_id() const { return world_reader_ ? read_input().next_entity_id() : read_live().next_entity_id(); }
     struct BuildHead {
         gc::PlanetId producer{};
         gc::ProductionDomain channel{};
@@ -416,12 +427,41 @@ private:
     void apply_movement_event(const gc::GalacticEvent&);
     [[nodiscard]] core::Result<ActionReceipt> admit_movement(const ActionRequest&);
     [[nodiscard]] core::Result<void> refresh_freestore_movement(sim::EntityId, gc::FleetId, bool tracked);
-    gc::GalacticSession& world_;
+    // No raw session is exposed to action implementations: every live access is counted even if a new call is added.
+    class LiveWorld {
+    public:
+        LiveWorld(gc::GalacticSession& session, const NativeActions& owner) : session_(session), owner_(owner) {}
+        [[nodiscard]] const gc::GalacticSession& read() const {
+            if (owner_.world_reader_ || owner_.lane_session_) owner_.live_reads_.fetch_add(1, std::memory_order_relaxed);
+            return session_;
+        }
+        [[nodiscard]] gc::GalacticSession& write() const {
+            if (owner_.world_reader_ || owner_.lane_session_) owner_.live_writes_.fetch_add(1, std::memory_order_relaxed);
+            return session_;
+        }
+    private:
+        gc::GalacticSession& session_;
+        const NativeActions& owner_;
+    } world_;
     const WorldReader* world_reader_{};
-    [[nodiscard]] const gc::PlanetGraph* graph() const { return world_reader_ ? world_reader_->graph() : world_.graph(); }
-    [[nodiscard]] const gc::GalacticSetup& setup() const { return world_reader_ ? world_reader_->setup() : world_.setup(); }
-    [[nodiscard]] std::uint64_t completed_tick() const { return world_reader_ ? world_reader_->completed_tick() : world_.completed_tick(); }
-    [[nodiscard]] std::uint64_t pause_depth() const { return world_reader_ ? world_reader_->pause_depth() : world_.clock().pause_depth; }
+    gc::GalacticSession* lane_session_{};
+    bool cut_admission_{}, cut_conflict_{};
+    mutable std::atomic<std::uint64_t> live_reads_{}, live_writes_{}, native_window_reads_{};
+    [[nodiscard]] const WorldReader& read_input() const {
+        native_window_reads_.fetch_add(1, std::memory_order_relaxed);
+        return *world_reader_;
+    }
+    [[nodiscard]] const gc::GalacticSession& read_live() const { return world_.read(); }
+    [[nodiscard]] gc::GalacticSession& admission_session() const {
+        if (lane_session_) return *lane_session_;
+        return world_.write();
+    }
+    [[nodiscard]] bool admission_pending() const { return lane_session_ ? cut_admission_ : admission_pending_(); }
+    [[nodiscard]] bool conflict_pending() const { return lane_session_ ? cut_conflict_ : conflict_pending_(); }
+    [[nodiscard]] const gc::PlanetGraph* graph() const { return world_reader_ ? read_input().graph() : read_live().graph(); }
+    [[nodiscard]] const gc::GalacticSetup& setup() const { return world_reader_ ? read_input().setup() : read_live().setup(); }
+    [[nodiscard]] std::uint64_t completed_tick() const { return world_reader_ ? read_input().completed_tick() : read_live().completed_tick(); }
+    [[nodiscard]] std::uint64_t pause_depth() const { return world_reader_ ? read_input().pause_depth() : read_live().clock().pause_depth; }
     std::shared_ptr<ai::GalacticFunding> funding_;
     Placement placement_;
     ReconciliationPlacement reconciliation_placement_;
