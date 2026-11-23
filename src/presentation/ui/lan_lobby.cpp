@@ -513,14 +513,29 @@ std::vector<std::size_t> galactic_row_order(const std::span<const GalacticRowFac
         for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
         return order;
     }
+    const auto seatable = static_cast<std::size_t>(std::count_if(rows.begin(), rows.end(), [](const GalacticRowFacts& row) { return !row.neutral; }));
+    const auto planned = static_cast<std::size_t>(std::count_if(rows.begin(), rows.end(), [](const GalacticRowFacts& row) { return !row.neutral && row.human; }));
+    // Cut rows are named by a line on the last dialog row, so that row is not drawn as a faction (never at a player's cost).
+    const std::size_t drawn = seatable > capacity && capacity >= 2 && planned < capacity ? capacity - 1U : capacity;
     for (const auto group : {0, 1, 2}) {
-        for (std::size_t index = 0; index < rows.size() && order.size() < capacity; ++index) {
+        for (std::size_t index = 0; index < rows.size() && order.size() < drawn; ++index) {
             const GalacticRowFacts& row = rows[index];
             if (row.neutral) continue;
             if ((row.human ? 0 : row.playable ? 1 : 2) == group) order.push_back(index);
         }
     }
     return order;
+}
+
+std::string galactic_hidden_rows_line(const std::span<const GalacticRowFacts> rows, const std::span<const std::size_t> order) {
+    std::size_t ai{}, players{};
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        if (rows[index].neutral || std::find(order.begin(), order.end(), index) != order.end()) continue;
+        (rows[index].human ? players : ai) += 1U;
+    }
+    if (ai + players == 0) return {};
+    if (players > 0) return "+" + std::to_string(ai + players) + " more factions";
+    return "+" + std::to_string(ai) + (ai == 1 ? " AI faction" : " AI factions");
 }
 
 namespace {

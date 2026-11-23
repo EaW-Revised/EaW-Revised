@@ -2982,6 +2982,65 @@ void world_script_journal_bound_contract() {
     const auto used = [&] { return gc::galactic_max_commands - world.native_journal_room(); };
     expect(world.native_journal_room() == gc::galactic_max_commands - used(), "the room is the bound less the entries in use");
 
+    // A copy retains its own admission counts. Removing the actor drops both of its earlier usage writes from the
+    // published journal; the untouched copy still counts them. Repeated writes count separately, even with false values.
+    {
+        auto copy_world = take(gc::GalacticSession::create(native_force_fixture()));
+        campaign::GalacticWorldImmediateRules copy_rules;
+        copy_rules.credit_multipliers.emplace(1, f(1));
+        copy_rules.ai_players.insert(1);
+        campaign::add_galactic_object_world_rules(copy_rules, {}, executor);
+        auto copy_host = campaign::make_galactic_world_immediate_host(copy_world, std::move(copy_rules), 32);
+        copy_world.set_command_journal_bound(4);
+        auto original = take(copy_host->capture());
+        require(original->apply("galactic.story_prevent_ai_usage", {object, auth::Value{true}}));
+        require(original->apply("galactic.story_prevent_ai_usage", {object, auth::Value{false}}));
+        auto removed = original->clone();
+        require(removed->apply("galactic.object_despawn", {object}));
+        require(pay(*removed)); require(pay(*removed)); require(pay(*removed));
+        expect(!pay(*removed), "removed actor's two usage writes free exactly two journal slots");
+        require(pay(*original)); require(pay(*original));
+        expect(!pay(*original), "the untouched batch retains both usage entries after its copy changes");
+        require(copy_host->publish(std::move(removed)));
+        auto replay = take(gc::GalacticSession::from_replay(copy_world.record()));
+        eawr::script::foc::galactic_ai::NativeActions::bind_economic_replay_owners(replay);
+        require(replay.replay_native_barrier(executor));
+        expect(replay.canonical_state_bytes() == copy_world.canonical_state_bytes(),
+            "usage writes filtered by a removal replay to identical canonical bytes");
+    }
+
+    // A staged container removal hides its nested child, while the copy from before that removal remains unchanged.
+    {
+        auto nested_world = take(gc::GalacticSession::create(native_force_fixture()));
+        auto shadow = take(nested_world.begin_native_actions(32));
+        const auto first = shadow.next_entity_id();
+        const gc::GalacticSession::NativeProductionRequest request{1, 2, 1, {}};
+        take(shadow.create_force(request, [](const auto& view, auto id) {
+            gc::GalacticSession::NativeForcePlacement result; result.next_id = id + 3;
+            result.special_control = view.presence.special_control;
+            result.fleets.push_back({id, 1, 2, {{id + 1, 2}}});
+            result.contents.push_back({id + 1, {{id + 2, 3}}});
+            for (unsigned i = 0; i < 3; ++i) {
+                gc::CensusObject actor; actor.id = id + i; actor.original_type = actor.current_type = i + 1;
+                actor.owner = 1; actor.planet = 2; actor.container = i == 0 ? 2 : id + i - 1;
+                actor.combat_role = i == 1 ? gc::ActorCombatRole::transport : gc::ActorCombatRole::ordinary;
+                result.originals.push_back(actor);
+            }
+            return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(result));
+        }, executor));
+        expect(!shadow.script_removed(first + 2) && shadow.script_journal_entries() == 0,
+            "a staged force is not itself a script journal entry or removal");
+        require(shadow.stage_actor_ai_usage(first + 2, true, std::nullopt));
+        auto before_removal = shadow;
+        require(shadow.stage_script_removal(first + 1));
+        expect(shadow.script_removed(first + 2) && !shadow.script_removed(first)
+            && shadow.script_journal_entries() == 1 && shadow.script_usage_entries() == 1,
+            "a container tombstone hides its child and keeps the staged usage count");
+        expect(!before_removal.script_removed(first + 2) && before_removal.script_journal_entries() == 0
+            && before_removal.script_usage_entries() == 1,
+            "the earlier shadow retains its original removal state and counts");
+    }
+
     // Room for two entries: two payments are admitted, the third is a refusal naming the journal, and the two publish.
     world.set_command_journal_bound(used() + 2);
     expect(world.native_journal_room() == 2, "a lowered bound leaves exactly the room above the entries in use");

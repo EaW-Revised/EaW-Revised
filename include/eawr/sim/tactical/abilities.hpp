@@ -6,8 +6,9 @@
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/damage.hpp"
 
-#include <cstdint>
 #include <array>
+#include <cstdint>
+#include <limits>
 #include <functional>
 #include <map>
 #include <tuple>
@@ -310,6 +311,14 @@ struct LureProfile {
 // WLU-03: whether a LURE switched on at `started` pulses at `tick`.
 [[nodiscard]] bool lure_pulses(const LureProfile& lure, std::uint64_t started, std::uint64_t tick) noexcept;
 
+// Lua Hide(b) and Set_Selectable(b) on one unit: the model (and its attached sound) is hidden, and the unit refuses
+// selection by players. Neither changes combat; both persist until a script changes them.
+struct ScriptViewState {
+    bool hidden{};
+    bool unselectable{};
+    friend constexpr bool operator==(const ScriptViewState&, const ScriptViewState&) noexcept = default;
+};
+
 struct CorruptSystemsState {
     TypeId source_type{};
     std::uint64_t started_tick{}, expires_tick{};
@@ -444,9 +453,20 @@ struct AbilityTable {
 };
 
 inline constexpr std::uint32_t max_ability_frames = 30U * 3600U;
-// Non-speed mode multipliers are in [-64, 64]; WLK-03's shot-only damage is checked at impact.
+// Cause and take damage multipliers are in [-64, 64]; WLK-03's shot-only damage is checked at impact.
+// The seven ordinary non-speed modifiers use max_ability_value_raw (WAB-65).
 // WAB-24 checks speed combinations against the Q24 motion-input envelope instead.
 inline constexpr std::int64_t max_ability_multiplier = 64;
+// WAB-65: the seven ordinary non-speed modifiers (weapon delay, shield and energy regeneration and their
+// intervals, scatter radius, fire rate) have no authored ceiling in the original. The remake accepts any value whose
+// aggregate keeps the widest consumer exact: a regeneration refresh is at most 2^28 whole units (the health bound) and
+// its product must stay in int64 Q24, so the raw factor is at most INT64_MAX / 2^28 (just under 2048 whole units).
+// Frame consumers saturate at the largest frame count (scaled_frames) and pool sums saturate before their clamp.
+inline constexpr std::int64_t max_ability_value_raw = std::numeric_limits<std::int64_t>::max() / (std::int64_t{1} << 28);
+
+// The ability product of two validated factors, rounded half away from zero; fails when the Q24 result
+// does not fit. Validation bounds every active subset, so a validated profile never fails.
+[[nodiscard]] core::Result<math::Fixed> ability_product(math::Fixed left, math::Fixed right);
 
 // Fails with EAWR-SIM-0305 unless type IDs, humans and creation owners strictly increase,
 // creation owners are human, every profile passes validate_ability_profile.

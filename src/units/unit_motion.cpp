@@ -204,6 +204,7 @@ void append_unit_motion_profiles(const UnitTables& tables, tactical::MotionTable
         const auto& movement = unit.movement;
         tactical::MotionProfile profile;
         profile.type_id = assets::object_type_crc(unit.id);
+        if (unit.cancels_hyperspace) table.hyperspace_cancel_types.push_back(profile.type_id);
         profile.max_speed = scaled(*movement.max_speed, unit.id, "Max_Speed");
         // Without an override the engine accelerates at the maximum speed per frame.
         profile.acceleration = movement.acceleration ? scaled(*movement.acceleration, unit.id, "OverrideAcceleration")
@@ -654,6 +655,7 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
     append_spawner_motion_profiles(tables, table, spawn_policy, campaign, one, error, load);
 
     if (error) return Result::failure(*error);
+    std::sort(table.hyperspace_cancel_types.begin(), table.hyperspace_cancel_types.end());
     std::sort(table.profiles.begin(), table.profiles.end(),
               [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
     for (std::size_t index = 1; index < table.profiles.size(); ++index) {

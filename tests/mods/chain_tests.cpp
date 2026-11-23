@@ -1,5 +1,6 @@
 #include "eawr/mods/chain.hpp"
 #include "eawr/mods/discovery.hpp"
+#include "eawr/mods/shader_translation.hpp"
 #include "eawr/mods/steam/library_folders.hpp"
 
 #include <algorithm>
@@ -258,6 +259,38 @@ void files() {
     REQUIRE(resolve_chain(rows[1].key, rows, {}).launchable);
     Catalog again = catalog; read_mod_metadata(again);
     REQUIRE(again.records.size() == 3);
+    // EAWR-MODS-0011 is reported once per problem, also when the records are read a second time.
+    const auto count_0011 = [](const ModRecord& r) {
+        std::size_t n = 0;
+        for (const auto& w : r.warnings) if (w.code == codes::malformed_modinfo) ++n;
+        return n;
+    };
+    REQUIRE(count_0011(catalog.records[0]) == 1 && count_0011(again.records[0]) == 1);
+    REQUIRE(catalog.records[0].warnings.front().message.find("could not be read") != std::string::npos
+            && catalog.records[0].warnings.front().message.find("ask the mod author") != std::string::npos);
+    // A Steam Workshop upload descriptor is no eaw.modinfo: no warning, no malformed shader policy.
+    f.write("Upload/Data/XML/a.xml", "synthetic");
+    f.write("Upload/modinfo.json",
+            R"({"publishedfileid": "1", "contentfolder": "x", "previewfile": "x\\logo.jpg", "visibility": 0, "title": "Some title", "description": "", "metadata": "", "tags": ["FOC"]})");
+    DiscoveryInput upload_input; upload_input.manual_folders = {f.root / "Upload"};
+    auto upload = discover(upload_input);
+    REQUIRE(upload.records.size() == 1 && upload.records[0].warnings.empty());
+    REQUIRE(!upload.records[0].metadata.member("modinfo"));
+    REQUIRE(shader_translation_policy(&upload.records[0]).translation_allowed());
+    read_mod_metadata(upload);
+    REQUIRE(upload.records.size() == 1 && upload.records[0].warnings.empty());
+    // Descriptor keys plus one unknown key (for example a typo of "name") is a real modinfo: 0011 and fail closed.
+    f.write("Upload3/Data/XML/a.xml", "synthetic");
+    f.write("Upload3/modinfo.json", R"({"publishedfileid": "1", "title": "t", "nmae": "typo"})");
+    upload_input.manual_folders = {f.root / "Upload3"};
+    const auto typo = discover(upload_input);
+    REQUIRE(count_0011(typo.records[0]) == 1);
+    REQUIRE(!shader_translation_policy(&typo.records[0]).translation_allowed());
+    // The same shape with a real modinfo field (name or dependencies) is not a descriptor.
+    f.write("Upload2/Data/XML/a.xml", "synthetic");
+    f.write("Upload2/modinfo.json", R"({"publishedfileid": "1", "title": "t", "dependencies": 5})");
+    upload_input.manual_folders = {f.root / "Upload2"};
+    REQUIRE(count_0011(discover(upload_input).records[0]) == 1);
     f.write("Only/Data/a.txt", "synthetic");
     f.write("Only/v-modinfo.json", R"({"name":"Only variant"})");
     input.manual_folders = {f.root / "Only"};

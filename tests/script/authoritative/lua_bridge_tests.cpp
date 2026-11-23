@@ -38,7 +38,7 @@ constexpr int total_ticks = 60;
 // policy identity, the manifest digest, every instance's memory baseline (the new globals count toward the logical
 // memory the save records), the protected-name list and the saved globals (print, gcinfo and loadstring are plain C
 // functions now, newproxy is gone). No script of this battle calls any of those names.
-constexpr std::string_view golden_final_hash = "35f62d6ce08f6024854648db750e7a3137c324269405cf24059eeb432c03821a";
+constexpr std::string_view golden_final_hash = "32ed7de6daec7d3032344e5abcceb20e0daaebeb0333c51e63427d5b0616ac0e";
 
 // Each instance commands the player with its ID. Numbers go through parsing,
 // formatting and division before they reach the Q24 boundary.

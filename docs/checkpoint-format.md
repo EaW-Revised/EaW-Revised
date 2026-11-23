@@ -866,7 +866,7 @@ SSU-03 moved the base domain to 37 (the 29 to 36 range above is now 37 to 44 wit
 weapon bone): each ability state then archives its optional deploy clip (running clip, switch frame, start frame) after
 the optional Mc30 script. A deploy-clip domain with no such unit is noncanonical and refused. Lua `Prevent_All_Fire` adds 16
 (domains 53 to 68 with the other adds) when any live unit holds the hold-fire flag: each unit then archives one more boolean
-after the invulnerability flag, and a hold-fire domain with no held unit is noncanonical and refused; domains above 68 are
+after the invulnerability flag, and a hold-fire domain with no held unit is noncanonical and refused. A last add of 64 (domains 101 to 164 with the other adds) marks any live unit carrying a Lua `Hide` or `Set_Selectable(false)` flag: each unit then archives its optional view flags (hidden, unselectable) after the hold-fire flag, and such a domain with no flagged unit is noncanonical and refused. Domains above 68 are
 unsupported. These optional fields
 select a domain within the current format family. Earlier raw child-state domains are refused;
 the committed small skirmish save is regenerated with the format change.
@@ -877,7 +877,7 @@ radar publication, departure controllers, beacons, delayed blast amounts/mesh
 contacts, the two preceding positions of a moving target (PHST), and each squadron's accepted
 attack path with its route, member trackers and refresh state (SQAP), and each player's
 collected tactical salvage tally. Transform caches
-remain derived. The shared Lua scheduler uses tactical save-v4; its galactic clock profile uses `eawr-script-galactic-save-v4`.
+remain derived. The shared Lua scheduler uses tactical save-v5; its galactic clock profile uses `eawr-script-galactic-save-v5`.
 The GC scheduler blob retains ascending retired-provider IDs after its clock fields;
 its full and optimized hashes include those IDs. Older GC scheduler blobs are refused.
 The outer scripts section framing is unchanged; see [Lua persistence](lua-persistence.md).

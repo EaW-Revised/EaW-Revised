@@ -470,6 +470,9 @@ core::Result<MotionTable> prepare_motion(const MotionTable& source, core::LoadNo
 }
 
 core::Result<void> validate_motion(const MotionTable& table) {
+    if (!std::is_sorted(table.hyperspace_cancel_types.begin(), table.hyperspace_cancel_types.end())
+        || std::adjacent_find(table.hyperspace_cancel_types.begin(), table.hyperspace_cancel_types.end()) != table.hyperspace_cancel_types.end())
+        return core::Result<void>::failure(invalid("invalid hyperspace cancel content"));
     if (table.nebula_disable_seconds.raw() < 0 || table.nebula_disable_seconds.raw() > 3600 * math::Fixed::scale
         || !std::is_sorted(table.nebula_service_types.begin(), table.nebula_service_types.end())
         || std::adjacent_find(table.nebula_service_types.begin(), table.nebula_service_types.end()) != table.nebula_service_types.end()) {

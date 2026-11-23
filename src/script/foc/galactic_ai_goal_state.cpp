@@ -190,7 +190,7 @@ struct Archive {
     void item(AiWeapon& v) { fields(v.hardpoint, v.combat_power, v.range, v.targetable, v.destroyable); }
     void item(AiType& v) { fields(v.type_id, v.name, v.category_bits, v.property_bits, v.abilities,
         v.projectile_types, v.hardpoint_projectiles, v.object_projectile, v.point_defence_script,
-        v.corrupt_systems_script, v.locomotor, v.star_base, v.space_special_weapon, v.targeting, v.space_evaluator,
+        v.corrupt_systems_script, v.locomotor, v.cancels_hyperspace, v.star_base, v.space_special_weapon, v.targeting, v.space_evaluator,
         v.tech_level, v.base_level, v.combat_power, v.max_attack_distance, v.max_speed, v.soft_radius,
         v.reveal_range, v.weapons, v.weapon_damage, v.squadron, v.craft, v.squadron_units,
         v.squadron_unit, v.capture_point, v.build_pad, v.initial_state_visible_under_fow,
@@ -1276,7 +1276,7 @@ core::Result<Bytes> GoalStateContributor::encode(Engine& engine) const {
         Archive ar; ar.galactic_tasks = true;
         // The saved identity is the digest, then (when this load knows them) the digests of the groups it is made of, so a
         // later load that refuses can say which group changed. Only the digest decides; the groups only word the refusal.
-        std::string tag(domain), identity(content_identity_ + (identity_detail_.empty() ? std::string() : " " + identity_detail_)), configuration = GoalStateCodec::configuration(engine); std::uint32_t version{19};
+        std::string tag(domain), identity(content_identity_ + (identity_detail_.empty() ? std::string() : " " + identity_detail_)), configuration = GoalStateCodec::configuration(engine); std::uint32_t version{20};
         ar.fields(tag, version, identity, configuration);
         auto credits = engine.host_->credit_changes;
         GoalStateCodec::runtime(ar, engine, credits);
@@ -1309,7 +1309,7 @@ core::Result<void> GoalStateContributor::restore(const galactic_ai::NativeState&
         std::string tag, identity, configuration; std::uint32_t version{};
         ar.fields(tag, version, identity, configuration);
         // Four separate causes, each named: they used to share one check that reported only an encoding line number.
-        if (tag != domain || version != 19)
+        if (tag != domain || version != 20)
             return fail<void>("the saved AI goal state is a different record (tag or version " + std::to_string(version)
                 + "): it was written by another EAWR version than the one that loads it");
         const auto split = identity.find(' ');

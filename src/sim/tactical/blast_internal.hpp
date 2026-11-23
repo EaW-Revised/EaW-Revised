@@ -46,6 +46,12 @@ struct BlastStep {
     const Projectile& projectile, const math::Vec3& centre, std::optional<EntityId> direct = std::nullopt,
     bool source_available = true, std::string_view direct_mesh = {});
 
+// Projectile_Combat_Mod_*: the enemy objects the original's Add_Combat_Modifier_To_Enemies reaches: every
+// hostile player's collidable inside the unscaled blast area range, matching the category mask, with a
+// combat data pack. Table order (players, then candidates); no distance sort.
+[[nodiscard]] core::Result<std::vector<EntityId>> combat_mod_recipients(const CombatWorld& world,
+    const Projectile& projectile, const math::Vec3& centre);
+
 // WAD-26/EUS-15: recipient value delivery, independent of a projectile or source object.
 [[nodiscard]] std::uint64_t delayed_damage_frames(math::Fixed delay) noexcept;
 [[nodiscard]] Hit delayed_damage_hit(math::Fixed amount, std::uint32_t damage_type,

@@ -38,7 +38,38 @@ std::map<gc::PlayerId, gc::HumanSideId> sides_of(const GalacticLobbyOptions& opt
     for (const auto& row : options.rows) if (row.human) sides.emplace(row.player, static_cast<gc::HumanSideId>(sides.size() + 1));
     return sides;
 }
+std::string human_sides_refusal(const std::size_t limit = galactic_lobby_max_human_sides) {
+    if (limit < galactic_lobby_max_human_sides)
+        return "This lobby window draws only " + std::to_string(limit) + " player rows for this campaign, so a campaign game here has at most "
+            + std::to_string(limit) + " human sides.";
+    return "A campaign game has at most " + std::to_string(galactic_lobby_max_human_sides) + " human sides.";
+}
 } // namespace
+
+bool galactic_lobby_row_drawn(const gc::MpLobbyFaction& faction) noexcept {
+    return !(faction.neutral || (!faction.playable && !faction.ai_controller));
+}
+
+std::size_t galactic_lobby_human_row_limit(const gc::MpLobbyCampaign& campaign, const std::size_t dialog_rows) noexcept {
+    if (dialog_rows == 0) return galactic_lobby_max_human_sides;
+    const auto drawn = static_cast<std::size_t>(std::count_if(campaign.factions.begin(), campaign.factions.end(),
+        [](const gc::MpLobbyFaction& faction) { return galactic_lobby_row_drawn(faction); }));
+    // Rows the dialog cannot draw are named by a line on the row after the last one drawn: that row is not a player's.
+    const std::size_t rows = drawn > dialog_rows && dialog_rows >= 2U ? dialog_rows - 1U : dialog_rows;
+    return std::min(rows, galactic_lobby_max_human_sides);
+}
+
+std::uint32_t galactic_lobby_max_humans(const gc::MpLobbyCampaign& campaign, const std::uint32_t seat_limit) noexcept {
+    const auto playable = static_cast<std::uint32_t>(std::count_if(campaign.factions.begin(), campaign.factions.end(),
+        [](const gc::MpLobbyFaction& faction) { return faction.playable && !faction.neutral; }));
+    const auto ceiling = std::max<std::uint32_t>(2U, std::min<std::uint32_t>(seat_limit, static_cast<std::uint32_t>(gc::galactic_max_human_seats)));
+    return campaign.single_player_rules ? ceiling : std::clamp<std::uint32_t>(playable, 2U, ceiling);
+}
+
+std::uint32_t galactic_lobby_default_humans(const gc::MpLobbyCampaign& campaign, const std::uint32_t seat_limit) noexcept {
+    return campaign.single_player_rules ? std::min<std::uint32_t>(2U, galactic_lobby_max_humans(campaign, seat_limit))
+                                        : galactic_lobby_max_humans(campaign, seat_limit);
+}
 
 LobbyGameMode lobby_game_mode(const LobbyGame& game) noexcept {
     const std::string_view bytes(reinterpret_cast<const char*>(game.options.data()), game.options.size());
@@ -133,7 +164,7 @@ std::optional<GalacticAiCaption> galactic_ai_caption(std::string_view difficulty
 }
 
 core::Result<GalacticLobbyOptions> default_galactic_lobby_options(const gc::MpLobbyCampaign& campaign,
-    std::string_view difficulty, std::uint64_t seed, std::uint64_t input_delay, bool two_sides) {
+    std::string_view difficulty, std::uint64_t seed, std::uint64_t input_delay, std::size_t planned_humans) {
     if (seed > std::numeric_limits<std::uint32_t>::max()) return refuse<GalacticLobbyOptions>(std::string(galactic_seed_too_wide));
     GalacticLobbyOptions options;
     // A difficulty the campaign's AI types do not author would be refused at Start, so a room starts at one they do.
@@ -142,10 +173,12 @@ core::Result<GalacticLobbyOptions> default_galactic_lobby_options(const gc::MpLo
     options.seed = seed; options.input_delay = input_delay;
     // The campaign's own constant stays the default when it states one; the host range bounds what a new room offers.
     if (campaign.vote_timeout_seconds) options.vote_timeout = galactic_lobby_clamp_vote_timeout(*campaign.vote_timeout_seconds);
+    // D8: the host's own row is planned; the other playable rows start as AI factions a player takes. A co-op campaign is one side.
+    const std::size_t wanted = campaign.single_player_rules ? 1U : std::clamp<std::size_t>(planned_humans, 1U, galactic_lobby_max_human_sides);
     std::size_t humans{};
     for (const auto& faction : campaign.factions) {
         GalacticLobbyRow row{faction.player, faction.faction_id, faction.flags, faction.name, false, galactic_lobby_default_dropout};
-        if (faction.playable && humans < (two_sides && !campaign.single_player_rules ? galactic_lobby_max_human_sides : 1U)) { row.human = true; ++humans; }
+        if (faction.playable && !faction.neutral && humans < wanted) { row.human = true; ++humans; }
         options.rows.push_back(std::move(row));
     }
     if (humans == 0) return refuse<GalacticLobbyOptions>("Campaign " + campaign.name + " has no playable faction.");
@@ -156,7 +189,7 @@ namespace {
 // Everything that can be checked without the seats: the campaign, the rows against local content, the custom
 // settings and the planned human sides.
 core::Result<const gc::MpLobbyCampaign*> check_options(const LobbyGame& game, const GalacticLobbyOptions& options,
-    std::span<const gc::MpLobbyCampaign> catalog) {
+    std::span<const gc::MpLobbyCampaign> catalog, const std::size_t dialog_rows) {
     const auto* campaign = find_campaign(catalog, game.map);
     if (!campaign) return refuse<const gc::MpLobbyCampaign*>("Campaign " + game.map + " is not an eligible campaign installed here.");
     if (options.difficulty.empty() || options.difficulty.size() > gc::mp_roster_max_text)
@@ -190,7 +223,10 @@ core::Result<const gc::MpLobbyCampaign*> check_options(const LobbyGame& game, co
     }
     if (human_rows == 0) return refuse<const gc::MpLobbyCampaign*>("Plan at least one player faction.");
     if (human_rows > galactic_lobby_max_human_sides)
-        return refuse<const gc::MpLobbyCampaign*>("A campaign game has at most two human sides.");
+        return refuse<const gc::MpLobbyCampaign*>(human_sides_refusal());
+    // A planned row the dialog cannot draw would hide its player (the dialog keeps its last row for the "+N AI factions" line).
+    if (const auto limit = galactic_lobby_human_row_limit(*campaign, dialog_rows); human_rows > limit)
+        return refuse<const gc::MpLobbyCampaign*>(human_sides_refusal(limit));
     if (campaign->single_player_rules && human_rows != 1)
         return refuse<const gc::MpLobbyCampaign*>("A single-player campaign is played by one co-op side.");
     return core::Result<const gc::MpLobbyCampaign*>::success(campaign);
@@ -215,7 +251,8 @@ core::Result<void> check_seats(const LobbySnapshot& snapshot, const GalacticLobb
 } // namespace
 
 std::optional<GalacticLobbyOptions> galactic_lobby_options_with_seat_on(const GalacticLobbyOptions& options,
-    const gc::MpLobbyCampaign& campaign, const LobbySnapshot& before, const PeerIndex peer, const gc::PlayerId slot) {
+    const gc::MpLobbyCampaign& campaign, const LobbySnapshot& before, const PeerIndex peer, const gc::PlayerId slot,
+    const std::size_t dialog_rows) {
     if (options.rows.size() != campaign.factions.size()) return std::nullopt;
     const auto target = std::find_if(options.rows.begin(), options.rows.end(), [&](const auto& row) { return row.player == slot; });
     if (target == options.rows.end()) return std::nullopt;
@@ -231,12 +268,30 @@ std::optional<GalacticLobbyOptions> galactic_lobby_options_with_seat_on(const Ga
         if (!shared) for (auto& row : moved.rows) if (row.player == own->selection.slot) row.human = false;
     }
     const auto humans = static_cast<std::size_t>(std::count_if(moved.rows.begin(), moved.rows.end(), [](const auto& row) { return row.human; }));
-    if (humans > galactic_lobby_max_human_sides || (campaign.single_player_rules && humans != 1)) return std::nullopt;
+    if (humans > galactic_lobby_human_row_limit(campaign, dialog_rows) || (campaign.single_player_rules && humans != 1)) return std::nullopt;
     return moved;
 }
 
+namespace {
+// The candidate room with `moved` as its game: sides are the host's planned rows in player order, so a changed row set can
+// renumber every seat's side and faction.
+core::Result<void> apply_rows(LobbySnapshot& candidate, const GalacticLobbyOptions& moved) {
+    auto encoded = encode_galactic_lobby_game(moved);
+    if (!encoded) return core::Result<void>::failure(encoded.error());
+    candidate.game = std::move(encoded).value();
+    const auto sides = sides_of(moved);
+    for (auto& value : candidate.seats) {
+        const auto side = sides.find(value.selection.slot);
+        const auto held = std::find_if(moved.rows.begin(), moved.rows.end(), [&](const auto& r) { return r.player == value.selection.slot; });
+        if (side == sides.end() || held == moved.rows.end()) continue; // the validator names it
+        value.selection.team = side->second; value.selection.faction = held->faction;
+    }
+    return core::Result<void>::success();
+}
+} // namespace
+
 core::Result<void> follow_galactic_choice(const LobbySnapshot& before, LobbySnapshot& candidate, const PeerIndex peer,
-    std::span<const gc::MpLobbyCampaign> catalog) {
+    std::span<const gc::MpLobbyCampaign> catalog, const std::size_t dialog_rows) {
     if (lobby_game_mode(candidate.game) != LobbyGameMode::galactic) return core::Result<void>::success();
     auto decoded = decode_galactic_lobby_game(candidate.game);
     const auto* campaign = find_campaign(catalog, candidate.game.map);
@@ -248,29 +303,103 @@ core::Result<void> follow_galactic_choice(const LobbySnapshot& before, LobbySnap
     if (row == options.rows.end() || row->human) return core::Result<void>::success();
     const auto index = static_cast<std::size_t>(row - options.rows.begin());
     if (index >= campaign->factions.size() || !campaign->factions[index].playable) return core::Result<void>::success(); // the validator names it
-    const auto moved = galactic_lobby_options_with_seat_on(options, *campaign, before, peer, seat->selection.slot);
-    if (!moved) return refuse("A campaign game has at most two human sides. Choose one of the open factions, or ask the host to close a row first.");
-    auto encoded = encode_galactic_lobby_game(*moved);
-    if (!encoded) return core::Result<void>::failure(encoded.error());
-    candidate.game = std::move(encoded).value();
-    // Sides are the host's planned rows in player order, so a new row can renumber every seat's side.
-    const auto sides = sides_of(*moved);
-    for (auto& value : candidate.seats) {
-        const auto side = sides.find(value.selection.slot);
-        const auto held = std::find_if(moved->rows.begin(), moved->rows.end(), [&](const auto& r) { return r.player == value.selection.slot; });
-        if (side == sides.end() || held == moved->rows.end()) continue; // the validator names it
-        value.selection.team = side->second; value.selection.faction = held->faction;
-    }
-    return core::Result<void>::success();
+    const auto moved = galactic_lobby_options_with_seat_on(options, *campaign, before, peer, seat->selection.slot, dialog_rows);
+    if (!moved) return refuse(human_sides_refusal(galactic_lobby_human_row_limit(*campaign, dialog_rows))
+        + " Choose one of the open factions, or ask the host to close a row first.");
+    return apply_rows(candidate, *moved);
 }
 
-core::Result<void> validate_galactic_lobby(const LobbySnapshot& snapshot, bool starting, std::span<const gc::MpLobbyCampaign> catalog) {
+std::optional<gc::PlayerId> galactic_lobby_newcomer_row(const GalacticLobbyOptions& options, const gc::MpLobbyCampaign& campaign,
+    const LobbySnapshot& room, const std::size_t dialog_rows) {
+    if (options.rows.size() != campaign.factions.size()) return std::nullopt;
+    const auto seats_on = [&](const gc::PlayerId player) {
+        return std::count_if(room.seats.begin(), room.seats.end(), [&](const auto& seat) { return seat.selection.slot == player; });
+    };
+    std::size_t planned{};
+    for (const auto& row : options.rows) {
+        if (!row.human) continue;
+        ++planned;
+        if (seats_on(row.player) == 0) return row.player; // a row the host planned and nobody holds
+    }
+    if (planned == 0) return std::nullopt;
+    if (!campaign.single_player_rules && planned < galactic_lobby_human_row_limit(campaign, dialog_rows)) {
+        for (std::size_t index = 0; index < options.rows.size(); ++index) {
+            const auto& faction = campaign.factions[index];
+            if (!options.rows[index].human && faction.playable && !faction.neutral) return options.rows[index].player; // claimed by the newcomer
+        }
+    }
+    const GalacticLobbyRow* best = nullptr;
+    std::ptrdiff_t best_count = 0;
+    for (const auto& row : options.rows) {
+        if (!row.human) continue;
+        const auto count = seats_on(row.player);
+        if (!best || count < best_count) { best = &row; best_count = count; }
+    }
+    return best->player;
+}
+
+std::optional<GalacticLobbyReseat> galactic_lobby_reseat(GalacticLobbyOptions fresh, const gc::MpLobbyCampaign& campaign,
+    const LobbySnapshot& room, const std::size_t dialog_rows) {
+    const auto first_human = std::find_if(fresh.rows.begin(), fresh.rows.end(), [](const auto& row) { return row.human; });
+    if (first_human == fresh.rows.end() || fresh.rows.size() != campaign.factions.size()) return std::nullopt;
+    GalacticLobbyReseat result;
+    LobbySnapshot placed = room; // the seats placed so far, on their new rows
+    placed.seats.clear();
+    for (const auto& seat : room.seats) {
+        const auto row = seat.peer == room.host ? std::optional<gc::PlayerId>(first_human->player)
+                                                : galactic_lobby_newcomer_row(fresh, campaign, placed, dialog_rows);
+        if (!row) return std::nullopt;
+        for (auto& value : fresh.rows) if (value.player == *row) value.human = true; // a claimed AI faction is planned with its seat
+        auto moved = seat;
+        moved.selection.slot = *row;
+        placed.seats.push_back(std::move(moved));
+        result.slots.push_back(*row);
+    }
+    result.options = std::move(fresh);
+    return result;
+}
+
+std::optional<std::string> galactic_lobby_switch_refusal(const gc::MpLobbyCampaign& campaign, const LobbySnapshot& room) {
+    if (room.seats.size() < 2U || campaign.single_player_rules) return std::nullopt;
+    const auto playable = static_cast<std::size_t>(std::count_if(campaign.factions.begin(), campaign.factions.end(),
+        [](const gc::MpLobbyFaction& faction) { return faction.playable && !faction.neutral; }));
+    if (playable >= room.capacity) return std::nullopt;
+    return "This room waits for " + std::to_string(room.capacity) + " players, but this campaign has only " + std::to_string(playable)
+        + " factions to take, so it could never start. Open the room again to play it.";
+}
+
+void follow_galactic_departure(const LobbySnapshot& before, LobbySnapshot& after, const PeerIndex peer,
+    std::span<const gc::MpLobbyCampaign> catalog) {
+    if (lobby_game_mode(after.game) != LobbyGameMode::galactic) return;
+    const auto left = std::find_if(before.seats.begin(), before.seats.end(), [&](const auto& seat) { return seat.peer == peer; });
+    auto decoded = decode_galactic_lobby_game(after.game);
+    const auto* campaign = find_campaign(catalog, after.game.map);
+    if (left == before.seats.end() || !decoded || !campaign) return;
+    auto options = std::move(decoded).value();
+    const auto row = std::find_if(options.rows.begin(), options.rows.end(), [&](const auto& value) { return value.player == left->selection.slot; });
+    if (row == options.rows.end() || !row->human) return;
+    const bool held = std::any_of(after.seats.begin(), after.seats.end(), [&](const auto& seat) { return seat.selection.slot == row->player; });
+    const auto planned = std::count_if(options.rows.begin(), options.rows.end(), [](const auto& value) { return value.human; });
+    if (held || planned <= 1 || campaign->single_player_rules) return;
+    row->human = false; // unclaimed: the row is an AI faction again
+    auto candidate = after;
+    if (!apply_rows(candidate, options)) return;
+    after = std::move(candidate);
+}
+
+core::Result<void> validate_galactic_lobby(const LobbySnapshot& snapshot, bool starting, std::span<const gc::MpLobbyCampaign> catalog,
+    const std::size_t dialog_rows) {
     auto options = decode_galactic_lobby_game(snapshot.game);
     if (!options) return core::Result<void>::failure(options.error());
-    auto campaign = check_options(snapshot.game, options.value(), catalog);
+    auto campaign = check_options(snapshot.game, options.value(), catalog, dialog_rows);
     if (!campaign) return core::Result<void>::failure(campaign.error());
     if (auto seats = check_seats(snapshot, options.value(), starting); !seats) return seats;
     if (starting) {
+        // The human seat limit (D1): staging may hold a ninth peer, but Ready and Start say why it cannot play: with every side
+        // at the limit no faction can take a second player (co-op seats only while sides x seats stay within it).
+        if (snapshot.seats.size() > gc::galactic_max_human_seats)
+            return refuse("A campaign game takes at most " + std::to_string(gc::galactic_max_human_seats)
+                + " human seats, so once every faction has a player no faction can take a second one.");
         auto draft = galactic_roster_draft(snapshot, catalog);
         if (!draft) return core::Result<void>::failure(draft.error());
         if (auto valid = gc::validate_mp_roster(draft.value(), false); !valid)
@@ -283,7 +412,7 @@ core::Result<gc::MpRoster> galactic_roster_draft(const LobbySnapshot& snapshot, 
     using Result = core::Result<gc::MpRoster>;
     auto options = decode_galactic_lobby_game(snapshot.game);
     if (!options) return Result::failure(options.error());
-    auto campaign = check_options(snapshot.game, options.value(), catalog);
+    auto campaign = check_options(snapshot.game, options.value(), catalog, 0);
     if (!campaign) return Result::failure(campaign.error());
     if (auto seats = check_seats(snapshot, options.value(), false); !seats) return Result::failure(seats.error());
     const auto& value = options.value();

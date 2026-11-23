@@ -39,6 +39,8 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
                         BattleCamera& space) {
     scene_ = &population;
     if (event.is_null()) return false;
+    // #8182: a view that commands nothing (a spectator) neither selects nor orders: the camera takes every gesture.
+    if (live.view_only()) { clear_selection(); return false; }
     if (const auto* modified = Object::cast_to<InputEventWithModifiers>(event.ptr()))
         right_modifiers_ = modifiers_of(*modified);
     // Capture before refreshing/picking; decoding an input may span simulation
@@ -657,6 +659,7 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
 }
 
 bool BattleInput::minimap_move(const double x, const double y, const bool double_click, LiveSessionView& live) {
+    if (live.view_only()) return false; // #8182: a watched battle orders nothing from the minimap
     ui::OrderInput* input = live.order_input();
     if (input == nullptr || selection_.empty()) return false;
     auto fixed_x = scene::fixed_from_binary32(static_cast<float>(x));
@@ -684,6 +687,9 @@ bool BattleInput::minimap_move(const double x, const double y, const bool double
 
 std::vector<sim::EntityId> BattleInput::controlled_selection(const LiveSessionView& live) const {
     auto selected = selection_.units();
+    // TL-15: command admission refuses a unit whose script flag cleared Set_Selectable.
+    if (const auto& refused = live.snapshot_index().script_unselectable(); !refused.empty())
+        std::erase_if(selected, [&](const auto id) { return std::binary_search(refused.begin(), refused.end(), id); });
     if (live.controller_policy_enabled()) std::erase_if(selected, [&](const auto id) { return !live.can_control(id); });
     return selected;
 }
@@ -697,6 +703,8 @@ bool BattleInput::local_order_selection(const LiveSessionView& live) const {
 
 bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, LiveSessionView& live,
                       BattleCamera& space) {
+    // #8182: no order, selection or control-group key for a view that commands nothing.
+    if (live.view_only()) return false;
     ui::OrderInput* input = live.order_input();
     // MP-06: requests enter the shared future-tick options stream, never local pacing.
     // The keyboard binding is a remake control; MP-U1 allows either human to request.

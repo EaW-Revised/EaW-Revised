@@ -27,6 +27,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -302,12 +303,22 @@ class LanLobbyStructure(unittest.TestCase):
 
     def test_a_campaign_room_defaults_to_two_humans_and_lists_the_campaign_title(self):
         # A campaign room opens its mesh only when every configured human joined: the skirmish
-        # transport capacity must not become its default seat count, or a joiner waits at Connecting.
+        # transport capacity must not become its default seat count, or a joiner waits at Connecting. The default is two until
+        # the campaign list is known, then one seat per playable faction (galactic_lobby_default_humans, LLB-22).
         staging = (SRC / "lan_lobby_screen_staging.cpp").read_text(encoding="utf-8")
         self.assertIn("requested_count == 0 ? impl_->galactic_humans : requested_count", staging)
         self.assertIn("std::uint32_t galactic_humans{2};", (SRC / "lan_lobby_screen_internal.hpp").read_text(encoding="utf-8"))
+        # D8 (#8071): the count is how many players the room waits for; the host is told so where it chooses.
+        self.assertIn("The room waits for this many players before the campaign can start.", staging)
         chat = (SRC / "lan_lobby_screen_chat.cpp").read_text(encoding="utf-8")
         self.assertIn("campaign_display_name(impl_->galactic_campaign)", chat)
+
+    def test_the_host_tells_the_room_how_many_rows_its_dialog_draws(self):
+        # The room plans no human row the dialog cannot draw: the host hands its dialog's row count to the backend before it pumps.
+        galactic = (SRC / "lan_lobby_screen_galactic.cpp").read_text(encoding="utf-8")
+        self.assertIn("impl.galactic_backend->set_dialog_rows(dialog_rows)", galactic)
+        self.assertLess(galactic.index("set_dialog_rows(dialog_rows)"), galactic.index("match_->pump_setup(skirmish::FixtureOptions{})"))
+        self.assertIn("*campaign, room->snapshot, match_->view().seat, dialog_rows)", galactic)
 
     def test_the_online_join_attaches_the_room_scope_with_the_directory_admission(self):
         screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
@@ -398,6 +409,100 @@ def load(test, directory, name, completed, failed_actions=()):
     test.assertEqual([action for action in result["actions"] if not action.endswith(" ok")],
                      [action + " FAILED" for action in failed_actions], result["actions"])
     return result
+
+
+def wide_campaign_mod(directory, playable, ai_only, small=0):
+    """A made-up overlay mod with one multiplayer campaign of `playable` player factions and `ai_only` AI factions (D8, #8071).
+
+    The names are invented here; nothing comes from the game's own files. The campaign is listed first, so a campaign room opens
+    on it. Home planets are stock planet names of the installed data.
+    """
+    planets = ["Yavin", "Coruscant", "Corellia", "Kuat", "Dantooine", "Hypori", "Korriban", "Kashyyyk", "Felucia", "Bothawui",
+               "Muunilinst", "Myrkr", "Dathomir", "Ryloth"]
+    names = [f"Wide_Player_{index + 1}" for index in range(playable)] + [f"Wide_Ai_{index + 1}" for index in range(ai_only)]
+    root = pathlib.Path(directory) / "wide_mod"
+    xml = root / "Data" / "XML"
+    xml.mkdir(parents=True, exist_ok=True)
+    (xml / "FactionFiles.xml").write_text(
+        '<?xml version="1.0" ?>\n<Faction_Files>\n<File>Factions.xml</File>\n<File>Expansion_Factions.xml</File>\n'
+        '<File>Factions_Wide.xml</File>\n</Faction_Files>\n', encoding="utf-8")
+    (xml / "CampaignFiles.xml").write_text(
+        '<?xml version="1.0" ?>\n<Campaign_Files>\n<File>Campaigns_Wide.xml</File>\n<File>Campaigns_Underworld_GC.xml</File>\n'
+        '<File>Campaigns_Underworld_Story.xml</File>\n<File>Campaigns_Multiplayer.xml</File>\n<File>Campaigns_Tutorial.xml</File>\n'
+        '<File>Campaigns_Underworld_Tutorial.xml</File>\n</Campaign_Files>\n', encoding="utf-8")
+    factions = ['<?xml version="1.0"?>\n<Factions>']
+    for index, name in enumerate(names):
+        player = index < playable
+        factions.append(
+            f'<Faction Name="{name}">\n<Is_Playable>{"true" if player else "false"}</Is_Playable>\n<Is_Neutral>No</Is_Neutral>\n'
+            f'<Basic_AI>BasicRebel</Basic_AI>\n<Color>{40 + index * 20}, {200 - index * 15}, {90 + index * 10}, 255</Color>\n</Faction>')
+    factions.append('</Factions>')
+    (xml / "Factions_Wide.xml").write_text("\n".join(factions) + "\n", encoding="utf-8")
+    campaign = ['<?xml version="1.0" ?>\n<Campaigns>\n<Campaign Name="Wide_Room_Test">',
+                '<Campaign_Set> Multiplayer_Campaign_Set </Campaign_Set>',
+                '<Locations>\n' + ",\n".join(planets[:len(names)] if len(names) <= len(planets) else planets) + '\n</Locations>']
+    for index, name in enumerate(names):
+        campaign.append(f'<Home_Location> {name}, {planets[index % len(planets)]} </Home_Location>')
+    campaign.append('<Is_Multiplayer> Yes </Is_Multiplayer>')
+    campaign.append('<Human_Victory_Conditions> Galactic_All_Planets_Controlled </Human_Victory_Conditions>')
+    campaign.append('<AI_Victory_Conditions> Galactic_All_Planets_Controlled </AI_Victory_Conditions>')
+    for name in names[playable:]:
+        campaign.append(f'<AI_Player_Control> {name}, BasicRebel </AI_Player_Control>')
+    campaign.append('</Campaign>')
+    if small:
+        # A second, smaller multiplayer campaign over the first factions: the host switches the room to it.
+        campaign += ['<Campaign Name="Small_Room_Test">', '<Campaign_Set> Multiplayer_Campaign_Set </Campaign_Set>',
+                     '<Locations>\n' + ",\n".join(planets[:small]) + '\n</Locations>']
+        for index, name in enumerate(names[:small]):
+            campaign.append(f'<Home_Location> {name}, {planets[index % len(planets)]} </Home_Location>')
+        campaign += ['<Is_Multiplayer> Yes </Is_Multiplayer>',
+                     '<Human_Victory_Conditions> Galactic_All_Planets_Controlled </Human_Victory_Conditions>',
+                     '<AI_Victory_Conditions> Galactic_All_Planets_Controlled </AI_Victory_Conditions>', '</Campaign>']
+    campaign.append('</Campaigns>')
+    (xml / "Campaigns_Wide.xml").write_text("\n".join(campaign) + "\n", encoding="utf-8")
+    return root
+
+
+def four_row_staging_dialog(mod, rows=4):
+    """Give the mod a LAN staging dialog that draws only `rows` player rows (a mod may author fewer than retail's nine).
+
+    The dialog script is the installed game's own (read at test time, nothing is copied into the repository); every control of a
+    row past `rows` is dropped from the staging dialog, so the viewer counts `rows` IDC_PLAYER_NAME_n gadgets.
+    """
+    import re
+    sys.path.insert(0, str(ROOT))
+    from tools.inventory.corpus import Corpus
+    source = Corpus(GAME_ROOT).read_effective("foc", "Data/Resources/GUIDialog/Guidialogs.rc")
+    if source is None:
+        raise unittest.SkipTest("the installed game has no dialog script")
+    codec = "utf-16" if source.data.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+    try:
+        script = source.data.decode(codec)
+    except UnicodeDecodeError:
+        script = source.data.decode("latin-1")
+    dialog = re.search(r"\bIDD_LAN_STAGING_DIALOG\s+DIALOGEX\b.*?\nEND\b", script, re.S)
+    if dialog is None:
+        raise unittest.SkipTest("the dialog script has no LAN staging dialog")
+    # A control statement continues on the next line after a trailing comma or a trailing "|" (a style list): it is kept or
+    # dropped as a whole, or a dropped row would leave its style words behind as a statement of their own.
+    newline = "\r\n" if "\r\n" in dialog[0] else "\n"
+    statements, continued = [], False
+    for line in dialog[0].split(newline):
+        if continued and statements:
+            statements[-1].append(line)
+        else:
+            statements.append([line])
+        continued = line.rstrip().endswith((",", "|"))
+    row_of = re.compile(r"\bIDC_[A-Z_]*?_(\d+)\b")  # the per-row gadgets: name, faction, colour, team, accept
+    kept = [line for statement in statements
+            if not any(int(index) >= rows for line in statement for index in row_of.findall(line))
+            for line in statement]
+    if len(re.findall(r"\bIDC_PLAYER_NAME_\d+\b", newline.join(kept))) != rows:
+        raise unittest.SkipTest("the staging dialog does not author one IDC_PLAYER_NAME_n per row as expected")
+    resource = pathlib.Path(mod) / "Data/Resources/GUIDialog/guidialogs.rc"
+    resource.parent.mkdir(parents=True, exist_ok=True)
+    # Bytes, not write_text: text mode would turn the script's own CRLF into CR CR LF on Windows.
+    resource.write_bytes(script.replace(dialog[0], newline.join(kept)).encode("utf-8"))
 
 
 @unittest.skipUnless(RUNTIME and GAME_ROOT,
@@ -611,10 +716,10 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertEqual((first["room_page"], first["room_pages"], first["rooms_total"]), (0, 2, 18))
         self.assertEqual(len(first["games"]), 10)
         self.assertIn("Locked night", first["locked"])
-        self.assertTrue(any("Locked night | Echo | 3/9 | Endor | ?" in game and "password" in game for game in first["games"]),
+        self.assertTrue(any("Locked night | TEXT_GAME_TYPE_TEAM_SPACE | 3/9 | Endor | ?" in game and "password" in game for game in first["games"]),
                         first["games"])
         self.assertEqual((second["room_page"], len(second["games"])), (1, 8))
-        self.assertEqual(by_host["games"][0].split(" | ")[1], "Echo")
+        self.assertTrue(by_host["games"][0].startswith("Locked night | "), by_host["games"])
         self.assertTrue(prompt["prompt_open"])
         self.assertEqual(prompt["prompt_error"], "")
         self.assertEqual(wrong["prompt_error"], "The password was not accepted.")
@@ -1005,6 +1110,132 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertTrue(report["closed"], report["actions"])
         self.assertNotIn("ERROR:", completed.stdout)
 
+    def run_galactic_rows(self, name, resolution, *extra, settle=0):
+        steps = ("resize:" + resolution, "sleep:10", "host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN",
+                 "host:Campaign rows", "wait:staging@60", "wait:room@60", *(("sleep:" + str(settle),) if settle else ("sleep:3",)),
+                 "snapshot", "shot:" + name + "-staging", "cancel", "cancel")
+        completed = subprocess.run(
+            command(self.cache, name, self.pictures, self.pictures / (name + ".png"), "--eawr-lan-name", "Solo",
+                    "--eawr-lan-game-port", "0", "--eawr-lighting", "sh", "--eawr-shadows", "on", *extra,
+                    *[arg for step in steps for arg in ("--eawr-lan-do", step)], resolution=resolution),
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=600)
+        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
+        self.assertNotIn("ERROR:", completed.stdout)
+        return load(self, self.pictures, name, completed.stdout)["snapshots"][0]
+
+    def test_galactic_room_shows_every_playable_faction(self):
+        # D8 (#8071): a new campaign room plans the host's row only and shows every other playable faction as an AI faction.
+        for resolution in ("1280x720", "2560x1080"):
+            snapshot = self.run_galactic_rows("gc-rows-stock-" + resolution, resolution)
+            shown = [row for row in snapshot["rows"] if row["visible"]]
+            self.assertEqual(shown[0]["kind"], "human")
+            self.assertTrue(shown[0]["name"].startswith("Solo"), shown[0]["name"])
+            self.assertGreaterEqual(len(shown), 3, "stock multiplayer entries have three playable factions")
+            self.assertTrue(all(row["kind"] == "ai" for row in shown[1:3]), [row["kind"] for row in shown])
+            self.assertFalse(any(row["kind"] == "more" for row in snapshot["rows"]), "the stock factions fit the dialog")
+
+    def test_galactic_room_wide_campaign_names_the_rows_it_cannot_draw(self):
+        # Eight player factions and four AI factions on the dialog's nine rows: the host's row, seven claimable rows, one line.
+        mod = wide_campaign_mod(self.directory, 8, 4)
+        for resolution in ("1280x720", "2560x1080"):
+            snapshot = self.run_galactic_rows("gc-rows-wide-" + resolution, resolution, "--eawr-mod-root", str(mod))
+            rows = snapshot["rows"]
+            self.assertEqual(snapshot["dialog_rows"], 9)
+            self.assertEqual(rows[0]["kind"], "human")
+            self.assertEqual([row["kind"] for row in rows[1:8]], ["ai"] * 7, [row["kind"] for row in rows])
+            self.assertEqual(rows[8]["kind"], "more")
+            self.assertEqual(rows[8]["name"], "+4 AI factions")
+            self.assertTrue(rows[8]["visible"])
+
+    def test_galactic_room_opens_for_every_playable_row_by_default_and_the_third_guest_claims_its_row(self):
+        # D8 (#8071), review fix: the host leaves "Human players" at its default; the stock campaign has three playable factions, so the
+        # room opens for three humans (never "room is full" for the third) and each guest claims a row of its own.
+        names = ["Solo", "Guest B", "Guest C"]
+        tag = "gc-rows-default-capacity"
+        with socket.socket() as available:
+            available.bind(("127.0.0.1", 0))
+            game_port = available.getsockname()[1]
+        ports = free_udp_ports(len(names))
+        host_script = ["host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "sleep:5",
+                       "host:Default rows", "wait:staging@60",
+                       *["wait:room_player:" + player + "@180" for player in names[1:]], "sleep:10", "snapshot",
+                       "shot:result-" + tag, "chat:default rows shots done", "sleep:20", "leave"]
+        scripts = [host_script] + [["sleep:30", "direct:127.0.0.1:" + str(game_port), "wait:room_player:" + player + "@180",
+                                    "wait:chat:default rows shots done@240", "leave"] for player in names[1:]]
+        processes, logs = [], []
+        try:
+            for index, (player, steps) in enumerate(zip(names, scripts)):
+                report_name = f"{tag}-{index}"
+                actions = [arg for step in steps for arg in ("--eawr-lan-do", step)]
+                argv = command(self.cache, report_name, self.pictures, self.pictures / f"{report_name}.png",
+                               "--eawr-lan-name", player, "--eawr-lan-colour", "0",
+                               "--eawr-lan-broadcast-port", str(ports[index]),
+                               *[arg for other in ports if other != ports[index]
+                                 for arg in ("--eawr-lan-broadcast-extra", str(other))],
+                               "--eawr-lan-game-port", str(game_port if index == 0 else 0), *actions)
+                log = (self.pictures / f"{report_name}.log").open("w", encoding="utf-8")
+                logs.append(log)
+                processes.append(subprocess.Popen(argv, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True))
+            for process in processes:
+                process.wait(timeout=900)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=30)
+            for log in logs:
+                log.close()
+        for index, process in enumerate(processes):
+            log = (self.pictures / f"{tag}-{index}.log").read_text(encoding="utf-8")
+            self.assertEqual(process.returncode, 0, log[-6000:])
+        host_log = (self.pictures / f"{tag}-0.log").read_text(encoding="utf-8")
+        report = load(self, self.pictures, f"{tag}-0", host_log)
+        full = report["snapshots"][-1]
+        humans = [row["name"] for row in full["rows"] if row["kind"] == "human" and row["visible"]]
+        self.assertEqual(len(humans), 3, [(row["kind"], row["name"]) for row in full["rows"]])
+        for player in names:
+            self.assertTrue(any(name.startswith(player) for name in humans), (player, humans))
+        self.assertTrue((self.pictures / f"result-{tag}.png").is_file())
+
+    def test_galactic_room_seats_follow_the_campaign_while_only_the_host_is_in(self):
+        # D8 (#8071), review fix: the room's seats follow the campaign the host picks (a room nobody else is in is opened again with the
+        # new number); the seats of a room with guests are proven by the room contracts (net_galactic_lobby_contracts).
+        mod = wide_campaign_mod(self.directory, 8, 4, small=3)
+        name = "gc-rows-switch"
+        # The wait is on the room's own seats: the room is opened again for each campaign, and its capacity is what changes.
+        steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Switch rows", "wait:capacity:8@60", "sleep:10",
+                 "snapshot", "campaign:Small_Room_Test", "wait:capacity:3@60", "sleep:10", "snapshot",
+                 "campaign:Wide_Room_Test", "wait:capacity:8@60", "sleep:10", "snapshot", "cancel", "cancel")
+        completed = subprocess.run(
+            command(self.cache, name, self.pictures, self.pictures / (name + ".png"), "--eawr-lan-name", "Solo",
+                    "--eawr-lan-game-port", "0", "--eawr-mod-root", str(mod),
+                    *[arg for step in steps for arg in ("--eawr-lan-do", step)]),
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=600)
+        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
+        wide, small, wide_again = load(self, self.pictures, name, completed.stdout)["snapshots"]
+        self.assertEqual(wide["room_capacity"], 8, "eight playable factions: a room for eight")
+        self.assertEqual(small["room_capacity"], 3, "the three faction campaign: a room for three")
+        self.assertEqual(wide_again["room_capacity"], 8)
+        small_shown = [row["kind"] for row in small["rows"] if row["visible"]]
+        self.assertEqual(small_shown[:3], ["human", "ai", "ai"], small_shown)
+        self.assertEqual(sum(row["kind"] == "ai" for row in wide_again["rows"][:8]), 7)
+
+    def test_galactic_room_with_a_four_row_dialog_keeps_its_last_row_for_the_hidden_rows_line(self):
+        # D8 (#8071), review fix: a mod's dialog draws four player rows for a twelve faction campaign. The room keeps the fourth row
+        # for the "+N AI factions" line, so a player is only ever seated on the three rows drawn above it (the seating itself is
+        # proven by the room contracts: net_galactic_lobby_contracts, ui_lan_lobby_contracts). A room with a mod and several
+        # guests does not form in this harness (also on main), so this case looks at the host's room alone.
+        mod = wide_campaign_mod(self.directory, 8, 4)
+        four_row_staging_dialog(mod, 4)
+        snapshot = self.run_galactic_rows("gc-rows-four-row-dialog", "1280x720", "--eawr-mod-root", str(mod), settle=20)
+        rows = snapshot["rows"]
+        self.assertEqual(snapshot["dialog_rows"], 4)
+        self.assertEqual([row["kind"] for row in rows], ["human", "ai", "ai", "more"], [row["kind"] for row in rows])
+        self.assertTrue(rows[0]["name"].startswith("Solo"), rows[0]["name"])
+        self.assertEqual(rows[3]["name"], "+9 AI factions", "the line has the fourth row to itself")
+        self.assertTrue(rows[3]["visible"])
+        self.assertTrue((self.pictures / "gc-rows-four-row-dialog-staging.png").is_file())
+
     def test_campaign_host_options_validate_cancel_and_restore_defaults(self):
         name = "campaign-host-options"
         steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign options", "wait:staging@60",
@@ -1194,7 +1425,7 @@ class LanLobbyGraphical(unittest.TestCase):
         shutil.rmtree(saves, ignore_errors=True)
         saves.mkdir(parents=True)
         steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign hang", "wait:staging@60",
-                 "load_game", "snapshot", "sleep:150", "snapshot", "load_game", "snapshot")
+                 "load_game", "wait:listing_pending@60", "snapshot", "wait:load_outcome@30", "snapshot", "load_game", "snapshot")
         completed = subprocess.run(
             command(self.cache, name, self.pictures, self.pictures / (name + ".png"),
                     "--eawr-lan-name", "Solo", "--eawr-lan-colour", "1", "--eawr-save-dir", str(saves),
@@ -1228,7 +1459,7 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertTrue(restoring["panel_button_disabled"], "Apply waits while the restore runs")
         name = "restore-progress-slow"
         steps = (*self.HOST_CAMPAIGN, "restore_fixture:299", "sleep:90", "snapshot", "shot:" + name + "-slow",
-                 "restore_cancel", "sleep:30", "snapshot", "shot:" + name + "-cancelled")
+                 "restore_cancel", "wait:restore_stopped@30", "sleep:2", "snapshot", "shot:" + name + "-cancelled")
         report = self.run_clicks(name, steps, saves, "separate")
         slow, cancelled = (shot["pointer"] for shot in report["snapshots"][-2:])
         self.assertRegex(slow["summary_first"], r"^Still waiting for the saved game to restore \(5:0\d so far\)")
@@ -1250,7 +1481,7 @@ class LanLobbyGraphical(unittest.TestCase):
         saves.mkdir(parents=True)
         steps = (*self.HOST_CAMPAIGN, "recover_fixture:3", "sleep:5", "snapshot", "shot:" + name + "-offered",
                  "recover_history", "sleep:1", "snapshot", "shot:" + name + "-converting",
-                 "sleep:8", "snapshot", "shot:" + name + "-converted")
+                 "wait:history_recovered@30", "snapshot", "shot:" + name + "-converted")
         report = self.run_clicks(name, steps, saves, "separate")
         offered, converting, converted = (shot["pointer"] for shot in report["snapshots"][-3:])
         self.assertTrue(offered["recoverable"], offered)
@@ -1565,11 +1796,15 @@ class LanLobbyGraphical(unittest.TestCase):
                 game_port = available.getsockname()[1]
             ports = free_udp_ports(count)
             host_script = ["host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", f"humans:{count}",
-                           "host:Stacked slot", "wait:staging@60", "click:EAWR_GC_TAB_COOP", "sleep:10", "snapshot",
-                           *["wait:room_player:" + player + "@180" for player in names[1:]], "sleep:30", "snapshot",
+                           "host:Stacked slot", "wait:staging@60", "click:EAWR_GC_TAB_COOP", "campaign:coop", "wait:capacity:" + str(count) + "@60",
+                           "sleep:10", "snapshot",
+                           *["wait:room_player:" + player + "@180" for player in names[1:]], "sleep:40", "snapshot",
                            "shot:result-" + tag, "chat:stack shots done", "sleep:20", "leave"]
-            scripts = [host_script] + [["sleep:30", "direct:127.0.0.1:" + str(game_port), "wait:room_player:" + player + "@180",
-                                        "share:Fordo", "sleep:30", "snapshot", "wait:chat:stack shots done@240", "leave"] for player in names[1:]]
+            # The host picks the first co-op campaign (one side): every guest is seated on the host's row by the room, so no guest moves
+            # (a multiplayer room would have each guest claim a row of its own, D8).
+            scripts = [host_script] + [["sleep:30", "direct:127.0.0.1:" + str(game_port),
+                                        "wait:room_player:" + player + "@180", "sleep:30", "snapshot",
+                                        "wait:chat:stack shots done@300", "leave"] for player in names[1:]]
             processes, logs = [], []
             try:
                 for index, (player, steps) in enumerate(zip(names, scripts)):
@@ -1600,30 +1835,34 @@ class LanLobbyGraphical(unittest.TestCase):
             host_log = (self.pictures / f"{tag}-0.log").read_text(encoding="utf-8")
             alone, full = load(self, self.pictures, f"{tag}-0", host_log)["snapshots"]
             shared = next(row for row in full["rows"] if row["cells"] > 1)
-            # One cell and one line per human, in the order they joined; the stack ends on the mods state of each.
+            # One cell and one line per human, each name once and whole (the room seats guests in the order they connect, which no
+            # test orders); the stack ends on the mods state of each.
             self.assertEqual(shared["cells"], count)
             self.assertEqual(len(shared["lines"]), count)
-            for player, line in zip(names, shared["lines"]):
-                self.assertTrue(line.startswith(player), shared["lines"])
+            self.assertCountEqual([line.rsplit(" - ", 1)[0] for line in shared["lines"]], names)
             # Each cell shows its own player's whole name and a mods state that is not cut (a shorter wording when the full one is wider).
             self.assertEqual(len(shared["cell_texts"]), count)
-            for player, cell in zip(names, shared["cell_texts"]):
-                self.assertTrue(cell.startswith(player) and "\u2026" not in cell, shared["cell_texts"])
+            self.assertCountEqual([cell.rsplit(" - ", 1)[0] for cell in shared["cell_texts"]], names)
+            for cell in shared["cell_texts"]:
+                self.assertNotIn("\u2026", cell, shared["cell_texts"])
                 self.assertRegex(cell, r" - (mods ready|ready|ok)$")
             self.assertEqual(shared["line_fits"], [True] * count, "a name is cut at " + resolution)
             # The host's list: every human on its own line, then a Kick per other human and no more.
             self.assertEqual(shared["items"][:count], shared["lines"])
-            self.assertEqual(shared["items"][count:], ["Kick " + player for player in names[1:]], shared["items"])
+            self.assertCountEqual(shared["items"][count:], ["Kick " + player for player in names[1:]], shared["items"])
             # A single-human slot of the same room is unchanged: one cell, the dialog's own place.
             before = {index: row for index, row in enumerate(alone["rows"]) if row["visible"]}
             after = {index: row for index, row in enumerate(full["rows"]) if row["visible"]}
-            first = min(after)
-            self.assertEqual(shared["top"], before[first]["top"])
+            held = next(index for index, row in after.items() if row["cells"] > 1)  # the row the humans share, wherever the campaign draws it
+            self.assertEqual(shared["top"], before[held]["top"])
             self.assertTrue(all(row["cells"] == 1 and not row["lines"] for row in alone["rows"]))
-            pitch = before[first + 1]["top"] - before[first]["top"] if first + 1 in before else 0
+            ordered = sorted(before)
+            pitch = before[ordered[1]]["top"] - before[ordered[0]]["top"] if len(ordered) > 1 else 0
             for index in after:
-                if index > first and after[index]["cells"] == 1 and index in before:
-                    self.assertAlmostEqual(after[index]["top"] - before[index]["top"], (count - 1) * pitch, delta=1.0)
+                if index == held or after[index]["cells"] != 1 or index not in before:
+                    continue
+                # Rows above the shared one stay, rows below move down by the lines the stack adds.
+                self.assertAlmostEqual(after[index]["top"] - before[index]["top"], (count - 1) * pitch if index > held else 0, delta=1.0)
             self.assertTrue((self.pictures / f"result-{tag}.png").is_file())
 
     def test_two_viewers_host_find_join_and_both_stagings_show_both_players(self):
@@ -1807,6 +2046,100 @@ $ids = @($p | ForEach-Object { [int]$_.ProcessId });
                     p.wait(timeout=30)
             for stream in streams:
                 stream.close()
+
+
+    @staticmethod
+    def mod_room_overlay(directory, playable=3):
+        """A made-up overlay mod with one multiplayer campaign of `playable` player factions and one AI faction (#8195).
+
+        The names are invented here; nothing comes from the game's own files. The campaign is listed first, so a campaign room
+        opens on it, and its home planets are stock planet names of the installed data. The harness mounts it with
+        --eawr-mod-root, which has no workshop or Mods key: the guests cannot identify it and ask before they continue.
+        """
+        planets = ["Yavin", "Coruscant", "Corellia", "Kuat", "Dantooine", "Hypori"]
+        names = [f"Room_Player_{index + 1}" for index in range(playable)] + ["Room_Ai_1"]
+        root = pathlib.Path(directory) / "mod_room_overlay"
+        xml = root / "Data" / "XML"
+        xml.mkdir(parents=True, exist_ok=True)
+        (xml / "FactionFiles.xml").write_text(
+            '<?xml version="1.0" ?>\n<Faction_Files>\n<File>Factions.xml</File>\n<File>Expansion_Factions.xml</File>\n'
+            '<File>Factions_Room.xml</File>\n</Faction_Files>\n', encoding="utf-8")
+        (xml / "CampaignFiles.xml").write_text(
+            '<?xml version="1.0" ?>\n<Campaign_Files>\n<File>Campaigns_Room.xml</File>\n<File>Campaigns_Underworld_GC.xml</File>\n'
+            '<File>Campaigns_Underworld_Story.xml</File>\n<File>Campaigns_Multiplayer.xml</File>\n<File>Campaigns_Tutorial.xml</File>\n'
+            '<File>Campaigns_Underworld_Tutorial.xml</File>\n</Campaign_Files>\n', encoding="utf-8")
+        factions = ['<?xml version="1.0"?>\n<Factions>']
+        for index, name in enumerate(names):
+            factions.append(
+                f'<Faction Name="{name}">\n<Is_Playable>{"true" if index < playable else "false"}</Is_Playable>\n'
+                f'<Is_Neutral>No</Is_Neutral>\n<Basic_AI>BasicRebel</Basic_AI>\n'
+                f'<Color>{40 + index * 20}, {200 - index * 15}, {90 + index * 10}, 255</Color>\n</Faction>')
+        factions.append('</Factions>')
+        (xml / "Factions_Room.xml").write_text("\n".join(factions) + "\n", encoding="utf-8")
+        campaign = ['<?xml version="1.0" ?>\n<Campaigns>\n<Campaign Name="Mod_Room_Test">',
+                    '<Campaign_Set> Multiplayer_Campaign_Set </Campaign_Set>',
+                    '<Locations>\n' + ",\n".join(planets[:len(names)]) + '\n</Locations>']
+        for index, name in enumerate(names):
+            campaign.append(f'<Home_Location> {name}, {planets[index]} </Home_Location>')
+        campaign += ['<Is_Multiplayer> Yes </Is_Multiplayer>',
+                     '<Human_Victory_Conditions> Galactic_All_Planets_Controlled </Human_Victory_Conditions>',
+                     '<AI_Victory_Conditions> Galactic_All_Planets_Controlled </AI_Victory_Conditions>',
+                     f'<AI_Player_Control> {names[-1]}, BasicRebel </AI_Player_Control>', '</Campaign>', '</Campaigns>']
+        (xml / "Campaigns_Room.xml").write_text("\n".join(campaign) + "\n", encoding="utf-8")
+        return root
+
+    def test_a_modded_galactic_lobby_with_two_guests_forms_once_each_answers_the_mod_review(self):
+        # #8195: a campaign room on a mod the guests cannot identify (a mod folder mounted by path) holds every joiner in the "Mods
+        # differ ... Continue joining?" box, on "Connecting...", until it answers. The harness had no way to answer it, so a room
+        # with a mod and guests never formed; nothing in the room or the transport was wrong. With the answer scripted
+        # (mod_review:yes), a host and two guests on one mod all reach the staging and list each other.
+        mod = self.mod_room_overlay(self.directory)
+        names = ["Host", "Guest B", "Guest C"]
+        tag = "gc-mod-room"
+        with socket.socket() as available:
+            available.bind(("127.0.0.1", 0))
+            game_port = available.getsockname()[1]
+        ports = free_udp_ports(len(names))
+        host_script = ["host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "humans:3", "host:Mod room",
+                       "wait:staging@60", *["wait:room_player:" + player + "@240" for player in names[1:]], "sleep:5",
+                       "snapshot", "shot:result-" + tag, "chat:mod room shots done", "sleep:20", "leave"]
+        guest_script = ["sleep:30", "direct:127.0.0.1:" + str(game_port), "wait:mod_review@180", "snapshot", "mod_review:yes",
+                        *["wait:room_player:" + player + "@240" for player in names], "sleep:5", "snapshot",
+                        "wait:chat:mod room shots done@240", "leave"]
+        processes, logs = [], []
+        try:
+            for index, player in enumerate(names):
+                report_name = f"{tag}-{index}"
+                actions = [arg for step in (host_script if index == 0 else guest_script) for arg in ("--eawr-lan-do", step)]
+                argv = command(self.cache, report_name, self.pictures, self.pictures / f"{report_name}.png",
+                               "--eawr-lan-name", player, "--eawr-lan-colour", "0", "--eawr-mod-root", str(mod),
+                               "--eawr-lan-broadcast-port", str(ports[index]),
+                               *[arg for other in ports if other != ports[index]
+                                 for arg in ("--eawr-lan-broadcast-extra", str(other))],
+                               "--eawr-lan-game-port", str(game_port if index == 0 else 0), *actions)
+                log = (self.pictures / f"{report_name}.log").open("w", encoding="utf-8")
+                logs.append(log)
+                processes.append(subprocess.Popen(argv, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True))
+            for process in processes:
+                process.wait(timeout=900)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+            for log in logs:
+                log.close()
+        for index, process in enumerate(processes):
+            output = (self.pictures / f"{tag}-{index}.log").read_text(encoding="utf-8", errors="replace")
+            self.assertEqual(process.returncode, 0, output[-3000:])
+            report = load(self, self.pictures, f"{tag}-{index}", output)
+            if index == 0:
+                continue  # the host's own steps wait for both guests to appear in its room
+            held, joined = report["snapshots"]
+            self.assertTrue(held["box_open"], "the joiner waits in the mod review box before it answers")
+            self.assertEqual(held["status"], "Connecting...", held["status"])
+            self.assertFalse(joined["box_open"], "answering the review closes the box")
+            self.assertEqual(joined["page"], "staging")
+            self.assertNotEqual(joined["status"], "Connecting...", joined["status"])
 
 
 if __name__ == "__main__":

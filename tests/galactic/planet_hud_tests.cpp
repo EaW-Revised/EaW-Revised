@@ -1249,6 +1249,15 @@ int case_galactic_planet_hud_tests() {
         std::vector<PlanetUiDepthEntry> crowd;
         for (std::uint64_t i = 0; i < 10; ++i) crowd.push_back({i, 100.0F - static_cast<float>(i), 0.0F, 0.0F, 80.0F});
         assert(plan_planet_ui_depth(crowd, 50.0F).hidden.front().count == max_planet_ui_occluders);
+        // #8158: the occluder is the drawn body (model half width x scale), never the larger click radius; a planet
+        // without a drawn model shows the placeholder sphere. Each disc names the body it stands for.
+        assert(planet_ui_body_radius(9.0F, 2.0F, 5.0F) == 18.0F);
+        assert(planet_ui_body_radius(0.0F, 2.0F, 5.0F) == 10.0F);
+        const auto named = plan_planet_ui_depth({{7, 100.0F, 0.0F, 0.0F, 30.0F}, {8, 50.0F, 40.0F, 0.0F, 20.0F}}, 100.0F);
+        assert(named.hidden.size() == 1 && named.hidden[0].id == 7 && named.hidden[0].discs[0].id == 8
+               && named.hidden[0].discs[0].radius == 20.0F);
+        // The plan takes one radius per body, so that the click radius no longer widens the disc is guarded by the GPU contract
+        // (tests/presentation/renderer/test_viewer_galactic_planet_ui_depth_runtime.py), which compares every disc with the model.
     }
     return 0;
 }

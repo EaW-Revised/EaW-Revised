@@ -20,6 +20,7 @@
 #include <iostream>
 #include <iterator>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -928,6 +929,29 @@ void test_asteroid_service() {
     state.hardpoints[2] = Fixed{};
     expect(tactical::random_destroyable_hardpoint(profile, state, random) == tactical::hull_target,
         "WHZ-14: without a live destroyable hardpoint, choose hull");
+    // WAD-27: a random-hardpoint delivery takes the chosen hardpoint's mesh route, or keeps the aimed route.
+    const std::vector<std::string> meshes{"hull", "gun", "engine"};
+    auto live = tactical::full_durability(profile);
+    live.hardpoints[1] = Fixed{};
+    tactical::CombatRandom route_random(7, 9, 11, tactical::random_hardpoint_slot);
+    for (int draw = 0; draw < 8; ++draw) {
+        expect(tactical::random_hardpoint_route(profile, live, meshes, tactical::hull_target, route_random) == 2,
+            "WAD-27: only the live destroyable hardpoint can be chosen, a dead or indestructible one never is");
+    }
+    live.hardpoints[2] = Fixed{};
+    expect(tactical::random_hardpoint_route(profile, live, meshes, 1, route_random) == 1,
+        "WAD-27: with no live destroyable hardpoint the supplied route stays");
+    const std::vector<std::string> unnamed{"", "", ""};
+    live = tactical::full_durability(profile);
+    expect(tactical::random_hardpoint_route(profile, live, unnamed, 1, route_random) == 1,
+        "WAD-27: a chosen hardpoint without a mesh name keeps the supplied route");
+    std::set<std::uint32_t> chosen;
+    for (std::uint64_t frame = 0; frame < 64; ++frame) {
+        tactical::CombatRandom varied(3, frame, 5, tactical::random_hardpoint_slot);
+        chosen.insert(tactical::random_hardpoint_route(profile, live, meshes, tactical::hull_target, varied));
+    }
+    expect(chosen == std::set<std::uint32_t>({1, 2}),
+        "WAD-27: the start of the scan is random over every authored hardpoint, so both live points are reachable");
 }
 
 } // namespace

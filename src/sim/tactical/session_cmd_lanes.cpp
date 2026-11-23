@@ -1206,18 +1206,55 @@ core::Result<void> session_detail::Tick::PlanLanes::apply_beacon(const PlayerCom
 // unit or target, a squadron container or a craft (which fly by their squadron) is skipped.
 core::Result<void> session_detail::Tick::PlanLanes::scripted_teleport(const ScriptTeleportPayload& teleport, const EntityId unit_id) {
     auto& staged = phase.tracked_.value().staged.value();
-    const auto& frame = phase.tracked_.value().frame.value();
-    const auto& table = phase.impl_->motion;
     const auto found = staged.find(unit_id);
     const auto target = staged.find(teleport.target);
     if (found == staged.end() || target == staged.end() || unit_id == teleport.target) return core::Result<void>::success();
-    if (phase.impl_->squadrons.end() != std::find_if(phase.impl_->squadrons.begin(), phase.impl_->squadrons.end(),
+    const math::Vec3 point = target->second.state.position;
+    const math::Quat facing = target->second.state.rotation;
+    return place_scripted(unit_id, point, &facing);
+}
+
+// Lua Teleport(position): the unit lands on the point (z included) keeping its own facing, and stops there; a dead
+// unit or a craft (which flies by its squadron) is skipped. A squadron container moves with every member keeping its
+// offset from the container (docs/behaviour/walks/squadrons.md, Lua Teleport on a team). Garrisons are a land-battle
+// concept and this host runs space battles only, so there is no garrison to leave.
+core::Result<void> session_detail::Tick::PlanLanes::scripted_teleport_position(const ScriptTeleportPositionPayload& teleport, const EntityId unit_id) {
+    auto& staged = phase.tracked_.value().staged.value();
+    const auto row = std::find_if(phase.impl_->squadrons.begin(), phase.impl_->squadrons.end(),
+        [&](const auto& candidate) { return candidate.container == unit_id; });
+    const auto found = staged.find(unit_id);
+    if (row == phase.impl_->squadrons.end() || found == staged.end()) return place_scripted(unit_id, teleport.position, nullptr, false);
+    const auto old_position = found->second.state.position;
+    const std::vector<EntityId> members = row->members;
+    if (auto placed = place_scripted(unit_id, teleport.position, nullptr, true); !placed) return placed;
+    for (const auto member : members) {
+        const auto craft = staged.find(member);
+        if (craft == staged.end()) continue;
+        const math::Vec3 offset{craft->second.state.position.x, craft->second.state.position.y, craft->second.state.position.z};
+        const auto dx = math::subtract(offset.x, old_position.x), dy = math::subtract(offset.y, old_position.y),
+            dz = math::subtract(offset.z, old_position.z);
+        if (!dx || !dy || !dz) return core::Result<void>::failure(!dx ? dx.error() : !dy ? dy.error() : dz.error());
+        const auto nx = math::add(teleport.position.x, dx.value()), ny = math::add(teleport.position.y, dy.value()),
+            nz = math::add(teleport.position.z, dz.value());
+        if (!nx || !ny || !nz) return core::Result<void>::failure(!nx ? nx.error() : !ny ? ny.error() : nz.error());
+        if (auto placed = place_scripted(member, math::Vec3{nx.value(), ny.value(), nz.value()}, nullptr, true); !placed) return placed;
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> session_detail::Tick::PlanLanes::place_scripted(const EntityId unit_id, const math::Vec3& position, const math::Quat* rotation, const bool squadron_part) {
+    auto& staged = phase.tracked_.value().staged.value();
+    const auto& frame = phase.tracked_.value().frame.value();
+    const auto& table = phase.impl_->motion;
+    const auto found = staged.find(unit_id);
+    if (found == staged.end()) return core::Result<void>::success();
+    if (!squadron_part && phase.impl_->squadrons.end() != std::find_if(phase.impl_->squadrons.begin(), phase.impl_->squadrons.end(),
             [&](const auto& row) { return row.container == unit_id
                 || std::find(row.members.begin(), row.members.end(), unit_id) != row.members.end(); }))
         return core::Result<void>::success();
     auto& live = found->second;
-    live.state.position = target->second.state.position;
-    live.state.rotation = target->second.state.rotation;
+    live.state.position = position;
+    if (rotation != nullptr) live.state.rotation = *rotation;
     live.state.order = order_for(StopPayload{}, phase.tick);
     live.speed = math::Fixed{};
     if (live.motion) {
@@ -1238,6 +1275,70 @@ core::Result<void> session_detail::Tick::PlanLanes::scripted_teleport(const Scri
             if (tracking) tracking->statics.reset();
         }
     }
+    return core::Result<void>::success();
+}
+
+// Lua Cinematic_Hyperspace_In(frames): the unit joins the hyperspace arrival lane at its own position and facing. The
+// retail locomotor starts its arrival sequence with its move counter at 25 minus the argument and advances it a frame at
+// a time to the sequence's end at 150; the shared arrival state is that sequence, so the unit starts at arrival frame
+// 25 minus the rounded argument (0 for 25 or more). A dead unit, an object that cannot move, a unit already arriving,
+// a squadron container and a craft (which fly by their squadron) are skipped.
+core::Result<void> session_detail::Tick::PlanLanes::scripted_hyperspace_in(const ScriptHyperspaceInPayload& hyperspace, const EntityId unit_id) {
+    auto& staged = phase.tracked_.value().staged.value();
+    auto& arrivals = phase.staging_.value().arrivals.value();
+    const auto found = staged.find(unit_id);
+    if (found == staged.end() || !found->second.motion || arrivals.contains(unit_id)) return core::Result<void>::success();
+    if (phase.impl_->squadrons.end() != std::find_if(phase.impl_->squadrons.begin(), phase.impl_->squadrons.end(),
+            [&](const auto& row) { return row.container == unit_id
+                || std::find(row.members.begin(), row.members.end(), unit_id) != row.members.end(); }))
+        return core::Result<void>::success();
+    auto& live = found->second;
+    const auto matrix = math::to_matrix(live.state.rotation, {});
+    if (!matrix) return core::Result<void>::failure(matrix.error());
+    auto ahead = math::transform_vector(matrix.value(), {math::Fixed::from_raw(math::Fixed::scale), {}, {}});
+    if (!ahead) return core::Result<void>::failure(ahead.error());
+    auto flat = math::Vec3{ahead.value().x, ahead.value().y, {}};
+    if (flat == math::Vec3{}) flat = math::Vec3{math::Fixed::from_raw(math::Fixed::scale), {}, {}};
+    const auto direction = math::normalize(flat);
+    if (!direction) return core::Result<void>::failure(direction.error());
+    const auto frames = std::min<std::uint32_t>(hyperspace.frames, arrival_frames);
+    const ArrivalState arrival{frames >= 25U ? 0U : 25U - frames, live.state.position, direction.value()};
+    const auto start = arrival_position(arrival);
+    if (!start) return core::Result<void>::failure(start.error());
+    live.state.position = start.value();
+    live.state.order = order_for(StopPayload{}, phase.tick);
+    live.speed = math::Fixed{};
+    if (live.motion) {
+        if (auto stopped = phase.impl_->plan_order(live, StopPayload{}, phase.tracked_.value().frame.value()); !stopped) return stopped;
+    }
+    arrivals.emplace(unit_id, arrival);
+    return core::Result<void>::success();
+}
+
+// Lua Cancel_Hyperspace (TL-17): a unit in its hyperspace arrival sequence leaves it at once and stands, stopped, at the
+// sequence's exit point. Any other unit, a dead one, a squadron container and a craft (which fly by their squadron) are
+// skipped, as for Cinematic_Hyperspace_In.
+core::Result<void> session_detail::Tick::PlanLanes::scripted_cancel_hyperspace(const EntityId unit_id) {
+    auto& staged = phase.tracked_.value().staged.value();
+    auto& arrivals = phase.staging_.value().arrivals.value();
+    const auto found = staged.find(unit_id);
+    const auto arriving = arrivals.find(unit_id);
+    if (found == staged.end() || arriving == arrivals.end()) return core::Result<void>::success();
+    const auto& eligible = phase.impl_->motion.hyperspace_cancel_types;
+    if (!std::binary_search(eligible.begin(), eligible.end(), found->second.state.type_id))
+        return core::Result<void>::success();
+    if (phase.impl_->squadrons.end() != std::find_if(phase.impl_->squadrons.begin(), phase.impl_->squadrons.end(),
+            [&](const auto& row) { return row.container == unit_id
+                || std::find(row.members.begin(), row.members.end(), unit_id) != row.members.end(); }))
+        return core::Result<void>::success();
+    auto& live = found->second;
+    live.state.position = arriving->second.exit;
+    live.state.order = order_for(StopPayload{}, phase.tick);
+    live.speed = math::Fixed{};
+    if (live.motion) {
+        if (auto stopped = phase.impl_->plan_order(live, StopPayload{}, phase.tracked_.value().frame.value()); !stopped) return stopped;
+    }
+    arrivals.erase(arriving);
     return core::Result<void>::success();
 }
 

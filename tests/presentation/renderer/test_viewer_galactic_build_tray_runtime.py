@@ -28,6 +28,16 @@ var done = false
 var space = JSON.parse_string(%(space)s)
 var open_tray = %(open)s
 var clicks = JSON.parse_string(%(clicks)s)
+var probe = %(probe)s
+var probe_at = -1
+var probe_log = {}
+var probe_target = null
+var probe_close_at = -1
+var probe_pos = Vector2()
+var plan_mode = %(plan)s
+var plan = []
+var plan_index = -1
+var plan_done = 0
 var capture_path = %(capture)s
 func _initialize(): call_deferred("_start")
 func _start():
@@ -62,11 +72,104 @@ func hover(position):
     motion.position = position
     motion.global_position = position
     Input.parse_input_event(motion)
+func behind_buttons():
+    # Hud buttons of another shell (the planet menu) whose centre lies under the open tray panel.
+    var panel = root.find_child("GalacticBuildTray", true, false)
+    var found = []
+    if panel == null or not panel.is_visible_in_tree(): return found
+    var bar = panel.get_parent()
+    var area = panel.get_global_rect()
+    for node in root.find_children("*", "EawrHudButton", true, false):
+        var host = node.get_parent()
+        if host == bar or host == null or host.get_class() != "EawrTacticalHud" or not node.is_visible_in_tree(): continue
+        if area.has_point(node.get_global_rect().get_center()): found.append(node)
+    return found
+func tray_targets():
+    # A tray card, a category header and an empty point of the panel (nothing of the tray drawn there).
+    var panel = root.find_child("GalacticBuildTray", true, false)
+    var found = {}
+    if panel == null or not panel.is_visible_in_tree(): return found
+    var rects = []
+    probe_log["children"] = []
+    for node in panel.get_parent().get_children():
+        probe_log["children"].append([node.get_class(), str(node.name), node.visible if node is CanvasItem else null, str(node.get_global_rect().size) if node is Control else ""])
+        if node == panel or not (node is Control) or not node.visible: continue
+        var rect = node.get_global_rect()
+        # A header label's rect has no height of its own (its text is drawn from its top edge): click on that edge.
+        if node.get_class() == "EawrHudText" and rect.size.x > 0:
+            if not found.has("header"): found["header"] = rect.position + Vector2(rect.size.x * 0.5, 3)
+            continue
+        if rect.size.x <= 0 or rect.size.y <= 0: continue
+        rects.append(rect)
+        if node.get_class() == "EawrHudButton" and not node.name.begins_with("GalacticBuildTray") and not found.has("card"): found["card"] = rect.get_center()
+    var area = panel.get_global_rect()
+    var y = area.position.y + 6
+    while y < area.end.y - 6 and not found.has("background"):
+        var x = area.position.x + 6
+        while x < area.end.x - 6:
+            var point = Vector2(x, y)
+            var covered = false
+            for rect in rects:
+                if rect.has_point(point):
+                    covered = true
+                    break
+            if not covered:
+                found["background"] = point
+                break
+            x += 6
+        y += 6
+    return found
+func build_plan():
+    var targets = tray_targets()
+    probe_log["targets"] = {}
+    for name in targets: probe_log["targets"][name] = [targets[name].x, targets[name].y]
+    for name in targets:
+        var p = targets[name]
+        plan.append(["hover", p])
+        for button in [MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE]:
+            plan.append(["button", p, button, true, false])
+            plan.append(["button", p, button, false, false])
+            plan.append(["button", p, button, true, true])
+            plan.append(["button", p, button, false, false])
+            plan.append(["button", p, button, true, false])
+            for step in range(1, 5): plan.append(["motion", p + Vector2(-60 * step, 10 * step), button])
+            plan.append(["button", p + Vector2(-240, 40), button, false, false])
+        for wheel in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
+            plan.append(["button", p, wheel, true, false])
+            plan.append(["button", p, wheel, false, false])
+    probe_log["events"] = plan.size()
+func send_item(item):
+    var kind = item[0]
+    var p = item[1]
+    if kind == "hover":
+        hover(p)
+        return
+    if kind == "motion":
+        var motion = InputEventMouseMotion.new()
+        motion.position = p
+        motion.global_position = p
+        motion.button_mask = 1 << (item[2] - 1)
+        Input.parse_input_event(motion)
+        return
+    var event = InputEventMouseButton.new()
+    event.position = p
+    event.global_position = p
+    event.button_index = item[2]
+    event.pressed = item[3]
+    event.double_click = item[4]
+    event.button_mask = (1 << (item[2] - 1)) if (item[3] and item[2] <= 3) else 0
+    Input.parse_input_event(event)
+func hovered_info():
+    var control = root.gui_get_hovered_control()
+    if control == null: return {"path": "", "z": -1, "in_layer": false}
+    var panel = root.find_child("GalacticBuildTray", true, false)
+    return {"path": str(control.get_path()), "z": control.z_index, "in_layer": panel != null and control.get_parent() == panel.get_parent()}
 func shown(name):
     var node = root.find_child(name, true, false)
     return node != null and node.is_visible_in_tree()
 func finish():
     done = true
+    if probe or plan_mode: states.append({"probe": probe_log})
     var file = FileAccess.open(capture_path.get_basename() + "-steps.json", FileAccess.WRITE)
     file.store_string(JSON.stringify(states))
     file.close()
@@ -88,6 +191,43 @@ func _process(delta):
     if seen > 0 and opened < 0 and frame == seen + 20:
         press(handle.get_global_rect().get_center())
         opened = frame
+    if plan_mode and opened > 0:
+        if plan_index < 0 and frame == opened + 30:
+            build_plan()
+            plan_index = 0
+        elif plan_index >= 0:
+            if plan_index < plan.size():
+                send_item(plan[plan_index])
+                plan_index += 1
+            else:
+                plan_done += 1
+                if plan_done == 10: finish()
+        return false
+    if probe and opened > 0:
+        # The pointer over a planet-menu button behind the open tray: the tray must hold the hover and the tooltip.
+        var behind = behind_buttons()
+        if probe_at < 0 and frame == opened + 30:
+            probe_log["behind"] = behind.size()
+            if behind.is_empty(): finish()
+            else:
+                probe_target = behind[0]
+                probe_log["target"] = str(probe_target.get_path())
+                probe_pos = probe_target.get_global_rect().get_center()
+                hover(probe_pos)
+                probe_at = frame
+        elif probe_at > 0 and frame == probe_at + 30:
+            probe_log["hovered"] = hovered_info()
+            probe_log["target_hovered"] = probe_target.is_hovered()
+            # Close the tray from its handle: the planet view gets the pointer back.
+            press(handle.get_global_rect().get_center())
+            probe_close_at = frame
+            probe_at = -2
+        elif probe_close_at > 0 and frame == probe_close_at + 20:
+            hover(probe_pos)
+        elif probe_close_at > 0 and frame == probe_close_at + 50:
+            probe_log["closed_hovered"] = hovered_info()
+            finish()
+        return false
     if opened > 0:
         var step = (frame - opened) / 20
         if (frame - opened) %% 20 == 0 and step >= 1 and step <= clicks.size():
@@ -175,7 +315,7 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         return self.tab_point("b_space_tab")
 
     def run_viewer(self, name, *, overflow, space, open_tray=False, clicks=(), switch=None, layer=None, tray_key=None,
-                   mod=None, size="1280x720"):
+                   mod=None, size="1280x720", probe=False, extra=(), plan=False):
         settings = self.directory / (name + ".cfg")
         lines = ["eawr-settings 1", "revised_layer_enabled=1", "revised_layer_path=" + (layer or self.layer).as_posix()]
         if switch is not None:
@@ -187,13 +327,14 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         driver.write_text(DRIVER % {
             "space": repr(json.dumps(self.space_point() if space else None)), "open": "true" if open_tray else "false",
             "clicks": repr(json.dumps([step if isinstance(step, dict) else list(step) for step in clicks])),
-            "capture": json.dumps(capture.as_posix())},
+            "capture": json.dumps(capture.as_posix()), "probe": "true" if probe else "false", "plan": "true" if plan else "false"},
             encoding="utf-8")
         arguments = ["--eawr-galactic", CAMPAIGN, "--eawr-game-root", GAME_ROOT, "--eawr-galactic-paused", "yes",
                      "--eawr-galactic-dismiss-story", "yes", "--eawr-settings-file", str(settings), "--eawr-report", str(report),
                      "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on"]
         if overflow:
             arguments += ["--eawr-mod-root", str(mod or self.mod)]
+        arguments += list(extra)
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", size,
                                  "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--", *arguments],
                                 cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
@@ -204,6 +345,57 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         self.assertEqual(result.returncode, 0, data.get("failure") or log)
         self.assertTrue(capture.is_file(), log)
         return data, log
+
+    def test_the_open_tray_holds_the_pointer_over_the_planet_menu_behind_it(self):
+        # #8029: zoomed on a planet, the open tray overlaps the planet menu's buttons. The pointer over one of them is
+        # the tray's: the hovered control is a tray control (a child of the tray's own layer, placed after both HUD shells)
+        # and the planet-menu button behind it is not hovered, so no hover art and no popup reach through.
+        data, _ = self.run_viewer("behind", overflow=True, space=True, open_tray=True, probe=True,
+                                  extra=("--eawr-galactic-focus", "15", "--eawr-galactic-flight-ms", "750"))
+        steps = json.loads((self.directory / "behind-steps.json").read_text(encoding="utf-8"))
+        probe = next(step["probe"] for step in steps if "probe" in step)
+        self.assertGreater(probe.get("behind", 0), 0, ("a planet-menu button lies under the open tray", probe))
+        hovered = probe["hovered"]
+        self.assertTrue(hovered["in_layer"], ("the tray holds the pointer: the hovered control is a child of the tray layer", probe))
+        self.assertFalse(probe["target_hovered"], ("the planet-menu button behind the tray is not hovered", probe))
+        self.assertFalse(probe["closed_hovered"]["in_layer"], ("with the tray closed it no longer holds the pointer over the planet view", probe))
+        stack_popup = data["fleet_hud"]["stack_popup"]
+        self.assertEqual(stack_popup["key"], 0, ("no fleet stack popup opens through the tray", stack_popup))
+
+    def click_through_case(self, name, *, space, layer, mod):
+        # Clicking the tray: a clicked run (press, release, double click, drag out of the tray, wheel; left, right and middle
+        # button; on a card, a category header and an empty point of the panel) against an untouched run of the same start.
+        # The planet view behind the tray gets no event (the count the planet view keeps of the mouse events it received
+        # over the tray stays 0), and its selection, camera, drag and ground clicks are what the untouched run has.
+        extra = ("--eawr-galactic-focus", "15", "--eawr-galactic-flight-ms", "750")
+        quiet, _ = self.run_viewer(name + "-quiet", overflow=True, space=space, layer=layer, mod=mod, open_tray=True, extra=extra)
+        data, _ = self.run_viewer(name, overflow=True, space=space, layer=layer, mod=mod, open_tray=True, plan=True, extra=extra)
+        steps = json.loads((self.directory / (name + "-steps.json")).read_text(encoding="utf-8"))
+        log = next(step["probe"] for step in steps if "probe" in step)
+        self.assertEqual(data["build_tray"]["world_events_over_tray"], 0, (name, "the planet view got events over the tray"))
+        self.assertEqual(data["map_input"]["selected"], quiet["map_input"]["selected"], (name, "the selection changed"))
+        for key in ("eye", "target"):
+            for now, before in zip(data["camera"][key], quiet["camera"][key]):
+                self.assertAlmostEqual(now, before, places=3, msg=(name, "the camera moved", key))
+        self.assertEqual(data["fleet_hud"]["drag"], quiet["fleet_hud"]["drag"], (name, "a drag started in the planet view"))
+        self.assertEqual(data["ground_hud"]["clicks"], quiet["ground_hud"]["clicks"], (name, "the ground view got clicks"))
+        self.assertEqual(set(log.get("targets", {})), {"card", "header", "background"}, (name, "the three click targets exist", log))
+        self.assertGreater(log["events"], 100, (name, log))
+
+    def test_clicks_on_the_open_tray_never_reach_the_planet_view(self):
+        # #8029 (owner): the tray takes every click, double click, drag and wheel over it: the space and the ground tray, in
+        # the Revised look (the bar's own shell art behind it) and with a component's art behind it (Back_Source Component).
+        component = self.directory / "revised-component"
+        layout = component / "Data/XML/RevisedBuildTray.xml"
+        shutil.copytree(self.layer, component)
+        text = layout.read_text(encoding="utf-8")
+        self.assertIn("<Back_Source>Bar</Back_Source>", text)
+        layout.write_text(text.replace("<Back_Source>Bar</Back_Source>",
+                                       "<Back_Source>Component</Back_Source><Back_Component>tooltip_back</Back_Component>"),
+                          encoding="utf-8")
+        for look, layer in (("revised", self.layer), ("component", component)):
+            for tab, space, mod in (("space", True, self.mod), ("ground", False, self.ground_mod)):
+                self.click_through_case("click-%s-%s" % (look, tab), space=space, layer=layer, mod=mod)
 
     def test_the_bar_keeps_a_right_margin_at_every_window_size(self):
         # GHUD-S99 (#8022): the bar was clipped at the screen's right edge below a width and flush above it. Every drawn
@@ -382,6 +574,69 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
             a, b = control["rect"], tray["handle_rect"]
             self.assertFalse(a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3],
                              f"{control} covers the handle")
+
+    def check_header_labels(self, name, tray):
+        """#8031, #8159: every category name rides above the first icon of its own group (GBT-06): no label rect intersects
+        any entry's frame, the first entry of the group at the label's left edge starts below the label's bottom, the label
+        is nearer to that entry than to the icon row above it, and its strip is the line the label draws."""
+        self.assertTrue(tray["open"], (name, tray))
+        headers, entries = tray["header_rects"], [entry["rect"] for entry in tray["shown_entries"]]
+        self.assertTrue(headers and entries, (name, "the tray shows category labels over entries", tray))
+        # GBT-05: no two identical headers in one tray (a class group worded like a category is merged into it, #8160).
+        texts = tray["header_texts"]
+        self.assertEqual(len(texts), len(headers), (name, texts))
+        self.assertEqual(len(texts), len({text.lower() for text in texts}), (name, "two labels read the same", texts))
+        for header in headers:
+            # A label has the height of its text (a HUD text's own minimum height is 0: #8159 laid every label out with a
+            # zero-height strip, half over the icons below it).
+            self.assertGreaterEqual(header[3], tray["header_text_pixels"] - 0.5,
+                                    (name, "a label strip is shorter than the text it draws", header, tray["compact"]))
+            # The strip is exactly the line the labels draw, at the full and at the compact size step alike: the compact
+            # step used to shrink it to 0.8 of that line (the review of #8179), which the glyph bound above cannot see.
+            self.assertGreaterEqual(tray["header_line_pixels"], tray["header_text_pixels"] - 0.5, (name, tray["header_line_pixels"]))
+            self.assertAlmostEqual(header[3], tray["header_line_pixels"], delta=0.5,
+                                   msg=(name, "a label strip is not the line the label draws", header, tray["compact"]))
+            for entry in entries:
+                apart = (header[0] + header[2] <= entry[0] + 0.5 or entry[0] + entry[2] <= header[0] + 0.5
+                         or header[1] + header[3] <= entry[1] + 0.5 or entry[1] + entry[3] <= header[1] + 0.5)
+                self.assertTrue(apart, (name, "a label sits on an icon frame", header, entry))
+            own = [entry for entry in entries if abs(entry[0] - header[0]) <= 1.0 and entry[1] >= header[1] + header[3] - 0.5]
+            self.assertTrue(own, (name, "no icon of the label's group starts below it", header))
+            below = min(entry[1] for entry in own) - (header[1] + header[3])
+            self.assertGreater(below, 0.5, (name, "the label touches its own icons: no lift", header))
+            over = [entry for entry in entries if entry[1] + entry[3] <= header[1] + 0.5
+                    and entry[0] < header[0] + header[2] and header[0] < entry[0] + entry[2]]
+            if over:
+                gap = header[1] - max(entry[1] + entry[3] for entry in over)
+                self.assertGreaterEqual(gap, 2.0 * below - 0.5, (name, "the label hugs the row above, not its own icons", header))
+
+    def test_header_labels_sit_above_their_row_and_never_on_an_icon_frame_on_the_space_and_the_ground_tray(self):
+        # The extra window is the ground tab (the space tab's click point is read at 1280x720).
+        trays = {}
+        for name, mod, space, size in (("labels-space", self.mod, True, "1280x720"), ("labels-ground", self.ground_mod, False, "1280x720"),
+                                       ("labels-ground-small", self.ground_mod, False, "1024x768")):
+            data, _ = self.run_viewer(name, overflow=True, space=space, open_tray=True, mod=mod, size=size)
+            trays[name] = data["build_tray"]
+            self.assertFalse(trays[name]["compact"], (name, "the full size step fits the free height"))
+            self.check_header_labels(name, trays[name])
+        # The compact size step: the same space tray under a layer whose galaxy top limit leaves 90 percent of the full tray's
+        # height, so the full step no longer fits and the packer takes the compact one (the close icon is 16 reference
+        # units wide, which gives the reference scale).
+        full = trays["labels-space"]
+        ui = full["close"]["rect"][2] / 16.0
+        panel = full["panel_rect"]
+        limit = (panel[1] + panel[3] - 0.9 * panel[3]) / ui
+        layer = self.directory / "revised-compact"
+        shutil.copytree(self.layer, layer)
+        path = layer / "Data/XML/RevisedBuildTray.xml"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("<Max_Rows>", text)
+        top_limit = "<Galaxy_Top_Limit><Y>%.2f</Y></Galaxy_Top_Limit>" % limit
+        path.write_text(text.replace("<Max_Rows>", top_limit + "<Max_Rows>", 1), encoding="utf-8")
+        data, _ = self.run_viewer("labels-space-compact", overflow=True, space=True, open_tray=True, mod=self.mod, layer=layer)
+        compact = data["build_tray"]
+        self.assertTrue(compact["compact"], ("the compact size step was not taken", compact["panel_rect"], panel))
+        self.check_header_labels("labels-space-compact", compact)
 
     def test_the_land_strip_is_never_covered_on_the_ground_tab(self):
         """GBT-14 on the GROUND tab: with the stock ground factories at Coruscant the ground list overflows; land units

@@ -247,7 +247,8 @@ script runs. Library functions are Lua code, not missing engine bindings.
 | `Type.Get_Combat_Rating` | M; an unsupported object-method namesake is not this API | MC30, Krayt, Slave I |
 | `Object.Get_Contained_Object_Count` | M | Vader/container replenishment |
 | `Find_Best_Local_Threat_Center` | M; native IG-2000 logic does not bind it | Sundered Heart, IG-2000 |
-| `WeightedTypeList.Create`, list `Parse` | P: one placeholder handle, Parse validates but does not retain weights | hero metadata |
+| `WeightedTypeList.Create`, list `Parse` | B in the galactic object host: a per-instance Lua list that retains the upper-case names and weights; nothing evaluates them yet (see `EvaluateTypeList`) | hero metadata |
+| `Find_Player`, `Find_First_Object` | B in the galactic object host with the story host's rules (faction or "local" lookup; planet or lowest live object of a named type) | start-time scripts |
 | `EvaluateTypeList` | M | `HeroPlanAttach.Get_Target_Weight` metadata evaluation |
 | `Player.Get_Difficulty` | P: constant Normal | stock `Try_Ability` chance policy |
 | `GameRandom` | P: deterministic per-instance stream rather than original shared stream | original initial service phasing uses synchronized host RNG; preserve that distinct host-phase seam |

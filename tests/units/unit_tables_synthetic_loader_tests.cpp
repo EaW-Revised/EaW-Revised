@@ -1718,6 +1718,44 @@ void synthetic_tables() {
         }
     }
     {
+        // WPCM-02..04: every Projectile_Combat_Mod_* tag reaches the projectile's profile; the radius tag is ignored.
+        for (const auto* stat : {"COMBAT_MOD_HEALTH", "COMBAT_MOD_DAMAGE", "COMBAT_MOD_ENERGY", "COMBAT_MOD_SHIELD",
+                                 "COMBAT_MOD_DEFENSE", "COMBAT_MOD_SPEED", "COMBAT_MOD_FIRE_RANGE", "COMBAT_MOD_FIRE_RATE"}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            const std::string opening = "<Projectile Name=\"Proj_Test_Generic\">";
+            xml.insert(xml.find(opening) + opening.size(),
+                std::string("<Projectile_Combat_Mod>") + stat + "</Projectile_Combat_Mod>"
+                "<Projectile_Combat_Mod_Radius>5000</Projectile_Combat_Mod_Radius>"
+                "<Projectile_Combat_Mod_Duration>14</Projectile_Combat_Mod_Duration>"
+                "<Projectile_Combat_Mod_Value>-0.25</Projectile_Combat_Mod_Value>"
+                "<Projectile_Combat_Mod_Effect>fixture_burn</Projectile_Combat_Mod_Effect>"
+                "<Projectile_Combat_Mod_Category_Mask>Frigate</Projectile_Combat_Mod_Category_Mask>");
+            write_fixture(tree.root, xml);
+            const auto loaded = load(tree.root, models(-40.0F));
+            expect(loaded.tables.has_value(), "WPCM-02: combat modifier XML loads");
+            if (!loaded.tables) continue;
+            const bool supported = std::string_view{stat} != "COMBAT_MOD_FIRE_RATE";
+            const auto found = std::find_if(loaded.tables->projectiles.begin(), loaded.tables->projectiles.end(),
+                [](const auto& entry) { return entry.combat_mod.enabled; });
+            if (!supported) {
+                expect(found == loaded.tables->projectiles.end(), "WPCM-03: a statistic without a bonus slot is reported, not applied");
+                continue;
+            }
+            if (found == loaded.tables->projectiles.end()) { expect(false, "WPCM-02: the modifier is decoded"); continue; }
+            const auto& mod = found->combat_mod;
+            expect(mod.value == Fixed::from_decimal("-0.25").value(), "WPCM-02: the authored value is decoded");
+            expect(mod.duration_frames == 14 * 30, "WPCM-02: the duration is in logical frames");
+            expect(mod.categories != 0, "WPCM-02: the category mask is decoded");
+            expect(mod.key == eawr::assets::object_type_crc(found->id), "WPCM-03: the key is the projectile type name CRC");
+            expect(found->combat_mod_effect == "fixture_burn", "WPCM-04: the effect name is kept");
+            auto changed = *loaded.tables;
+            for (auto& entry : changed.projectiles) if (entry.combat_mod.enabled) entry.combat_mod.value = Fixed::from_decimal("-0.5").value();
+            expect(eawr::units::content_identity(changed) != eawr::units::content_identity(*loaded.tables),
+                "WPCM-02: the modifier value changes replay content identity");
+        }
+    }
+    {
         TempTree tree;
         auto xml = units_xml("3600", "Unit_Select_Test");
         const auto marker = xml.find("<SpaceUnit Name=\"Test_Frigate\">") + std::string_view{"<SpaceUnit Name=\"Test_Frigate\">"}.size();
@@ -1725,7 +1763,8 @@ void synthetic_tables() {
             "<Ranged_Target_Z_Adjust>30</Ranged_Target_Z_Adjust>");
         const auto projectile = xml.find("<Projectile Name=\"Proj_Test_Generic\">")
             + std::string_view{"<Projectile Name=\"Proj_Test_Generic\">"}.size();
-        xml.insert(projectile, "<Projectile_Damage_Delay_Secs>0.5</Projectile_Damage_Delay_Secs>");
+        xml.insert(projectile, "<Projectile_Damage_Delay_Secs>0.5</Projectile_Damage_Delay_Secs>"
+            "<Projectile_Damages_Random_Hard_Points>Yes</Projectile_Damages_Random_Hard_Points>");
         write_fixture(tree.root, xml);
         const auto loaded = load(tree.root, models(-40.0F));
         expect(loaded.tables.has_value(), "WNO-29/32: synthetic inherited payload fixture loads");
@@ -1740,6 +1779,13 @@ void synthetic_tables() {
                 expect(profile->ranged_target_z_adjust == Fixed::from_raw(raw(30))
                     && profile->death_projectiles.front().damage_delay == Fixed::from_raw(raw(1) / 2),
                     "WNO-30/32: typed height and inherited explicit delay reach the sim");
+                // WAD-27: the inherited random-hardpoint flag reaches the shot profile and the content identity.
+                expect(profile->death_projectiles.front().damages_random_hardpoints,
+                    "WAD-27: inherited Projectile_Damages_Random_Hard_Points reaches the sim shot profile");
+                auto cleared = *loaded.tables;
+                for (auto& shot : cleared.projectiles) shot.damages_random_hardpoints = false;
+                expect(eawr::units::content_identity(cleared) != eawr::units::content_identity(*loaded.tables),
+                    "WAD-27: the random-hardpoint flag is part of the replay content identity");
             }
             auto changed = *loaded.tables;
             for (auto& ship : changed.units) if (ship.id == "Test_Frigate") ship.death_projectiles.clear();

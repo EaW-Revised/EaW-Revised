@@ -1303,6 +1303,115 @@ function main() Object.Despawn(); coroutine.yield(true) end
         "object scripts run in reverse registration order before and after restore");
 }
 
+void unplaced_type_identities() {
+    cpn::GalacticStoryPlayers players{};
+    players.types = {{"Placed_A", 5}, {"Placed_B", 6}};
+    const std::vector<std::string> names{"Placed_A", "zeta_structure", "Alpha_Structure", "placed_b", "Alpha_Structure"};
+    // A plan binding handed out identity 12 although no selection row carries it: the floor keeps the new identities above it.
+    cpn::assign_unplaced_object_types(names, 12, players);
+    expect(players.unplaced_types.size() == 2 && players.unplaced_types[0] == std::pair<std::string, eawr::sim::galactic::TypeId>{"ALPHA_STRUCTURE", 13}
+        && players.unplaced_types[1] == std::pair<std::string, eawr::sim::galactic::TypeId>{"ZETA_STRUCTURE", 14},
+        "unplaced identities start above every source's floor, in sorted name order, without the placed names");
+    cpn::GalacticStoryPlayers peer{};
+    peer.types = players.types;
+    cpn::assign_unplaced_object_types(std::vector<std::string>{"zeta_structure", "alpha_structure", "Placed_A"}, 12, peer);
+    expect(peer.unplaced_types == players.unplaced_types, "the same name set gives every peer the same identities");
+    cpn::GalacticStoryPlayers other{};
+    other.types = players.types;
+    cpn::assign_unplaced_object_types(std::vector<std::string>{"alpha_structure", "beta_structure"}, 12, other);
+    expect(other.unplaced_types != players.unplaced_types, "a different unplaced name set gives a different table (hashed into the setup digest)");
+}
+
+void object_start_time_bindings(const std::filesystem::path& root) {
+    const auto data = root / "start-bindings" / "loose";
+    std::filesystem::remove_all(root / "start-bindings");
+    write(data / "scripts" / "gameobject" / "startprobe.lua", R"LUA(
+function Base_Definitions()
+    Types = WeightedTypeList.Create()
+    Types.Parse({"fighter", "Bomber"}, {3, 2})
+    Other = WeightedTypeList.Create()
+    Empire = Find_Player("empire")
+    Mixed = Find_Player("EMPIRE")
+    Local = Find_Player("local")
+    First_Planet = Find_First_Object("coruscant")
+    First_Type = Find_First_Object("hero_probe")
+    Nothing = Find_First_Object("nowhere")
+    Unplaced = Find_Object_Type("Structure_X")
+    Unplaced_Valid = Unplaced.Is_Valid()
+    Unplaced_Name = Unplaced.Get_Name()
+    Unknown_Type = Find_Object_Type("not_a_type")
+    Count = table.getn(Types.Names)
+    First_Name = Types.Names[1]
+    Second_Name = Types.Names[2]
+    First_Weight = Types.Weights[1]
+    Second_Weight = Types.Weights[2]
+    Other_Count = table.getn(Other.Names)
+end
+function main() Done = 1; coroutine.yield(true) end
+)LUA");
+    eawr::vfs::MountSpec mount; mount.layer_id = "object-start-bindings"; mount.data_root = data;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+    const std::vector<std::pair<eawr::sim::galactic::TypeId, std::string>> types{{7, "StartProbe"}};
+    const auto content = take(cpn::GalacticObjectScripts::load(files, types));
+    auth::SessionConfig config; config.galactic_clock = true;
+    auto scripts = take(content->create_scheduler(config));
+    cpn::GalacticStoryPlayers players{};
+    players.factions = {"Empire", "Rebel"};
+    players.players = {{3, "Empire"}, {5, "Rebel"}};
+    players.local_player = 5;
+    players.planets = {{"Coruscant", 9}};
+    players.types = {{"Hero_Probe", 70}};
+    players.unplaced_types = {{"STRUCTURE_X", 71}};
+    take(cpn::register_galactic_object_bindings(scripts, players));
+    auto log = std::make_shared<SpawnLog>();
+    take(scripts.set_immediate_effect_host(std::make_shared<SpawnHost>(log), 4));
+    eawr::sim::galactic::CensusObject actor{}; actor.id = 40; actor.original_type = actor.current_type = 7;
+    const eawr::sim::InlineExecutor executor;
+    take(content->reconcile(scripts, std::vector{actor}, executor));
+    const auto report = take(content->service(scripts, 1, executor));
+    expect(report.diagnostics.empty(), "start-time object bindings run Base_Definitions without a diagnostic");
+    const auto instance = (std::uint64_t{1} << 40) + 40;
+    const auto handle_id = [&](const char* name, std::uint32_t kind) -> std::optional<std::uint64_t> {
+        const auto value = take(scripts.read_global(instance, name));
+        if (!value) return std::nullopt;
+        const auto* handle = std::get_if<auth::Handle>(&value->data);
+        if (!handle || handle->kind != kind) return std::nullopt;
+        return handle->id;
+    };
+    using Num = eawr::script::numeric::LuaNumber;
+    const auto number = [&](const char* name) -> std::optional<Num> {
+        const auto value = take(scripts.read_global(instance, name));
+        if (!value) return std::nullopt;
+        const auto* n = std::get_if<Num>(&value->data);
+        return n ? std::optional<Num>(*n) : std::nullopt;
+    };
+    expect(handle_id("Empire", 2u) == 3 && handle_id("Mixed", 2u) == 3,
+        "Find_Player resolves a faction name regardless of case");
+    expect(handle_id("Local", 2u) == 5, "Find_Player('local') is the reference human");
+    expect(handle_id("First_Planet", 1u) == 9,
+        "Find_First_Object returns the lowest identity among the planet and the type's objects");
+    expect(handle_id("First_Type", 1u) == 42, "Find_First_Object finds a live object of the named type");
+    expect(!handle_id("Nothing", 1u), "Find_First_Object of an unknown name is nil");
+    expect(handle_id("Unplaced", 3u) == 71 && !handle_id("Unknown_Type", 3u),
+        "Find_Object_Type resolves a defined type nothing has placed yet and still answers nil for an unknown name");
+    {
+        const auto valid = take(scripts.read_global(instance, "Unplaced_Valid"));
+        expect(valid && std::get<bool>(valid->data), "an unplaced type is a valid type wrapper");
+        const eawr::units::UnitTables tables{};
+        const std::vector<std::pair<std::string, eawr::sim::galactic::TypeId>> placed{{"Hero_Probe", 70}};
+        const auto catalog = take(cpn::make_galactic_object_query_catalog(tables, placed, players.unplaced_types));
+        const auto filter = cpn::parse_galactic_object_filter({auth::Value{auth::Handle{3u, 71}}}, catalog);
+        const auto named = cpn::parse_galactic_object_filter({auth::Value::text("structure_x")}, catalog);
+        expect(filter.has_value() && named.has_value(), "Find_All_Objects_Of_Type accepts an unplaced type by handle and by name");
+    }
+    expect(number("Count") == Num(2) && number("First_Weight") == Num(3) && number("Second_Weight") == Num(2) && number("Other_Count") == Num(0),
+        "WeightedTypeList.Parse retains the weights per list");
+    const auto first_name = take(scripts.read_global(instance, "First_Name"));
+    const auto second_name = take(scripts.read_global(instance, "Second_Name"));
+    expect(first_name && std::get<std::string>(first_name->data) == "FIGHTER" && second_name
+        && std::get<std::string>(second_name->data) == "BOMBER", "WeightedTypeList.Parse retains upper-case names in order");
+}
+
 void object_binding_primitives() {
     auth::SessionConfig config; config.galactic_clock = true;
     auth::ModuleManifest modules;
@@ -1757,6 +1866,8 @@ int case_galactic_story_script_host_tests(int argc, char** argv) {
         object_perception_unavailable();
         object_sale_bindings();
         object_registration_order(root);
+        object_start_time_bindings(root);
+        unplaced_type_identities();
         attached_object_calls_native(root / "attached-object");
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

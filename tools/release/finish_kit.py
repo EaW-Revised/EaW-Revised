@@ -290,6 +290,24 @@ def delivery_paths(out, name):
     return dest, zpath, hashpath, sidecar
 
 
+def unbound_lua_lines(baseline_bytes):
+    """One report line per script host: how many distinct Lua names the host still leaves unbound, per host across profiles and
+    kinds (data from the committed tools/lua_api_scan/baseline.json of the kit commit; keys are profile|host|kind|name)."""
+    names = {}
+    for key in json.loads(baseline_bytes)["unbound"]:
+        _profile, host, _kind, name = key.split("|", 3)
+        names.setdefault(host, set()).add(name)
+    return [f"note: Lua unbound names, {host}: {len(found)}" for host, found in sorted(names.items())]
+
+
+def unbound_lua_report(repo, kit_sha):
+    """The report lines for a kit commit; an unreadable or garbled baseline degrades to one warning line and never fails a cut."""
+    try:
+        return unbound_lua_lines(kit_manifest.git(repo, "show", f"{kit_sha}:tools/lua_api_scan/baseline.json", check=False))
+    except Exception:  # noqa: BLE001  a report line must not abort a kit cut, whatever the baseline holds
+        return ["note: Lua unbound names: baseline.json not readable at the kit commit"]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--work", required=True, type=Path)
@@ -553,6 +571,9 @@ def main():
         if layout["pinned_binaries_changed"]:
             fail(f"layout vs {ref.name}: pinned engine, launcher or library files differ from the reference: "
                  f"{layout['pinned_binaries_changed']}")
+
+    for line in unbound_lua_report(repo, kit_sha):
+        say(line)
 
     if not problems:
         digest = sha256_file(pre)

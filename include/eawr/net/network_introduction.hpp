@@ -115,6 +115,8 @@ public:
     std::string capability() const;  // secret: the key for reattach
     // Signals that arrived while the receive queue was full are dropped and counted (ICE retries); the member stays.
     std::uint64_t dropped_signals() const;
+    // Current receive queue occupancy, sampled under the same lock as enqueue and poll.
+    std::size_t queued_signals() const;
     // Code ("EAWR-NET-1775") of the host's last operation the service acknowledged as not (fully) applied: a repeated
     // lock, a release after Start (1775), a kick whose denial did not fit the bounded denylist (1777). Empty if none.
     std::string last_refusal() const;

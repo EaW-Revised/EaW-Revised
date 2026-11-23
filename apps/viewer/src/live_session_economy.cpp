@@ -1,6 +1,8 @@
 #include "eawr/battle/start.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
+#include "settings_store.hpp"
+#include "eawr/presentation/ui/gc_battle_colours.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 #include "eawr/presentation/ui/skirmish_setup.hpp"
 
@@ -74,7 +76,7 @@ std::vector<ui::ObserverOwner> LiveSessionView::observer_owners() const {
                 ? ui::SetupText::ai_easy_player : entry.difficulty == tactical::AiLevel::hard
                 ? ui::SetupText::ai_hard_player : ui::SetupText::ai_player);
         result.push_back({entry.player.player_id, std::move(name),
-            owner_ui_colour(entry.player.player_id).value_or(ui::Rgb{255, 255, 255}), std::move(text_key)});
+            participant_colour({}, entry.player.player_id).value_or(ui::Rgb{255, 255, 255}), std::move(text_key)});
     }
     if (controller_policy) {
         for (const auto& binding : controller_policy->seats) {
@@ -84,11 +86,29 @@ std::vector<ui::ObserverOwner> LiveSessionView::observer_owners() const {
                 [&](const auto& row) { return row.player == binding.player; });
             ui::ObserverOwner owner{binding.player, identity != options_.controller_names.end() ? identity->second
                 : fallback != result.end() ? fallback->name : std::string{},
-                owner_ui_colour(binding.player).value_or(ui::Rgb{255, 255, 255}), {}, binding.seat};
+                participant_colour(binding.seat, binding.player).value_or(ui::Rgb{255, 255, 255}), {}, binding.seat};
             if (binding.kind == sim::SeatKind::ai && identity == options_.controller_names.end()) {
                 owner.name.clear();
                 owner.text_key = ui::skirmish_setup_text_key(ui::SetupText::ai_player);
             } else if (owner.name.empty() && fallback != result.end()) owner.text_key = fallback->text_key;
+            result.push_back(std::move(owner));
+        }
+    } else if (options_.borrowed_battle) {
+        // The borrowed feed may publish its controller policy after the UI is prepared.
+        for (const auto& binding : options_.colour_seats) {
+            if (!binding.active) continue;
+            const auto identity = std::find_if(options_.controller_names.begin(), options_.controller_names.end(),
+                [&](const auto& row) { return row.first == binding.seat_id; });
+            const auto fallback = std::find_if(result.begin(), result.end(),
+                [&](const auto& row) { return row.player == binding.player && row.seat.value == 0; });
+            if (fallback == result.end()) continue;
+            ui::ObserverOwner owner{binding.player, identity != options_.controller_names.end() ? identity->second : fallback->name,
+                participant_colour(binding.seat_id, binding.player).value_or(ui::Rgb{255, 255, 255}),
+                fallback->text_key, binding.seat_id};
+            if (binding.kind == sim::SeatKind::ai && identity == options_.controller_names.end()) {
+                owner.name.clear();
+                owner.text_key = ui::skirmish_setup_text_key(ui::SetupText::ai_player);
+            }
             result.push_back(std::move(owner));
         }
     }
@@ -96,6 +116,7 @@ std::vector<ui::ObserverOwner> LiveSessionView::observer_owners() const {
 }
 
 bool LiveSessionView::can_control(const tactical::TacticalInstance& instance) const noexcept {
+    if (options_.view_only) return false;
     if (!controller_policy_enabled()) return true;
     // Existing authored community/pad rights survive the mobile-seat gate.
     bool shared = instance.control == tactical::UnitControl::shared_structure && is_ally_of_local(instance.owner);
@@ -139,6 +160,28 @@ std::optional<std::array<std::uint8_t, 3>> LiveSessionView::owner_ui_colour(cons
     const auto faction = ui::faction_colour(faction_colours_, player_faction(player));
     if (!faction) return std::nullopt;
     return std::array<std::uint8_t, 3>{faction->r, faction->g, faction->b};
+}
+
+std::optional<std::array<std::uint8_t, 3>> LiveSessionView::participant_colour(
+        sim::SeatId seat, const tactical::PlayerId owner) const {
+    if (options_.borrowed_battle) {
+        if (seat.value == 0) {
+            const auto found = std::find_if(options_.colour_seats.begin(), options_.colour_seats.end(),
+                [owner](const auto& row) { return row.player == owner && row.active && row.kind == sim::SeatKind::human; });
+            if (found != options_.colour_seats.end()) seat = found->seat_id;
+        }
+        if (const auto colour = gc_seat_colours_.find(seat); colour != gc_seat_colours_.end()) return colour->second;
+    }
+    return owner_ui_colour(owner);
+}
+
+std::optional<std::array<std::uint8_t, 3>> LiveSessionView::instance_model_colour(
+        const tactical::TacticalInstance& instance, const std::string& object_id) const {
+    const auto* saved = ActiveSettings::get();
+    const auto faction = model_colour(instance.owner, object_id);
+    const bool participant_units = options_.borrowed_battle && saved && saved->gameplay.gc_battle_colours == 1
+        && !neutral_model_owners_.contains(instance.owner);
+    return ui::gc_instance_model_colour(participant_units, instance, faction, options_.colour_seats, gc_seat_colours_);
 }
 
 bool LiveSessionView::model_uses_player_colour(const tactical::PlayerId player) const noexcept {
@@ -314,7 +357,7 @@ void LiveSessionView::Abilities::request(const ui::AbilityRequest& request) {
     const tactical::AbilityKind kind = tactical::ability_kind(ui::ability_name(request.ability));
     // #561: a targeted activation goes out once it has its target (the battle input's targeting).
     const bool aimed = request.targeted && (request.target != sim::invalid_entity_id || request.position.has_value());
-    if (kind == tactical::AbilityKind::none || (request.targeted && !aimed) || !view_.scheduler_) {
+    if (kind == tactical::AbilityKind::none || (request.targeted && !aimed) || !view_.scheduler_ || view_.view_only()) {
         ++refused_;
         return;
     }
@@ -474,6 +517,7 @@ bool LiveSessionView::pad_sale_allowed(const sim::EntityId child, const bool sin
 }
 
 bool LiveSessionView::sell_pad_structure(const sim::EntityId child, const bool single_step) {
+    if (options_.view_only) return false; // #8182: a watched battle issues no order
     if (!pad_sale_allowed(child, single_step)) return false;
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::pad_sell;
@@ -483,7 +527,7 @@ bool LiveSessionView::sell_pad_structure(const sim::EntityId child, const bool s
 }
 
 bool LiveSessionView::special_fire(const sim::EntityId source, const sim::EntityId target) {
-    if (phase_ != Phase::running || (controller_policy_enabled() && !can_control(source))) return false;
+    if (phase_ != Phase::running || options_.view_only || (controller_policy_enabled() && !can_control(source))) return false;
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::special_fire;
     intent.units = {source};
@@ -492,7 +536,7 @@ bool LiveSessionView::special_fire(const sim::EntityId source, const sim::Entity
 }
 
 bool LiveSessionView::superweapon_request(const sim::EntityId unit, const sim::tactical::TswStage stage) {
-    if (phase_ != Phase::running || (controller_policy_enabled() && !can_control(unit))) return false;
+    if (phase_ != Phase::running || options_.view_only || (controller_policy_enabled() && !can_control(unit))) return false;
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::tactical_superweapon;
     intent.units = {unit};
@@ -524,6 +568,7 @@ bool LiveSessionView::hardpoint_repair_allowed(const sim::EntityId station, cons
 }
 
 bool LiveSessionView::repair_hardpoint(const sim::EntityId station, const std::uint32_t hardpoint) {
+    if (options_.view_only) return false; // #8182: a watched battle issues no order
     if (!hardpoint_repair_allowed(station, hardpoint)) return false;
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::repair_hardpoint;
@@ -534,6 +579,7 @@ bool LiveSessionView::repair_hardpoint(const sim::EntityId station, const std::u
 }
 
 bool LiveSessionView::buy(const sim::EntityId station, const tactical::TypeId type) {
+    if (options_.view_only) return false; // #8182: a watched battle issues no order
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::buy;
     if (const auto latest = battle_frame_.latest) {
@@ -563,6 +609,7 @@ bool LiveSessionView::buy(const sim::EntityId station, const tactical::TypeId ty
 }
 
 bool LiveSessionView::cancel_build(const tactical::BuildQueue queue, const std::uint64_t entry_id) {
+    if (options_.view_only) return false; // #8182: a watched battle issues no order
     if (entry_id == 0) { ++economy_requests_.refused; return false; }
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::cancel;
@@ -580,6 +627,7 @@ sim::math::Fixed LiveSessionView::reinforcement_facing() const noexcept {
 }
 
 bool LiveSessionView::rotate_reinforcement(const double detents) {
+    if (options_.view_only) return false; // #8182: a watched battle issues no order
     if (!reinforcement_allowed() || !std::isfinite(detents) || detents == 0.0) return false;
     constexpr double degrees_per_detent = 15.0; // WR-X01: owner-requested project constant
     const auto step = scene::fixed_from_binary32(static_cast<float>(std::fmod(detents * degrees_per_detent, 360.0)));
@@ -594,6 +642,7 @@ bool LiveSessionView::rotate_reinforcement(const double detents) {
 }
 
 bool LiveSessionView::reinforce(const tactical::TypeId type, const sim::math::Vec3& point) {
+    if (options_.view_only) return false; // #8182: a watched battle issues no order
     // #7190: on land the simulation alone admits a company (cap, then the whole company at the point); a drop it refuses comes
     // back as an order-rejected event with its own reason, which the reinforcement pane shows. So only the pool entry is
     // checked here, and the command carries the click whatever the preview said.
@@ -668,6 +717,7 @@ const tactical::ReserveView* LiveSessionView::campaign_reserve(const tactical::T
 }
 
 bool LiveSessionView::select_campaign_reinforcement(const std::uint64_t token) {
+    if (options_.view_only) return false; // #8182: a watched battle issues no order
     deployment_token_ = token;
     const auto* ledger = local_economy();
     if (!economy_.campaign || !ledger || !token) return false;

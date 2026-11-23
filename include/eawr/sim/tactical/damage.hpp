@@ -120,6 +120,12 @@ class CombatRandom;
 // WHZ-14: ordinary random-start circular selection over the complete hardpoint list.
 [[nodiscard]] std::uint32_t random_destroyable_hardpoint(
     const DurabilityProfile& profile, const DurabilityState& state, CombatRandom& random) noexcept;
+// WAD-27: the route a random-hardpoint projectile delivers to. One WHZ-14 selection (a single draw over
+// the complete hardpoint list, then a forward wrapping scan for a live destroyable point, targetability
+// ignored) names a hardpoint, and its collision-mesh route replaces `current`, whatever the aim was.
+// With no live destroyable hardpoint, or no route for the chosen mesh, `current` is kept.
+[[nodiscard]] std::uint32_t random_hardpoint_route(const DurabilityProfile& profile, const DurabilityState& state,
+    std::span<const std::string> selectors, std::uint32_t current, CombatRandom& random) noexcept;
 // The first authored hardpoint with this collision-mesh selector; hull when absent/empty.
 [[nodiscard]] std::uint32_t damage_mesh_route(std::span<const std::string> selectors, std::uint32_t selected) noexcept;
 
@@ -168,6 +174,21 @@ struct CollisionBox {
 };
 
 // WAD-01: immutable type-level budget; direct shot multipliers never change it.
+// The CombatBonuses slots (WPR-51 order).
+enum class CombatBonusStat : std::uint32_t { health, damage, energy, shield, defense, speed, fire_range };
+
+// Projectile_Combat_Mod_*: a timed modifier a detonating projectile puts on enemy objects inside its
+// blast radius. `stat` indexes CombatBonuses (health, damage, energy, shield, defense, speed, fire range);
+// `key` is the projectile type's name CRC, the modifier's stacking category (one live modifier per target and key).
+struct CombatModProfile {
+    bool enabled{};
+    std::uint32_t stat{};
+    math::Fixed value{};
+    std::uint32_t duration_frames{};
+    std::uint64_t categories{};
+    std::uint32_t key{};
+    friend bool operator==(const CombatModProfile&, const CombatModProfile&) = default;
+};
 struct BlastProfile {
     math::Fixed damage{};
     math::Fixed radius{};
@@ -256,12 +277,14 @@ struct Projectile {
     bool energy_damage{};
     std::optional<IonStunShot> ion_stun{};
     BlastProfile blast{};
+    CombatModProfile combat_mod{}; // Projectile_Combat_Mod_*, captured at launch; applied on detonation
     bool explosion_requested{}; // WAD-05: explicit service request, never implicit deletion
     math::Fixed source_damage_factor{math::Fixed::from_raw(math::Fixed::scale)}; // WCC-44 cause term, separate from instance overrides
     std::optional<std::uint32_t> disable_engines_frames{}; // EN-08, captured at launch
     std::optional<FlightState> flight{};
     std::uint64_t muzzle_delay_until{}; // positive only: PROJ bit11, appended expiry frame
     math::Fixed damage_delay{};
+    bool damages_random_hardpoints{}; // WAD-27, captured at launch; hashed only when true
     std::optional<ProjectileProfileKey> profile_key{}; // captured at launch, survives every deflection
     bool reflected{}; // detached from the original shooter; overrides also encode their profile key
     friend bool operator==(const Projectile&, const Projectile&) = default;

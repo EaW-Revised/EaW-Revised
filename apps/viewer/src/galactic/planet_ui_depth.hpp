@@ -19,7 +19,16 @@ struct PlanetUiDepthEntry final {
     float radius{};      // projected body radius in HUD pixels; 0 when the planet draws no body
 };
 
-struct PlanetUiOccluder final { float x{}, y{}, radius{}; };
+struct PlanetUiOccluder final { float x{}, y{}, radius{}; std::uint64_t id{}; };
+
+// The world radius of the body a planet draws: half the drawn model's width times the planet's scale, so the controls of
+// a planet behind it stay visible right up to the body's rim and over the corruption mist (#8158). The click radius is
+// larger than the body and picks the planet; it never decides what hides. Planets without a drawn model show the
+// placeholder sphere of `placeholder_radius`.
+[[nodiscard]] inline float planet_ui_body_radius(const float model_half_width, const float planet_scale,
+                                                 const float placeholder_radius) noexcept {
+    return (model_half_width > 0.0F ? model_half_width : placeholder_radius) * planet_scale;
+}
 
 inline constexpr std::size_t max_planet_ui_occluders = 6;
 
@@ -55,7 +64,7 @@ struct PlanetUiDepthPlan final {
             const float dx = body.x - entries[rear].x, dy = body.y - entries[rear].y;
             const float limit = body.radius + reach;
             if (dx * dx + dy * dy >= limit * limit) continue;
-            hidden.discs[hidden.count++] = {body.x, body.y, body.radius};
+            hidden.discs[hidden.count++] = {body.x, body.y, body.radius, body.id};
         }
         if (hidden.count) plan.hidden.push_back(hidden);
     }

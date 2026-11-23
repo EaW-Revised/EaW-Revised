@@ -1,0 +1,814 @@
+{
+ "schema_version": 1,
+ "note": "Names the debug build registers on its Lua states that no script of the scanned stack calls (stock plus the nine mod profiles of tools/lua_api_scan/scan_config.json, static scan, 2026-11-23 run). A member name counts as called when any receiver's script call uses that name, so the member list is a lower bound. bound_in lists our script hosts that bind the name now; empty means no host does. Names only: a registration says a name exists, not what it does (docs/behaviour/lua-api-declarations.md D-04).",
+ "never_called_globals": [
+  {
+   "name": "Activate_Retry_Dialog",
+   "bound_in": []
+  },
+  {
+   "name": "BlockForever",
+   "bound_in": []
+  },
+  {
+   "name": "Budget",
+   "bound_in": []
+  },
+  {
+   "name": "FreeStore",
+   "bound_in": []
+  },
+  {
+   "name": "GUI_Component_Blink",
+   "bound_in": []
+  },
+  {
+   "name": "GUI_Component_Color",
+   "bound_in": []
+  },
+  {
+   "name": "GUI_Component_Flash",
+   "bound_in": []
+  },
+  {
+   "name": "GUI_Component_Play_Anim",
+   "bound_in": []
+  },
+  {
+   "name": "GUI_Component_Stop_Anim",
+   "bound_in": []
+  },
+  {
+   "name": "GUI_Component_Stop_Flash",
+   "bound_in": []
+  },
+  {
+   "name": "GUI_Text_Color",
+   "bound_in": []
+  },
+  {
+   "name": "GetNextGroundbaseType",
+   "bound_in": []
+  },
+  {
+   "name": "GetNextStarbaseType",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Point_In_Asteroid_Field",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Point_In_Ion_Storm",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Point_In_Nebula",
+   "bound_in": []
+  },
+  {
+   "name": "LUA_PATH",
+   "bound_in": []
+  },
+  {
+   "name": "LastService",
+   "bound_in": []
+  },
+  {
+   "name": "LastUnitService",
+   "bound_in": []
+  },
+  {
+   "name": "Object",
+   "bound_in": []
+  },
+  {
+   "name": "PlanDefinitionLoad",
+   "bound_in": []
+  },
+  {
+   "name": "PlayerObject",
+   "bound_in": []
+  },
+  {
+   "name": "Rotate_Camera_To",
+   "bound_in": []
+  },
+  {
+   "name": "Target",
+   "bound_in": []
+  },
+  {
+   "name": "WaitForGroundbase",
+   "bound_in": []
+  },
+  {
+   "name": "_DebugBreak",
+   "bound_in": []
+  },
+  {
+   "name": "lc",
+   "bound_in": []
+  }
+ ],
+ "never_called_members": [
+  {
+   "name": "Get_Bribe_Cost",
+   "receiver": "GameObjectTypeWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Score_Cost_Credits",
+   "receiver": "GameObjectTypeWrapper",
+   "bound_in": [
+    "scoring"
+   ]
+  },
+  {
+   "name": "Get_Tactical_Build_Cost",
+   "receiver": "GameObjectTypeWrapper",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "scoring",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Is_Affiliated_With",
+   "receiver": "GameObjectTypeWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Build_Locked",
+   "receiver": "GameObjectTypeWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Obsolete",
+   "receiver": "GameObjectTypeWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Valid",
+   "receiver": "GameObjectTypeWrapper",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "galactic_object",
+    "galactic_story",
+    "scoring",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Can_Land_On_Planet",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "galactic_ai"
+   ]
+  },
+  {
+   "name": "Contains_Hero",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Contains_Object_Type",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Destroy_Contained_Objects",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Divert",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Eject_Garrison",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Enable_Dynamic_LOD",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get_AI_Power_Vs_Unit",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Contained_Heroes",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Current_Projectile_Type",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Get_Energy",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Final_Blow_Player",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Game_Scoring_Type",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "scoring"
+   ]
+  },
+  {
+   "name": "Get_Object_ID",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Parent_Mode_Object",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Parent_Mode_Object_ID",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Time_Till_Dead",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Is_On_Diversion",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Is_Planet_Destroyed",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "galactic_story"
+   ]
+  },
+  {
+   "name": "Is_Transport",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "galactic_ai"
+   ]
+  },
+  {
+   "name": "Is_Valid",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "galactic_object",
+    "galactic_story",
+    "scoring",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Lock_Build_Pad_Contents",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Release",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Set_All_Abilities_Autofire",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Set_Prefer_Ground_Over_Space",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "galactic_ai"
+   ]
+  },
+  {
+   "name": "Set_Targeting_Stickiness_Time_Threshold",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Should_Switch_Weapons",
+   "receiver": "GameObjectWrapper",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Show_Emitter",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Unlock_Current_Orders",
+   "receiver": "GameObjectWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Params",
+   "receiver": "GetEvent",
+   "bound_in": []
+  },
+  {
+   "name": "Get",
+   "receiver": "GlobalValue",
+   "bound_in": []
+  },
+  {
+   "name": "Set",
+   "receiver": "GlobalValue",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Clan_ID",
+   "receiver": "PlayerWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get_GameSpy_Stats_Player_ID",
+   "receiver": "PlayerWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Valid",
+   "receiver": "PlayerWrapper",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "galactic_object",
+    "galactic_story",
+    "scoring",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Set_Tech_Level",
+   "receiver": "PlayerWrapper",
+   "bound_in": []
+  },
+  {
+   "name": "Get",
+   "receiver": "ThreadValue",
+   "bound_in": []
+  },
+  {
+   "name": "Set",
+   "receiver": "ThreadValue",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Object_On_Free_Store",
+   "receiver": "ai_freestore",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Valid",
+   "receiver": "ai_target_location",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "galactic_object",
+    "galactic_story",
+    "scoring",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Result",
+   "receiver": "blocking_status",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Allocate_Resources",
+   "receiver": "budget",
+   "bound_in": []
+  },
+  {
+   "name": "Flush_All_Resources",
+   "receiver": "budget",
+   "bound_in": []
+  },
+  {
+   "name": "Flush_Unallocated_Resources",
+   "receiver": "budget",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Spendable_Resources",
+   "receiver": "budget",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Unallocated_Resources",
+   "receiver": "budget",
+   "bound_in": []
+  },
+  {
+   "name": "Give_Resources_To_Goal",
+   "receiver": "budget",
+   "bound_in": []
+  },
+  {
+   "name": "Take_Resources_From_Goal",
+   "receiver": "budget",
+   "bound_in": []
+  },
+  {
+   "name": "Wait_For_Spendable_Resources",
+   "receiver": "budget",
+   "bound_in": []
+  },
+  {
+   "name": "Wait_For_Unallocated_Resources",
+   "receiver": "budget",
+   "bound_in": []
+  },
+  {
+   "name": "Create",
+   "receiver": "create_thread_command",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Current_ID",
+   "receiver": "create_thread_command",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Thread_Active",
+   "receiver": "create_thread_command",
+   "bound_in": []
+  },
+  {
+   "name": "Kill",
+   "receiver": "create_thread_command",
+   "bound_in": []
+  },
+  {
+   "name": "Kill_All",
+   "receiver": "create_thread_command",
+   "bound_in": []
+  },
+  {
+   "name": "Create",
+   "receiver": "discrete_distribution",
+   "bound_in": []
+  },
+  {
+   "name": "Get_All_Planets",
+   "receiver": "find_planet_command",
+   "bound_in": []
+  },
+  {
+   "name": "Best_Of",
+   "receiver": "find_target_command",
+   "bound_in": []
+  },
+  {
+   "name": "Reachable_Target",
+   "receiver": "find_target_command",
+   "bound_in": []
+  },
+  {
+   "name": "Disable_Rendering",
+   "receiver": "fow_reveal_command",
+   "bound_in": []
+  },
+  {
+   "name": "Reveal",
+   "receiver": "fow_reveal_command",
+   "bound_in": []
+  },
+  {
+   "name": "Reveal_All",
+   "receiver": "fow_reveal_command",
+   "bound_in": []
+  },
+  {
+   "name": "Temporary_Reveal",
+   "receiver": "fow_reveal_command",
+   "bound_in": []
+  },
+  {
+   "name": "Land_Units",
+   "receiver": "galactic_taskforce",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Launch_Units",
+   "receiver": "galactic_taskforce",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Refit_To_Definition",
+   "receiver": "galactic_taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Free_Random",
+   "receiver": "game_random_command",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Float",
+   "receiver": "game_random_command",
+   "bound_in": []
+  },
+  {
+   "name": "Frame",
+   "receiver": "get_time_command",
+   "bound_in": []
+  },
+  {
+   "name": "Galactic_Time",
+   "receiver": "get_time_command",
+   "bound_in": []
+  },
+  {
+   "name": "Find_Closest_Enemy",
+   "receiver": "land_taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Release_Reinforcements",
+   "receiver": "land_taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Valid",
+   "receiver": "position",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "galactic_object",
+    "galactic_story",
+    "scoring",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Call_Function",
+   "receiver": "script",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Variable",
+   "receiver": "script",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Valid",
+   "receiver": "script",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "galactic_object",
+    "galactic_story",
+    "scoring",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Set_Variable",
+   "receiver": "script",
+   "bound_in": []
+  },
+  {
+   "name": "Debug_Should_Issue_Event_Alert",
+   "receiver": "script_host",
+   "bound_in": []
+  },
+  {
+   "name": "Allow_Ambient_VO",
+   "receiver": "sfx_commands",
+   "bound_in": []
+  },
+  {
+   "name": "Allow_Enemy_Sighted_VO",
+   "receiver": "sfx_commands",
+   "bound_in": []
+  },
+  {
+   "name": "Allow_HUD_VO",
+   "receiver": "sfx_commands",
+   "bound_in": []
+  },
+  {
+   "name": "Allow_Localized_SFXEvents",
+   "receiver": "sfx_commands",
+   "bound_in": []
+  },
+  {
+   "name": "Allow_Unit_Reponse_VO",
+   "receiver": "sfx_commands",
+   "bound_in": []
+  },
+  {
+   "name": "Find_Closest_Enemy",
+   "receiver": "space_taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Release_Reinforcements",
+   "receiver": "space_taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Valid",
+   "receiver": "story_event",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "galactic_object",
+    "galactic_story",
+    "scoring",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Is_Valid",
+   "receiver": "story_plot",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "galactic_object",
+    "galactic_story",
+    "scoring",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Add_Opportunity_Fire_Event_Subscription",
+   "receiver": "taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Clear_Opportunity_Fire_Event_Subscriptions",
+   "receiver": "taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Form_Units",
+   "receiver": "taskforce",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Get_AI_Power_Vs_Unit",
+   "receiver": "taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Get_Type_Of_Unit",
+   "receiver": "taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Valid",
+   "receiver": "taskforce",
+   "bound_in": [
+    "galactic_ai",
+    "galactic_evaluators",
+    "galactic_object",
+    "galactic_story",
+    "scoring",
+    "tactical_evaluators",
+    "tactical_object",
+    "tactical_plan_space",
+    "tactical_story"
+   ]
+  },
+  {
+   "name": "Remove_Opportunity_Fire_Event_Subscription",
+   "receiver": "taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Set_All_Abilities_Autofire",
+   "receiver": "taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Set_Targeting_Stickiness_Time_Threshold",
+   "receiver": "taskforce",
+   "bound_in": []
+  },
+  {
+   "name": "Is_Pool_Safe",
+   "receiver": "user_value",
+   "bound_in": []
+  },
+  {
+   "name": "Create",
+   "receiver": "weighted_type_list",
+   "bound_in": []
+  }
+ ]
+}

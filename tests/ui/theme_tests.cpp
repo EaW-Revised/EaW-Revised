@@ -10,6 +10,7 @@
 #include "eawr/data/ui/dialog_script.hpp"
 #include "eawr/presentation/ui/named_picture.hpp"
 #include "eawr/presentation/ui/theme.hpp"
+#include "../../src/presentation/godot/ui/tactical_texture_lookup.hpp"
 
 #include "ui_test_support.hpp"
 
@@ -486,6 +487,17 @@ void standalone_contracts() {
     expect(quiet("i_scan.tga").value_or("none") == "data/art/textures/i_scan.dds", "a quiet probe still resolves names");
     expect(!quiet("big_i_gone.tga").has_value() && !quiet("big_i_gone.tga").has_value(), "a quiet probe misses an absent name");
     expect(assets::name_miss_lines().empty(), "a quiet probe's miss is not an EAWR-ASSET-NAME-0001 line");
+    assets::reset_name_misses();
+
+    // Credits and ability candidates are optional; a later required use of the same authored name reports it.
+    namespace tactical = eawr::presentation::godot_backend;
+    expect(tactical::tactical_texture_lookup("missing_credit.tga", nullptr, probe, quiet,
+                                             tactical::TacticalAssetRequirement::optional).origin
+               == model::TextureOrigin::missing && assets::name_miss_lines().empty(),
+           "an optional tactical icon miss is quiet");
+    expect(tactical::tactical_texture_lookup("missing_credit.tga", nullptr, probe, quiet).origin
+               == model::TextureOrigin::missing && assets::name_miss_lines().size() == 1U,
+           "a required tactical icon miss reports even after the optional probe");
     assets::reset_name_misses();
 }
 

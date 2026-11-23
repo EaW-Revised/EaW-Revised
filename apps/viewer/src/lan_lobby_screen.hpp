@@ -138,6 +138,7 @@ public:
         bool start_enabled{};
         bool host{};
         std::uint64_t room_revision{};
+        std::uint32_t room_capacity{};       // the room's seats
         bool local_ready{}, preparing{};
         std::size_t ready_seats{};
         std::size_t dialog_rows{};
@@ -261,7 +262,13 @@ private:
     // The campaign's localized title for the room list; the campaign name itself while its content is not loaded.
     [[nodiscard]] std::string campaign_display_name(const std::string& campaign);
     void finish_pending_galactic();
-    [[nodiscard]] std::optional<std::string> host_galactic_game();
+    // `preset` is the room's options when the host re-opens it for another campaign; without it the room opens on the first hostable one.
+    [[nodiscard]] std::optional<std::string> host_galactic_game(const net::GalacticLobbyOptions* preset = nullptr);
+    // D8: the humans a room for `campaign` opens with: the host's own pick while the campaign can start with it, else the campaign's default.
+    [[nodiscard]] std::uint32_t galactic_wanted_humans(const sim::galactic::MpLobbyCampaign& campaign) const;
+    // The host switched the campaign while nobody else is in the room: the room is closed and opened again for the new campaign with its
+    // own number of seats (the connections of a campaign room are fixed when it opens).
+    void reopen_galactic_room(net::GalacticLobbyOptions options, std::uint32_t humans);
     void refresh_galactic_staging();
     void refresh_checkpoint_staging();
     void open_checkpoint_list();
@@ -328,6 +335,7 @@ private:
     bool action_cancel();
     bool action_leave();
     bool action_map(Impl& impl, const std::string& argument);
+    bool action_campaign(Impl& impl, const std::string& argument);
     bool action_ai(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
     bool action_team(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
     bool action_ready(const std::string& verb);

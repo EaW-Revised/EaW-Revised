@@ -159,6 +159,11 @@ public:
     void set_role(const godot::String& role);
     void set_alignment(godot::HorizontalAlignment alignment);
     void set_wrap(bool wrap);
+    // The line block sits in the vertical middle of the rectangle instead of at its top.
+    void set_centre_vertically(bool centre);
+    // Draws the role's glyphs in one flat colour instead of the role's gradient.
+    void set_ink(const godot::Color& ink);
+    [[nodiscard]] godot::String role() const { return role_; }
     void _draw() override;
 
 protected:
@@ -167,6 +172,9 @@ protected:
 private:
     godot::String text_;
     godot::String role_{"Global_Default"};
+    bool centre_vertically_{};
+    bool has_ink_{};
+    godot::Color ink_;
     godot::HorizontalAlignment alignment_{godot::HORIZONTAL_ALIGNMENT_LEFT};
     bool wrap_{true};
     KitText caption_;

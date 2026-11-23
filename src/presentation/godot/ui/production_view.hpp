@@ -212,6 +212,9 @@ private:
     std::size_t art_buffer_work_{};
     bool allocation_probe_{};
     bool reinforce_drawn_{};
+    bool reinforce_selected_drawn_{};
+    bool reinforce_shifted_{};
+    bool reinforce_hover_drawn_{};
     bool flash_drawn_{};
     std::uint64_t flashes_started_{};
     std::uint64_t flash_frames_{};

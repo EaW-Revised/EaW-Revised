@@ -130,7 +130,7 @@ Domain codes in result rows retain their core meanings:
 | `EAWR-MODS-0008` | Tree walk incomplete |
 | `EAWR-MODS-0009` | Needs update |
 | `EAWR-MODS-0010` | Downloading |
-| `EAWR-MODS-0011` | Malformed modinfo |
+| `EAWR-MODS-0011` | Malformed modinfo: once per problem file on the record, message "its <file> could not be read: <reason>; the mod still loads; ask the mod author". A Workshop upload descriptor (not an eaw.modinfo) does not raise it |
 | `EAWR-MODS-0012` | Malformed known-chain schema |
 | `EAWR-MODS-0013` | Chain cycle |
 | `EAWR-MODS-0014` | Duplicate dependency or explicit player layer |

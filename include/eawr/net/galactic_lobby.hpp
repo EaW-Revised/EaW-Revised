@@ -18,9 +18,11 @@
 //
 // A GC room names the campaign in LobbyGame::map and the agreed choices in the options. A seat's selection means:
 // `slot` = the faction row it plays (the row's player ID), `faction` = that row's authored name, `team` = the
-// human side (1 or 2, the row's rank among the host's human rows), `colour` unused (zero). Several seats may share
-// one row (up to eight humans on one side against AI); the host plans at most two human rows (a third is refused), and
-// a planned row nobody takes at Start is an AI faction, so both players on one row is a co-op game.
+// human side (1..galactic_lobby_max_human_sides, the row's rank among the host's human rows), `colour` unused (zero).
+// Several seats may share one row (a co-op side; eight humans in all, galactic_max_human_seats). The room shows a row
+// for every playable faction of the campaign (D8, #8071): a row nobody holds is an AI faction, and a player takes a row
+// (claims it) to make it a human side; the number of human sides is bounded by the campaign's playable rows and by
+// galactic_lobby_max_human_sides. A planned row nobody takes at Start is an AI faction too.
 namespace eawr::net {
 
 inline constexpr std::string_view galactic_lobby_options_tag = "gc";
@@ -45,8 +47,30 @@ inline constexpr std::uint32_t galactic_lobby_default_vote_timeout = 15;
 }
 // Owner decision D5 (#4358) is open: what a human faction becomes when its side empties. Plan recommendation: AI.
 inline constexpr sim::galactic::FactionControl galactic_lobby_default_dropout = sim::galactic::FactionControl::ai;
-// Lobby rule: at most two human sides (WGS), at most eight humans in total (galactic_max_human_seats).
-inline constexpr std::size_t galactic_lobby_max_human_sides = 2;
+// Lobby rule (D1, #8071): at most galactic_max_human_sides human sides, at most galactic_max_human_seats humans in total.
+// The real bound of a room is the campaign's playable rows; this is the room-independent ceiling and never a count of its own.
+inline constexpr std::size_t galactic_lobby_max_human_sides = sim::galactic::galactic_max_human_sides;
+
+// Whether the staging dialog draws a row for this faction. A row no player can take whose AI seat runs no controller (Neutral,
+// or an ambient faction the entry assigns nothing) is not drawn: it has neither a player nor an AI to name.
+[[nodiscard]] bool galactic_lobby_row_drawn(const sim::galactic::MpLobbyFaction& faction) noexcept;
+
+// The most human rows a room of `campaign` may plan when the staging dialog has `dialog_rows` player rows (0: no dialog, no
+// limit but the ceiling). Every planned row is drawn: when the campaign has more drawn factions than the dialog has rows, the
+// last row is kept for the "+N AI factions" line, so one row fewer can be a player. Never above galactic_lobby_max_human_sides.
+// A claim that would plan more rows is refused with a message, so no seat is ever on a row the dialog does not draw.
+[[nodiscard]] std::size_t galactic_lobby_human_row_limit(const sim::galactic::MpLobbyCampaign& campaign, std::size_t dialog_rows) noexcept;
+
+// The most humans a campaign room is offered for (the host's "Human players" dropdown): a multiplayer campaign's playable factions
+// (every player takes a faction row), a co-op campaign (one side, co-op seats) the seat ceiling; at least two, at most `seat_limit`
+// (the transport's seats) and the human seat ceiling (eight), so a room is never opened for a number the campaign cannot start with.
+[[nodiscard]] std::uint32_t galactic_lobby_max_humans(const sim::galactic::MpLobbyCampaign& campaign, std::uint32_t seat_limit) noexcept;
+
+// The number of humans a new campaign room opens for when the host has not chosen one (D8: every playable faction row is
+// claimable, so no joiner finds the room full): a multiplayer campaign's playable factions (galactic_lobby_max_humans), a co-op
+// campaign two (all on one side, as co-op seats). The host's "Human players" choice still caps the room.
+[[nodiscard]] std::uint32_t galactic_lobby_default_humans(const sim::galactic::MpLobbyCampaign& campaign, std::uint32_t seat_limit) noexcept;
+
 
 enum class LobbyGameMode : std::uint8_t { skirmish, galactic };
 // Which text the room's options carry. An empty or unrecognised option blob is a skirmish room (its own codec refuses it).
@@ -95,11 +119,13 @@ struct GalacticLobbyOptions {
 // seed rule). Every host path (lobby screen, acceptance run) uses it, so none can hand out a seed the AI setup refuses.
 [[nodiscard]] std::uint64_t draw_galactic_session_seed();
 
-// The options a host starts a room with: the campaign's factions as rows (the first two playable ones human
-// when `two_sides`, else the first), stock custom settings off. Fails when the campaign has no playable faction.
+// The options a host starts a room with: the campaign's factions as rows, the first `planned_humans` playable ones planned
+// for a player (default one: the host's own row; every other playable row starts as an AI faction and a player takes it,
+// D8), stock custom settings off. `planned_humans` is clamped to 1..galactic_lobby_max_human_sides and to the campaign's
+// playable rows; a co-op campaign (single-player rules) always plans exactly one. Fails when the campaign has no playable faction.
 [[nodiscard]] core::Result<GalacticLobbyOptions> default_galactic_lobby_options(
     const sim::galactic::MpLobbyCampaign& campaign, std::string_view difficulty, std::uint64_t seed,
-    std::uint64_t input_delay = 3, bool two_sides = true);
+    std::uint64_t input_delay = 3, std::size_t planned_humans = 1);
 
 // The stock AI caption level a room difficulty name stands for ("Easy_Default" -> easy, "Normal_Default" -> normal,
 // "Hard_Default" -> hard; case-insensitive prefix). Nothing for a mod's own name: the lobby shows that name as authored.
@@ -107,32 +133,68 @@ struct GalacticLobbyOptions {
 enum class GalacticAiCaption : std::uint8_t { easy, normal, hard };
 [[nodiscard]] std::optional<GalacticAiCaption> galactic_ai_caption(std::string_view difficulty) noexcept;
 
-// The human side (1 or 2) a faction row forms: the row's rank among the host's human rows. Nothing for an AI row
+// The human side (1..galactic_lobby_max_human_sides) a faction row forms: the row's rank among the host's human rows. Nothing for an AI row
 // or a player ID the room does not list. A seat's `team` is this value; a seat's `faction` is the row's name.
 [[nodiscard]] std::optional<sim::galactic::HumanSideId> galactic_lobby_side(const GalacticLobbyOptions& options,
     sim::galactic::PlayerId player) noexcept;
 
 // Staging validation. Run on the lobby's validate hook for a GC room: refuses a campaign that is not in the
 // local multiplayer list, rows that differ from local content, a human row on an unplayable or neutral faction,
-// a third human side, seats outside the planned rows, two sides on one faction and, when `starting`, everything
+// more human sides than the ceiling, more seats than the human seat limit, seats outside the planned rows, two sides on one faction and, when `starting`, everything
 // the setup offer would refuse (galactic_roster_draft + validate_mp_roster: at least two humans, at most eight,
 // a lead per side). Editable staging may be incomplete.
+// `dialog_rows` is the host's staging dialog (galactic_lobby_human_row_limit); 0 when there is none.
 [[nodiscard]] core::Result<void> validate_galactic_lobby(const LobbySnapshot& snapshot, bool starting,
-    std::span<const sim::galactic::MpLobbyCampaign> catalog);
+    std::span<const sim::galactic::MpLobbyCampaign> catalog, std::size_t dialog_rows = 0);
 
 // #6134: the options after the seat of `peer` sits on faction row `slot`, for a row that is not planned for a player yet.
 // The row becomes a planned (human) row; the row the seat leaves is closed when no other seat holds it, so the number of
 // human sides does not grow when a guest moves to a free faction. Nothing when the row cannot be held (unplayable, neutral,
-// unknown) or the move would plan more human sides than a campaign game has. A row that is already planned is unchanged.
+// unknown) or the move would plan more human sides than a campaign game has (galactic_lobby_max_human_sides). A row that
+// is already planned is unchanged.
 // `before` is the room as it was, so the seat's old row and the other holders are known.
 [[nodiscard]] std::optional<GalacticLobbyOptions> galactic_lobby_options_with_seat_on(const GalacticLobbyOptions& options,
-    const sim::galactic::MpLobbyCampaign& campaign, const LobbySnapshot& before, PeerIndex peer, sim::galactic::PlayerId slot);
+    const sim::galactic::MpLobbyCampaign& campaign, const LobbySnapshot& before, PeerIndex peer, sim::galactic::PlayerId slot,
+    std::size_t dialog_rows = 0);
 
 // The lobby's choice hook for a Galactic Conquest room (host side, while a seat edits its own choice): when the choice
 // names a faction row that is not planned for a player yet, the room's rows are reshaped with galactic_lobby_options_with_seat_on
 // and every seat's side and faction follow its row again, so a guest can pick any free playable faction without the host
-// closing another row first. A choice that cannot be reshaped is refused with the reason (two human sides at most).
+// closing another row first. A choice that cannot be reshaped is refused with the reason (the human side ceiling). The same
+// hook runs when a seat is admitted (the row a newcomer was seated on becomes a human side when it was an AI row).
 [[nodiscard]] core::Result<void> follow_galactic_choice(const LobbySnapshot& before, LobbySnapshot& candidate, PeerIndex peer,
+    std::span<const sim::galactic::MpLobbyCampaign> catalog, std::size_t dialog_rows = 0);
+
+// D8 (#8071): the faction row a newcomer is seated on. In order: a row the host planned for a player that nobody holds, else
+// the first playable row that is still an AI faction (the newcomer claims it, follow_galactic_choice plans it) while the human
+// side ceiling allows it (never in a co-op campaign), else the planned row with the fewest seats (the lowest faction on a tie:
+// a co-op seat). Nothing when the room has no planned row.
+[[nodiscard]] std::optional<sim::galactic::PlayerId> galactic_lobby_newcomer_row(const GalacticLobbyOptions& options,
+    const sim::galactic::MpLobbyCampaign& campaign, const LobbySnapshot& room, std::size_t dialog_rows = 0);
+
+// A campaign switch in staging (D8): the rows of the room's seats after the host changed the campaign to `fresh` (the new campaign's
+// default options, host row planned only). The host takes the first planned row; every guest, in seat order, keeps a row of its own:
+// a planned row nobody holds, else the next playable AI faction (planned with the seat while the human rows allow, see
+// galactic_lobby_human_row_limit), else the emptiest planned row (a co-op seat; a co-op campaign always shares the host's row).
+// `options` are `fresh` with the claimed rows planned and `slots` the faction row of each seat in `room.seats` order. Nothing when the
+// campaign has no row for a seat.
+struct GalacticLobbyReseat final {
+    GalacticLobbyOptions options;
+    std::vector<sim::galactic::PlayerId> slots;
+};
+[[nodiscard]] std::optional<GalacticLobbyReseat> galactic_lobby_reseat(GalacticLobbyOptions fresh,
+    const sim::galactic::MpLobbyCampaign& campaign, const LobbySnapshot& room, std::size_t dialog_rows);
+
+// Why the host may not switch a room with guests seated to `campaign` (D8): its connections are fixed when the room opens, so the room
+// waits for `room.capacity` players, and a multiplayer campaign with fewer playable factions than that could never start. Nothing for
+// a room with only the host in (it is opened again for the campaign), for a co-op campaign (one side, co-op seats) and for a campaign
+// with at least as many playable factions as the room has seats.
+[[nodiscard]] std::optional<std::string> galactic_lobby_switch_refusal(const sim::galactic::MpLobbyCampaign& campaign, const LobbySnapshot& room);
+
+// The room's departure hook (host side), after `peer`'s seat was removed (left, kicked, link lost): the row it held, when no
+// other seat holds it any more, goes back to an AI faction (unclaimed), every seat's side follows the rows and a seat whose
+// side moved is unreadied by the room's ready rule. The room is left as it is when nothing changes.
+void follow_galactic_departure(const LobbySnapshot& before, LobbySnapshot& after, PeerIndex peer,
     std::span<const sim::galactic::MpLobbyCampaign> catalog);
 
 // The roster the agreed choices describe: every campaign faction as a player, a human seat per lobby seat on its

@@ -26,9 +26,12 @@
 #include "../../src/campaign/galactic_ai_usability.hpp"
 #include "../../src/campaign/galactic_ai_lane_inbox.hpp"
 #include "eawr/campaign/live_conflict.hpp"
+#include "eawr/campaign/auto_resolve_live.hpp"
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/data/retail_values.hpp"
+#include "eawr/sim/tactical/replay.hpp"
+#include "eawr/sim/tactical/session.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -74,6 +77,91 @@ std::filesystem::path game_root() {
     auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
     if (!root) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
     return std::filesystem::path(std::move(*root));
+}
+// #7317: fork a stock window boundary, so a scripted child does not change the production-exactness arm. The fixture child
+// has no forces and no automatic victory; the ordinary typed quit command returns it after every tick of a window was saved.
+void battle_save_window(cp::GameSession& stock, const eawr::checkpoint::Identities& identities,
+    eawr::checkpoint::GameLoadOptions restore, gc::PlayerId ai_player,
+    gc::PlayerId human, gc::SeatId seat, eawr::script::foc::galactic_ai::AsyncSchedule schedule) {
+    namespace ck = eawr::checkpoint;
+    namespace tt = eawr::sim::tactical;
+    const eawr::platform::ThreadWorkerAdapter executor(4);
+    // Diagnostic (see the probes below): the child is staged in this fixture's own parent, never in a session that was
+    // itself restored from a save, so the saves below are first-generation saves.
+    struct { cp::GameSession& session; } branch{stock};
+    cp::ConflictRecord conflict;
+    const auto snapshot = branch.session.galaxy().snapshot();
+    const auto defended = std::find_if(snapshot->planets().begin(), snapshot->planets().end(),
+        [human](const auto& planet) { return planet.owner == human; });
+    galactic_campaign_gate::check(defended != snapshot->planets().end(), "the scripted child has a human-owned destination");
+    conflict.planet = defended->id;
+    conflict.invader = ai_player; conflict.defender = human;
+    conflict.tactical.content_identity = branch.session.galaxy().setup().content_identity;
+    for (const auto player : {std::min(ai_player, human), std::max(ai_player, human)})
+        conflict.tactical.players.push_back({player, player, player, 1});
+    conflict.seats = {{seat, human}};
+    const auto feed = [&](auto& game, std::uint64_t offset) {
+        if (offset == 1) {
+            // The preceding step may reserve another lane block; take the child identity at its actual staging tick.
+            conflict.id = game.galaxy().next_entity_id(); conflict.tactical.first_free_entity_id = conflict.id + 1;
+            must(game.stage_battle(conflict, {}, cp::ScriptRequirement::none));
+        }
+        if (offset == 17) {
+            galactic_campaign_gate::check(game.battle(), "the scripted child stays live through the whole save window");
+            tt::TacticalReplay envelope; envelope.setup.players = conflict.tactical.players;
+            envelope.final_tick_count = game.battle()->completed_tick() + 1;
+            envelope.commands.push_back({{game.battle()->completed_tick(), human, 1}, {}, tt::QuitPayload{}});
+            const auto bytes = must(tt::write_replay(envelope));
+            const auto header = static_cast<std::size_t>(bytes[10]) | (static_cast<std::size_t>(bytes[11]) << 8U);
+            const auto start = header + envelope.setup.players.size() * 24 + 4;
+            gc::TacticalLayerCommand quit{conflict.id, bytes[start + 20], {bytes.begin() + static_cast<std::ptrdiff_t>(start), bytes.end()}};
+            const auto recording = must(game.checkpoint_recording()); std::uint64_t sequence{};
+            for (const auto& accepted : recording.commands.commands)
+                if (accepted.key.seat == seat) sequence = std::max(sequence, accepted.key.sequence);
+            must(game.submit({{game.completed_tick(), seat, sequence + 1}, std::move(quit)}));
+        }
+        static_cast<void>(galactic_campaign_gate::unattended_human_input(game));
+    };
+    std::vector<std::pair<std::uint64_t, std::vector<std::uint8_t>>> saves;
+    std::map<std::uint64_t, std::string> hashes;
+    std::size_t finished_saves{};
+    for (std::uint64_t offset = 0; offset <= 32; ++offset) {
+        feed(branch.session, offset);
+        const auto state = must(branch.session.step(executor)); hashes.emplace(offset, state.state_hash.get());
+        if (offset == 1) galactic_campaign_gate::check(branch.session.battle(), "the scripted battle enters inside the lane window");
+        if (offset >= 1 && offset <= 15) {
+            if (offset == 1) std::cout << "GCAI-BATTLE-SAVE live offset=1" << branch.session.hash_components() << std::endl;
+            if (inbox_holds(branch.session).finished) ++finished_saves;
+            saves.emplace_back(offset, must(ck::save_game_checkpoint(branch.session, identities)));
+        }
+    }
+    galactic_campaign_gate::check(!branch.session.battle(), "the scripted child returns before continuation comparison ends");
+    if (schedule.adopt_delay == schedule.batch_ticks)
+        galactic_campaign_gate::check(finished_saves == saves.size(), "every full-delay battle-entry save holds finished output");
+    std::size_t compared{};
+    for (const auto& [saved_offset, bytes] : saves) for (const std::size_t workers : {1, 2, 4, 8}) {
+        const eawr::platform::ThreadWorkerAdapter workers_executor(workers);
+        if (workers == 1) {
+            // Diagnostic (removed once the row passes): which restore variant loads a save that holds the live child.
+            auto without_scripts = restore; without_scripts.script_requirement = cp::ScriptRequirement::none;
+            for (const auto& [label, variant_in] : {std::pair{"child-save/as-is", restore}, std::pair{"child-save/scripts-none", without_scripts}}) {
+                const auto& variant = variant_in;
+                const auto result = ck::load_game_checkpoint(bytes, identities, variant, workers_executor);
+                std::cout << "GCAI-BATTLE-SAVE probe " << label << " offset=" << saved_offset << (result ? " ok" : " FAIL " + result.error().message) << std::endl;
+            }
+        }
+        auto loaded = must(ck::load_game_checkpoint(bytes, identities, restore, workers_executor));
+        galactic_campaign_gate::check(must(ck::save_game_checkpoint(loaded.session, identities)) == bytes,
+            "a stock save inside a real child round trips exactly");
+        for (auto next = saved_offset + 1; next <= 32; ++next) {
+            feed(loaded.session, next);
+            galactic_campaign_gate::check(must(loaded.session.step(workers_executor)).state_hash.get() == hashes.at(next),
+                "every saved battle-entry window resumes equally through the child return on 1/2/4/8 workers");
+            ++compared;
+        }
+    }
+    std::cout << "GCAI-ASYNC-P4 trigger=battle_entry saves=" << saves.size() << " finished_saves=" << finished_saves << " compared_ticks=" << compared
+        << " returned=true equal=true" << std::endl;
 }
 // One stock day on `workers` simulation workers. The P4 sweep runs inside the 4-worker day.
 struct DayResult {
@@ -136,9 +224,12 @@ DayResult run_day(std::size_t workers, eawr::script::foc::galactic_ai::AsyncSche
         out.external.emplace("GALACTIC_USABILITY", std::move(provider));
         return eawr::core::Result<cp::GalacticAiStockQueries>::success(std::move(out));
     };
-    auto factory = must(cp::stock_galactic_ai_providers(setup, services.stock_starting_forces, space, std::move(queries),
-        [observed](auto view) { observed->runtimes.push_back(std::move(view)); },
-        [observed](const auto& notice) { observed->battle(notice); }));
+    const auto make_provider_factory = [&] {
+        return must(cp::stock_galactic_ai_providers(setup, services.stock_starting_forces, space, queries,
+            [observed](auto view) { observed->runtimes.push_back(std::move(view)); },
+            [observed](const auto& notice) { observed->battle(notice); }));
+    };
+    auto factory = make_provider_factory();
     eawr::platform::CampaignServiceConfiguration configuration;
     configuration.configure = [&](auto& game) { return cp::configure_live_campaign_conflicts(game, files, loaded.catalog, data, types, plan, space); };
     configuration.restore.configure_session = configuration.configure;
@@ -199,6 +290,52 @@ DayResult run_day(std::size_t workers, eawr::script::foc::galactic_ai::AsyncSche
         feed(*root_owner.game(), tick);
         const auto state = must(root_owner.game()->step(*setup->executor));
         result.final_hash = state.state_hash.get();
+        if (async && workers == 4 && tick == 2 * schedule.batch_ticks) {
+            const auto observations_before = *observed;
+            // The fixture child has no forces and no AI scene, so it must not run through the stock space entry (its AI
+            // scene preparation refuses a record without a skirmish setup: that refusal is correct for a real conflict and
+            // is untouched). Build the same restore chain as the stock one (conflict adapters, story, then the AI runtime's
+            // wrapper that installs the economic and native replay owners) over a content-only conflict layer.
+            const auto fixture_content = [](const auto&) { return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({}); };
+            eawr::platform::CampaignServiceConfiguration battle_configuration;
+            battle_configuration.configure = [&, fixture_content](auto& game) {
+                return cp::install_live_conflict_adapters(game, files, loaded.catalog, data, types, plan, fixture_content);
+            };
+            battle_configuration.restore.configure_session = battle_configuration.configure;
+            battle_configuration.restore.content = fixture_content;
+            must(cp::configure_galactic_ai_runtime(battle_configuration, setup, make_provider_factory()));
+            // A session restores only through the services it was saved under (the stock parent restored through this
+            // content-only chain differs in its saved session and multiplayer-resume sections, as it must). So the fixture
+            // runs its own parent, configured with these services from tick 0, up to the same tick, and forks that one.
+            auto battle_root = must(cp::CampaignRoot::create(plan, services));
+            must(battle_configuration.configure(*battle_root.game()));
+            must(battle_configuration.configure_native_ai(*battle_root.game()));
+            for (std::uint64_t battle_tick = 1; battle_tick <= tick; ++battle_tick) {
+                feed(*battle_root.game(), battle_tick);
+                (void)must(battle_root.game()->step(*setup->executor));
+            }
+            const auto battle_identities = ck::game_identities(battle_root.game()->galaxy().setup());
+            // Diagnostic (removed once the row passes): which parent restores through which service chain.
+            {
+                const eawr::platform::ThreadWorkerAdapter probe_pool(4);
+                const auto probe = [&](const char* label, cp::GameSession& parent, const ck::GameLoadOptions& chain) {
+                    const auto parent_identities = ck::game_identities(parent.galaxy().setup());
+                    const auto bytes = must(ck::save_game_checkpoint(parent, parent_identities));
+                    const auto loaded_probe = ck::load_game_checkpoint(bytes, parent_identities, chain, probe_pool);
+                    std::cout << "GCAI-BATTLE-SAVE probe " << label << (loaded_probe ? " ok" : " FAIL " + loaded_probe.error().message) << std::endl;
+                };
+                probe("stock-parent/stock-chain", *root_owner.game(), configuration.restore);
+                probe("stock-parent/fixture-chain", *root_owner.game(), battle_configuration.restore);
+                probe("fixture-parent/fixture-chain", *battle_root.game(), battle_configuration.restore);
+                probe("fixture-parent/stock-chain", *battle_root.game(), configuration.restore);
+                auto without_scripts = battle_configuration.restore; without_scripts.script_requirement = cp::ScriptRequirement::none;
+                probe("fixture-parent/fixture-chain+scripts-none", *battle_root.game(), without_scripts);
+            }
+            auto battle_restore = battle_configuration.restore;
+            battle_save_window(*battle_root.game(), battle_identities, std::move(battle_restore),
+                setup->lifecycle.players.front().player, options.solo_reference_human.value(), human_seat, schedule);
+            *observed = observations_before;
+        }
         const bool sweeping = async && workers == 4 && tick >= 300;
         const bool saving = std::any_of(sweeps.begin(), sweeps.end(), [&](const auto& sweep) {
             return sweep.first && tick < sweep.first + p4_span;
@@ -386,10 +523,13 @@ DayResult run_day(std::size_t workers, eawr::script::foc::galactic_ai::AsyncSche
         // session calls the lane barrier still makes on the world (overlay, identity reservation, barrier, output phase) are printed.
         std::cout << "GCAI-ASYNC-INPUT workers=" << workers << " window_input_reads=" << tally->window_input_reads
             << " mismatches=" << tally->window_input_mismatches << " body_live_reads=" << tally->body_live_reads
+            << " body_live_writes=" << tally->body_live_writes
             << " lane_session_calls=" << tally->lane_session_calls << std::endl;
         galactic_campaign_gate::check(tally->window_input_reads > 0, "the AI window body reads the world through its window input");
+        galactic_campaign_gate::check(tally->native_window_reads > 0, "the runtime binds NativeActions to its own window input");
         galactic_campaign_gate::check(!tally->body_live_reads, "no AI window body read of the live session bypasses the window input");
-        galactic_campaign_gate::check(!tally->window_input_mismatches, "every window input read equals the live session's read (inline body)");
+        galactic_campaign_gate::check(!tally->body_live_writes, "the cut reservation is the only lane-originated world mutation before adoption");
+        galactic_campaign_gate::check(!tally->window_input_mismatches, "window cut inputs equal the live session; speculative reads use the lane barrier");
         // No AI player is retired by a script or native fault over the day (a retired AI stops for the rest of the campaign).
         const auto retirements = cp::galactic_ai_provider_retirements(observed->runtimes.front());
         std::cout << "GCAI-RETIREMENTS workers=" << workers << " provider_retirements=" << retirements << std::endl;

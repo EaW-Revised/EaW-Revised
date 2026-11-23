@@ -19,7 +19,15 @@ class GalacticPauseBannerRuntime(unittest.TestCase):
     @staticmethod
     def driver(clicks):
         """One native left click on the named node's centre at each (seconds, node name); the run closes 3 s after the last."""
-        body = "".join('''    if elapsed > %s and not done_%d:
+        body = "".join(('''    if elapsed > %s and not done_%d:
+        done_%d = true
+        for pressed in [true, false]:
+            var event = InputEventKey.new()
+            event.keycode = KEY_SPACE
+            event.physical_keycode = KEY_SPACE
+            event.pressed = pressed
+            Input.parse_input_event(event)
+''' % (at, index, index)) if name == "KEY_SPACE" else ('''    if elapsed > %s and not done_%d:
         done_%d = true
         var node = root.find_child("%s", true, false)
         assert(node != null, "%s is not in the tree")
@@ -35,7 +43,7 @@ class GalacticPauseBannerRuntime(unittest.TestCase):
             event.button_index = MOUSE_BUTTON_LEFT
             event.pressed = pressed
             Input.parse_input_event(event)
-''' % (at, index, index, name, name) for index, (at, name) in enumerate(clicks))
+''' % (at, index, index, name, name)) for index, (at, name) in enumerate(clicks))
         flags = "".join("var done_%d = false\n" % index for index in range(len(clicks)))
         close_at = (clicks[-1][0] if clicks else 14.0) + 3.0
         return '''extends SceneTree
@@ -59,9 +67,12 @@ func _process(delta):
         report = directory / "report.json"
         script = directory / "driver.gd"
         script.write_text(self.driver(clicks), encoding="utf-8")
+        settings = directory / "settings.txt"
+        settings.write_text("eawr-settings 1\ngameplay.space_pauses_galactic=1\n", encoding="utf-8")
         command = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "%dx%d" % (WIDTH, HEIGHT), "--path",
                    str(ROOT / "apps/viewer/project"), "--script", str(script), "--",
-                   "--eawr-galactic", campaign, "--eawr-game-root", GAME_ROOT, "--eawr-report", str(report), *extra]
+                   "--eawr-galactic", campaign, "--eawr-game-root", GAME_ROOT, "--eawr-report", str(report),
+                   "--eawr-settings-file", str(settings), *extra]
         result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
         log = result.stdout + result.stderr
         (directory / "viewer.log").write_text(log, encoding="utf-8")
@@ -98,6 +109,12 @@ func _process(delta):
         again = self.view([(14.0, "b_play_pause"), (17.0, "b_play_pause")])
         self.assertEqual(again["live_session"]["pause_depth"], 0, "the button toggles back to play")
         self.assertIsNone(again["pause_banner"]["paused_banner"])
+
+    def test_space_shows_pause_banner_without_a_prompt(self):
+        paused = self.view([(14.0, "KEY_SPACE")], campaign="Sandbox_Gateways_Rebel", extra=("--eawr-galactic-paused", "no",
+            "--eawr-galactic-dismiss-story", "yes", "--eawr-galactic-ai", "off"))
+        self.assertEqual(paused["live_session"]["pause_depth"], 1)
+        self.assertIsNotNone(paused["pause_banner"]["paused_banner"])
 
     def test_resume_game_is_refused_where_the_pause_button_is(self):
         """The clock controls are closed in this preview (the pause button is disabled, as in a multiplayer role without

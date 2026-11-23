@@ -1,4 +1,5 @@
 #include "damage_support.hpp"
+#include "eawr/sim/tactical/abilities.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -279,6 +280,54 @@ void test_recharge() {
     tactical::shield_generators_lost(station, value, held, 20);
     static_cast<void>(tactical::recharge_shields(station, value, held, 30));
     expect(held.shields.raw() == 0, "DG-17: without generators the shield drops and never recharges");
+}
+
+// WAB-65: a refresh at the health bound times the largest ability factor reaches the top of int64; the recharge must
+// neither fail nor wrap, and keeps the result a plain clamp of the exact sum.
+void test_recharge_limits() {
+    const auto bound = Fixed::from_raw(tactical::max_durability_health * one);
+    const auto factor = Fixed::from_raw(tactical::max_ability_value_raw);
+    auto profile = frigate();
+    profile.max_shields = bound;
+    profile.shield_refresh = bound;
+    const auto value = rules();
+    auto state = tactical::full_durability(profile);
+    state.shields = units(17);
+    expect(static_cast<bool>(tactical::recharge_shields(profile, value, state, 10, factor)) && state.shields == bound,
+        "WAB-65: a shield refresh at the health bound at the factor limit fills the pool from 17 without failing");
+    // Two generators alive (alive = total = 2): the share must not overflow.
+    auto station = profile;
+    station.hardpoints = {{tactical::HardpointRole::shield_generator, true, units(50), {}, {}},
+        {tactical::HardpointRole::shield_generator, true, units(50), {}, {}}};
+    auto held = tactical::full_durability(station);
+    held.shields = units(17);
+    expect(static_cast<bool>(tactical::recharge_shields(station, value, held, 10, factor)) && held.shields == bound,
+        "WAB-65: two shield generators alive at the factor limit do not fail the recharge");
+    held.shields = units(17);
+    held.hardpoints[0] = Fixed{};
+    expect(static_cast<bool>(tactical::recharge_shields(station, value, held, 11, factor)) && held.shields == bound,
+        "WAB-65: one of two shield generators left still fills the pool at the factor limit");
+    // The split share equals the exact share where the checked path would also succeed: 3 of 4 generators of 100.
+    auto quad = frigate();
+    quad.shield_refresh = units(100);
+    quad.hardpoints = {{tactical::HardpointRole::shield_generator, true, units(50), {}, {}},
+        {tactical::HardpointRole::shield_generator, true, units(50), {}, {}},
+        {tactical::HardpointRole::shield_generator, true, units(50), {}, {}},
+        {tactical::HardpointRole::shield_generator, true, units(50), {}, {}}};
+    auto quad_state = tactical::full_durability(quad);
+    quad_state.shields = units(10);
+    quad_state.hardpoints[0] = Fixed{};
+    static_cast<void>(tactical::recharge_shields(quad, value, quad_state, 12));
+    expect(quad_state.shields == units(85), "WAB-65: 3 of 4 generators add three quarters of the refresh");
+    // Energy: the same extreme refresh from a small pool.
+    auto powered = frigate();
+    powered.powered = true;
+    powered.max_energy = bound;
+    powered.energy_refresh = bound;
+    auto energy_state = tactical::full_durability(powered);
+    energy_state.energy = units(17);
+    expect(static_cast<bool>(tactical::recharge_energy(powered, value, energy_state, factor)) && energy_state.energy == bound,
+        "WAB-65: an energy refresh at the health bound at the factor limit fills the pool from 17 without failing");
 }
 
 // EN-01 to EN-06 on a POWERED frigate: Energy_Capacity 300, Energy_Refresh_Rate 100.

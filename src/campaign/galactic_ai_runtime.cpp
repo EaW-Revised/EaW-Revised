@@ -127,7 +127,8 @@ public:
     [[nodiscard]] std::shared_ptr<const ga::gc::GalacticSnapshot> snapshot() const override {
         if (!cut_) return live_->snapshot();
         const auto* view = barrier_view();
-        return note(view ? view->snapshot() : cut_->snapshot, [&] { return live_->snapshot(); });
+        if (view) { reads_.fetch_add(1, std::memory_order_relaxed); return view->snapshot(); }
+        return note(cut_->snapshot, [&] { return live_->snapshot(); });
     }
     [[nodiscard]] const ga::gc::PlanetGraph* graph() const override {
         return cut_ ? note(cut_->graph, [&] { return live_->graph(); }) : live_->graph();
@@ -138,12 +139,14 @@ public:
     [[nodiscard]] sim::EntityId next_entity_id() const override {
         if (!cut_) return live_->next_entity_id();
         const auto* view = barrier_view();
-        return note(view ? view->next_entity_id() : cut_->next_entity_id, [&] { return live_->next_entity_id(); });
+        if (view) { reads_.fetch_add(1, std::memory_order_relaxed); return view->next_entity_id(); }
+        return note(cut_->next_entity_id, [&] { return live_->next_entity_id(); });
     }
     [[nodiscard]] std::uint64_t next_native_invasion_id() const {
         if (!cut_) return live_->next_native_invasion_id();
         const auto* view = barrier_view();
-        return note(view ? view->next_native_invasion_id() : cut_->next_invasion_id, [&] { return live_->next_native_invasion_id(); });
+        if (view) { reads_.fetch_add(1, std::memory_order_relaxed); return view->next_native_invasion_id(); }
+        return note(cut_->next_invasion_id, [&] { return live_->next_native_invasion_id(); });
     }
     [[nodiscard]] std::uint64_t galactic_frame() const {
         return cut_ ? note(cut_->galactic_frame, [&] { return live_->clock().galactic_frame; }) : live_->clock().galactic_frame;
@@ -153,7 +156,8 @@ public:
         return cut_ ? *note(cut_->setup, [&] { return &live_->setup(); }) : live_->setup();
     }
     [[nodiscard]] std::uint64_t pause_depth() const override {
-        return cut_ ? note(cut_->pause_depth, [&] { return static_cast<std::uint64_t>(live_->clock().pause_depth); }) : live_->clock().pause_depth;
+        return cut_ ? note(cut_->pause_depth, [&] { return static_cast<std::uint64_t>(live_->clock().pause_depth); })
+                    : static_cast<std::uint64_t>(live_->clock().pause_depth);
     }
     void drain(GalacticAiApplyTally& tally) noexcept {
         tally.window_input_reads += reads_.exchange(0, std::memory_order_relaxed);
@@ -201,6 +205,12 @@ public:
     std::weak_ptr<ComposedGalacticAiState> native_state;
     std::shared_ptr<ga::NativeActions> actions;
     std::unique_ptr<ga::gc::GalacticSession::NativeActionBarrier> native_actions_barrier;
+    std::optional<ga::gc::GalacticSession> lane_shell;
+    ga::LaneIdentities cut_identities{};
+    std::vector<std::pair<ga::gc::PlayerId, ga::IntentRecord>> cut_intents;
+    ga::LaneIdentities cut_decided_frontier{};
+    std::optional<std::vector<std::uint8_t>> cut_world_state; // observer only, never saved or hashed
+    std::unique_ptr<ga::gc::GalacticSession::NativeOutputPhase> cut_output_guard; // sim-side diagnostic latch, outside the lane body
     // Async AI A2.2: the barrier decides, it does not commit. The players' intents are retained per virtual
     // tick in the outbox and the world takes them through the ordered readmit at their apply tick.
     ga::IntentOutbox outbox{ga::synchronous_reference_schedule};
@@ -450,6 +460,8 @@ public:
                 // The world refused a hop or a purchase while a slice applied; the consequence reaches the AI's rows here, at its window start.
                 if (auto applied = ga::refusal::apply(*actions, *refusal); !applied) return core::Result<void>::failure(applied.error());
             } else if (const auto* change = std::get_if<GalacticAiTypeSwitch>(&entry)) {
+                if (native_actions_barrier)
+                    if (auto selected = native_actions_barrier->select_player(change->player); !selected) return selected;
                 if (auto applied = apply_type_switch(*change); !applied) return applied;
             } else {
                 const auto& delivery = std::get<ga::NativeActions::Delivery>(entry);
@@ -549,7 +561,8 @@ public:
     }
     core::Result<void> build_window_overlay(const sim::PartitionExecutor& executor) {
         window_overlay.reset(); window_snapshot.reset();
-        if (virtual_offset || outbox.schedule().apply_delay == 0 || outbox.pending_slices().empty()) return core::Result<void>::success();
+        if (virtual_offset || (cut_intents.empty() && (outbox.schedule().apply_delay == 0 || outbox.pending_slices().empty())))
+            return core::Result<void>::success();
         const auto players = lane_players();
         if (players.empty()) return core::Result<void>::success();
         // The order and the stale floor of the NEXT apply, shared with commit_ordered_intents (plan_slice, slice_step_stale).
@@ -561,6 +574,7 @@ public:
                 if (ga::slice_step_stale(lane_session(), step.intent->record, options)) continue;
                 records.push_back({step.intent->player, &step.intent->record});
             }
+        for (const auto& [player, record] : cut_intents) records.push_back({player, &record});
         const auto refused_before = overlay_counters.work.refused;
         auto built = lane_session().build_native_overlay(players.front(), records, executor, overlay_counters.work);
         if (!built) return core::Result<void>::failure(built.error());
@@ -568,6 +582,34 @@ public:
         apply_tally->overlay_refused += overlay_counters.work.refused - refused_before;
         window_overlay.emplace(std::move(built).value());
         window_snapshot = window_overlay->snapshot();
+        return core::Result<void>::success();
+    }
+    // Inbox delivery precedes the recoverable body attempt. Native cleanup it requests is a retained prefix, so a body retry
+    // cannot drop it: later overlay construction replays it and each attempt prepends its records to its first slice.
+    core::Result<void> begin_cut_deliveries(const sim::PartitionExecutor& executor) {
+        // Other deliveries update AI rows only. A type switch can abandon plans and emit native cleanup requests.
+        if (std::none_of(inbox.entries().begin(), inbox.entries().end(), [](const auto& entry) {
+                return std::holds_alternative<GalacticAiTypeSwitch>(entry);
+            })) return core::Result<void>::success();
+        if (auto overlaid = build_window_overlay(executor); !overlaid) return overlaid;
+        ga::gc::GalacticSession::NativeBarrierOptions options;
+        ga::OutboxBatch reservation(outbox.schedule());
+        const auto start = reservation.begin(ai_index, cut_frontier, cut_floor, cut_identities);
+        options.first_id = start.id; options.first_invasion = start.invasion;
+        options.lane = true; options.overlay = std::move(window_overlay); window_overlay.reset(); window_snapshot.reset();
+        if (outbox.schedule().apply_delay) {
+            options.id_end = reservation.contents().frontier.id; options.invasion_end = reservation.contents().frontier.invasion;
+        }
+        cut_decided_frontier = start;
+        options.intent_sink = [this](auto player, ga::IntentRecord record) {
+            cut_decided_frontier.id = std::max(cut_decided_frontier.id, record.next_id);
+            cut_decided_frontier.invasion = std::max(cut_decided_frontier.invasion, record.next_invasion);
+            cut_intents.emplace_back(player, std::move(record));
+        };
+        const auto players = lane_players();
+        auto begun = lane_session().begin_native_barrier(players, ga::gc::galactic_max_commands, std::move(options));
+        if (!begun) return core::Result<void>::failure(begun.error());
+        native_actions_barrier = std::move(begun).value();
         return core::Result<void>::success();
     }
     // The first virtual tick of a batch opens the lane barrier; later ones open their turn over what the batch decided.
@@ -579,22 +621,27 @@ public:
         }
         if (native_actions_barrier) return absent<void>("completed preceding native action barrier");
         const auto players = lane_players();
-        const auto start = lane_batch.begin(ai_index, cut_frontier, cut_floor, {window_input.next_entity_id(), window_input.next_native_invasion_id()});
+        const auto start = lane_batch.begin(ai_index, cut_frontier, cut_floor, cut_identities);
         stage_losses.begin_batch();
         ga::gc::GalacticSession::NativeBarrierOptions options;
-        options.first_id = start.id; options.first_invasion = start.invasion; options.intent_sink = lane_batch.sink(); options.lane = true;
+        options.first_id = std::max(start.id, cut_decided_frontier.id);
+        options.first_invasion = std::max(start.invasion, cut_decided_frontier.invasion);
+        options.intent_sink = lane_batch.sink(); options.lane = true;
         options.overlay = std::move(window_overlay); window_overlay.reset(); window_snapshot.reset();
         // An asynchronous window owns a fixed identity block from its start (the outbox frontier is the block's end).
         const bool blocked = outbox.schedule().apply_delay != 0;
         if (blocked) {
             options.id_end = lane_batch.contents().frontier.id; options.invasion_end = lane_batch.contents().frontier.invasion;
-            // The sim keeps allocating between the slices' apply ticks. Reserve the whole block now, once, at window start
-            // (before the barrier opens), so no sim allocation can take an identity a pending slice still owns, whatever the
-            // window ends up using; each slice is then readmitted with the world counter rewound to its own first identity
-            // (GalacticSession::readmit_native_*). The barrier accepts a first identity inside the block it was told is reserved.
-            // The invasion counter's block is reserved in the same step.
-            if (auto reserved = lane_session().reserve_native_frontiers(window_input.next_entity_id(), options.id_end,
-                    window_input.next_native_invasion_id(), options.invasion_end); !reserved) {
+            // The sim keeps allocating between the slices' apply ticks, so the whole block is reserved in the WORLD once, at the
+            // sim cut (prepare_lane_cut, GFS-A28), before the barrier opens: no sim allocation can take an identity a pending slice
+            // still owns, whatever the window ends up using; each slice is then readmitted with the world counter rewound to its
+            // own first identity (GalacticSession::readmit_native_*). The cut then refreshes this window's shell from the world, so
+            // the shell's counters already stand at the block end and the call below is a no-op (equal counters) in the normal
+            // case. It stays as the guard that the barrier's block (the outbox frontier) is reserved on the shell it opens on: it
+            // reserves only if the shell lags the block, and fails if the frontiers disagree. The invasion counter's block is the
+            // same. The barrier accepts a first identity inside the block it was told is reserved.
+            if (auto reserved = lane_session().reserve_native_frontiers(lane_session().next_entity_id(), options.id_end,
+                    lane_session().next_native_invasion_id(), options.invasion_end); !reserved) {
                 abandon_open_batch(); return reserved;
             }
             window_input.reserved(options.id_end, options.invasion_end);
@@ -603,6 +650,8 @@ public:
         if (!begun) { abandon_open_batch(); return core::Result<void>::failure(begun.error()); }
         native_actions_barrier = std::move(begun).value();
         lane_batch.begin_virtual_tick(1);
+        const auto sink = lane_batch.sink();
+        for (const auto& [player, record] : cut_intents) sink(player, record);
         return core::Result<void>::success();
     }
     // The world takes every slice due at ai_index through the ordered readmit; their commands go to the tick's report.
@@ -613,12 +662,15 @@ public:
         struct DeferScope {
             Runtime& owner; bool previous, previous_applying;
             const ga::NativeActions::WorldReader* previous_reader;
+            ga::gc::GalacticSession* previous_session;
             explicit DeferScope(Runtime& value) : owner(value), previous(value.window_open), previous_applying(value.applying_slices) {
                 previous_reader = owner.actions->bind_world_reader(nullptr);
+                previous_session = owner.actions->bind_lane_session(nullptr);
                 owner.window_open = false; owner.applying_slices = true;
             }
             ~DeferScope() {
                 owner.actions->bind_world_reader(previous_reader);
+                owner.actions->bind_lane_session(previous_session);
                 owner.window_open = previous; owner.applying_slices = previous_applying;
             }
             DeferScope(const DeferScope&) = delete; DeferScope& operator=(const DeferScope&) = delete;
@@ -684,11 +736,49 @@ public:
         if (window_input.is_open() && !applying_slices) ++apply_tally->body_live_reads;
         return *galaxy_;
     }
-    // The window's named calls on the session: the overlay build, the identity reservation, the lane barrier and the output phase.
-    // They stay on the session in step 3a and move to the lane in step 3c (counted while a window input is open).
+    // The window's overlay, local identity reservation, native barrier and publication latch belong to its private shell.
     ga::gc::GalacticSession& lane_session() {
         if (window_input.is_open()) ++apply_tally->lane_session_calls;
-        return *galaxy_;
+        return *lane_shell;
+    }
+    core::Result<void> prepare_lane_cut(ga::gc::GalacticSession& parent) {
+        cut_intents.clear(); cut_decided_frontier = {};
+        cut_frontier = outbox.frontier(); cut_floor = outbox.lane_floor();
+        cut_identities = {parent.next_entity_id(), parent.next_native_invasion_id()};
+        if (outbox.schedule().apply_delay) {
+            ga::OutboxBatch reservation(outbox.schedule());
+            static_cast<void>(reservation.begin(ai_index, cut_frontier, cut_floor, cut_identities));
+            const auto end = reservation.contents().frontier;
+            // GFS-A28: the one sim-cut world write, before the lane body. Preserve world allocation identities until H.
+            if (auto reserved = parent.reserve_native_frontiers(cut_identities.id, end.id, cut_identities.invasion, end.invasion); !reserved)
+                return reserved;
+        }
+        if (!lane_shell) {
+            auto created = ga::gc::GalacticSession::create_lane_shell(parent);
+            if (!created) return core::Result<void>::failure(created.error());
+            lane_shell.emplace(std::move(created).value());
+        }
+        {
+            const gc_profile::Scope refresh_scope(gc_profile::Phase::ai_cut_lane_refresh);
+            if (auto refreshed = lane_shell->refresh_lane(parent); !refreshed) return refreshed;
+        }
+        actions->capture_conflict_inputs();
+        if (providers.observe) cut_world_state = parent.canonical_state_bytes();
+        auto guard = parent.begin_native_output_phase();
+        if (!guard) return core::Result<void>::failure(guard.error());
+        cut_output_guard = std::move(guard).value();
+        return core::Result<void>::success();
+    }
+    // True when the body wrote the live world (the cut's publication latch is set); the fault is recorded on the cut's guard. A phase
+    // counts a recorded fault once whoever asks (NativeOutputPhase::record_fault keeps a flag, covered by the production state test),
+    // so a caller that records the same guard again after this (the commit failure path) never double counts.
+    bool reject_live_publication() noexcept {
+        if (!cut_output_guard || !cut_output_guard->published()) return false;
+        cut_output_guard->record_fault();
+        return true;
+    }
+    void check_body_world() {
+        if (cut_world_state && *cut_world_state != galaxy_->canonical_state_bytes()) ++apply_tally->body_live_writes;
     }
     std::uint64_t sequence{};
     auth::ScriptScheduler* active_scripts{};
@@ -1481,6 +1571,8 @@ struct NativePhaseAttempt {
         return core::Result<void>::success();
     }
     core::Result<void> commit() {
+        owner.check_body_world();
+        if (owner.reject_live_publication()) return absent<void>("AI lane body published outside its shell");
         // All deterministic service callbacks have completed. The ordered
         // world publication may itself call external observers; failure here
         // remains infrastructure refusal and never retries.
@@ -1501,6 +1593,7 @@ struct NativePhaseAttempt {
         return core::Result<void>::success();
     }
     core::Result<void> rollback() {
+        owner.check_body_world();
         if (output->published() || !recoverable_external) return absent<void>("unpublished complete native rollback ownership");
         if (owner.native_actions_barrier) {
             if (auto result = owner.native_actions_barrier->discard(); !result) return result;
@@ -1583,7 +1676,10 @@ public:
         const auto& schedule = owner_->outbox.schedule();
         owner_->ai_index = owner_->ai_ticks++;
         // Async step 3b: a finished window whose adoption tick has come joins the world first, before anything applies or publishes.
-        if (owner_->finished && owner_->ai_index >= owner_->finished->adopt_at) owner_->adopt_finished();
+        if (owner_->finished && owner_->ai_index >= owner_->finished->adopt_at) {
+            const gc_profile::Scope adopt_scope(gc_profile::Phase::ai_adopt);
+            owner_->adopt_finished();
+        }
         owner_->released_commands.clear();
         owner_->active_executor = &executor;
         const std::uint32_t window = owner_->ai_index % schedule.batch_ticks == 0 ? schedule.batch_ticks : 0;
@@ -1597,6 +1693,9 @@ public:
         // slices and before its own decisions (the order the deliveries had when they applied at once).
         GalacticAiDueOutput due;
         owner_->due_plot_notes.clear();
+        // Step 5 timing (diagnostic only): the apply side of the window schedule, from the due publication to the last plot edit.
+        std::optional<gc_profile::Scope> apply_scope;
+        if (schedule.apply_delay != 0) apply_scope.emplace(gc_profile::Phase::ai_apply);
         if (schedule.apply_delay != 0) {
             // W1 S3: the first serviced tick publishes the AI budget as it stands (nothing logged yet); later windows publish
             // theirs from their first apply tick. Before the drain, so a drain is always checked against a publication.
@@ -1627,8 +1726,16 @@ public:
             Runtime& owner; bool open{};
             explicit InputScope(Runtime& value) : owner(value) {}
             ~InputScope() {
+                owner.cut_output_guard.reset();
                 if (open) {
                     owner.actions->bind_world_reader(nullptr);
+                    owner.actions->bind_lane_session(nullptr);
+                    const auto live = owner.actions->take_body_live_accesses();
+                    owner.apply_tally->body_live_reads += live.reads;
+                    owner.apply_tally->body_live_writes += live.writes;
+                    owner.apply_tally->native_window_reads += live.window_reads;
+                    owner.cut_world_state.reset();
+                    owner.cut_intents.clear();
                     owner.window_input.close(); owner.window_input.drain(*owner.apply_tally);
                 }
             }
@@ -1654,19 +1761,28 @@ public:
                 }
             }
         }
+        apply_scope.reset();
+        std::optional<gc_profile::Scope> cut_scope;
+        if (window) cut_scope.emplace(gc_profile::Phase::ai_cut);
         if (window) {
             // The pre-cut of queued control switches (sim-side billing tables) runs right before the cut, after the apply, so it sees every queued entry.
             if (schedule.apply_delay != 0)
                 if (auto noted = owner_->pre_cut_type_switches(); !noted) { owner_->active_executor = nullptr; return Result::failure(noted.error()); }
+            if (auto prepared = owner_->prepare_lane_cut(parent); !prepared) { owner_->active_executor = nullptr; return Result::failure(prepared.error()); }
             body_scope.emplace(*owner_->write_probe, true);
             owner_->window_input.open(parent, static_cast<bool>(owner_->providers.observe)); input_scope.open = true;
             owner_->actions->bind_world_reader(&owner_->window_input);
-            owner_->cut_frontier = owner_->outbox.frontier(); owner_->cut_floor = owner_->outbox.lane_floor();
+            owner_->actions->bind_lane_session(&*owner_->lane_shell);
             owner_->cut_log_end = owner_->billing_view.log_end();
             // Async step 2: the cut comes AFTER the due slices applied, so what the world delivered while they applied (queued, in arrival
             // order after the notices of the steps before) is in this window's cut, the order the AI saw them in when they applied at once.
             owner_->active_executor = &executor;
+            if (auto begun = owner_->begin_cut_deliveries(executor); !begun) { owner_->active_executor = nullptr; return Result::failure(begun.error()); }
             if (auto drained = owner_->drain_inbox(); !drained) { owner_->active_executor = nullptr; return Result::failure(drained.error()); }
+            if (owner_->native_actions_barrier) {
+                if (auto discarded = owner_->native_actions_barrier->discard(); !discarded) { owner_->active_executor = nullptr; return Result::failure(discarded.error()); }
+                owner_->native_actions_barrier.reset();
+            }
             // W1 S5: the AI's registry for this window = the story store (story writes up to now, AI writes visible up to now) with the
             // AI's own writes that are published but not visible yet replayed on top: it sees its own writes at once, the story's now.
             if (owner_->story_globals.active()) {
@@ -1678,6 +1794,7 @@ public:
             }
             if (schedule.apply_delay != 0) owner_->active_executor = nullptr;
         }
+        cut_scope.reset();
         if (!window) {
             auth::ServiceReport idle; idle.tick = scripts.completed_tick();
             idle.commands = std::move(owner_->released_commands); owner_->released_commands.clear();
@@ -1686,6 +1803,7 @@ public:
         }
         std::vector<core::LoadNote> notes;
         for (std::size_t attempt_index = 0; attempt_index <= owner_->setup->lifecycle.players.size(); ++attempt_index) {
+            const gc_profile::Scope body_scope(gc_profile::Phase::ai_window_body);
             NativePhaseAttempt attempt(*owner_, manager_);
             owner_->plot_buffer.clear(); // a retried attempt republishes only its own plot edits
             owner_->engine->clear_global_writes(); // and only its own GlobalValue writes
@@ -1728,7 +1846,13 @@ public:
             }();
             owner_->virtual_offset = 0; manager_->set_virtual_tick(1);
             if (result) {
-                if (auto committed = attempt.commit(); !committed) { attempt.output->record_fault(); return Result::failure(committed.error()); }
+                if (auto committed = attempt.commit(); !committed) {
+                    // Each guard counts one fault: commit() may have recorded either already (reject_live_publication, the finish
+                    // failure), and a second record on the same phase is a no-op.
+                    attempt.output->record_fault();
+                    if (owner_->cut_output_guard) owner_->cut_output_guard->record_fault();
+                    return Result::failure(committed.error());
+                }
                 // A later virtual tick can discard every report in an attempt.
                 // Publish retirements only into the report of the committed window.
                 owner_->retirement_log->flush(result.value());
@@ -1753,7 +1877,7 @@ public:
             }
             // A callback is publication even when it fails or throws. Nothing
             // rolls back or reruns once that output is observable.
-            if (attempt.output->published()) { attempt.output->record_fault(); return result; }
+            if (owner_->reject_live_publication() || attempt.output->published()) { attempt.output->record_fault(); return result; }
             const auto& diagnostic = result.error();
             infrastructure = infrastructure || diagnostic.code == sim::diagnostic_codes::worker_failure
                 || diagnostic.code == ga::gc::diagnostic_codes::worker_failure || diagnostic.code == sim::tactical::diagnostic_codes::worker_failure
@@ -2131,6 +2255,14 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
                 out->story_players.type_build_costs.emplace(id, *galactic_type->build_cost_credits);
         }
         if (!out->object_scripts->types().empty()) {
+            // One floor for every id source: the plan's type bindings, one identity per planet location (load_world_object_scripts
+            // hands those out after the bindings), and the selection content's own types (already in story_players.types).
+            sim::galactic::TypeId floor{};
+            for (const auto& binding : plan.type_bindings()) floor = std::max(floor, binding.id);
+            for (const auto& location : plan.locations()) if (location.planet) ++floor;
+            assign_unplaced_object_types(catalog, floor, out->story_players);
+        }
+        if (!out->object_scripts->types().empty()) {
             phase.emplace("prep.ai_runtime.object_query_unit_tables");
             units::LoadInput input; input.catalog = &catalog; input.filesystem = &files;
             for (const auto& [name, id] : out->story_players.types) { (void)id; input.types.push_back(name); }
@@ -2142,7 +2274,7 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
             const units::UnitTables& vocabulary = shared_hit ? shared_tables->tables() : *own_vocabulary;
             if (core::gc_load::trace.active()) core::gc_load::trace.mark(std::string("prep.ai_runtime.object_query_unit_tables.shared=") + (shared_hit ? "hit" : "own"));
             phase.emplace("prep.ai_runtime.object_query_catalog");
-            out->object_query_catalog = require(make_galactic_object_query_catalog(vocabulary, out->story_players.types));
+            out->object_query_catalog = require(make_galactic_object_query_catalog(vocabulary, out->story_players.types, out->story_players.unplaced_types));
         }
         phase.emplace("prep.ai_runtime.story_scripts");
         out->story_players.local_player = plan.solo_reference_human();
@@ -2245,6 +2377,9 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
         if (!out->object_scripts->types().empty()) {
             group("object-scripts");
             field(out->object_scripts->fingerprint());
+            // The unplaced type identities come from the whole catalog's name set, which this digest otherwise sees only for placed types.
+            field(std::to_string(out->story_players.unplaced_types.size()));
+            for (const auto& [name, id] : out->story_players.unplaced_types) { field(name); field(std::to_string(id)); }
         }
         group("story-players");
         if (!out->story_scripts->entries().empty()) {

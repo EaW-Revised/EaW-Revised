@@ -66,16 +66,17 @@ inline constexpr std::string_view script_log = "EAWR-SCRIPT-0218";
 
 // Persistence and state hashing (#248, docs/lua-persistence.md). A changed
 // encoding rule needs a new identity.
-inline constexpr std::string_view save_format_identity = "eawr-script-save-v4";
+inline constexpr std::string_view save_format_identity = "eawr-script-save-v5";
 // Galactic clock profile plus the shared proximity and object attachment state.
-inline constexpr std::string_view galactic_save_format_identity = "eawr-script-galactic-save-v4";
-inline constexpr std::string_view query_save_format_identity = "eawr-script-query-save-v1";
-inline constexpr std::string_view state_hash_identity = "eawr-script-state-v1";
+inline constexpr std::string_view galactic_save_format_identity = "eawr-script-galactic-save-v5";
+inline constexpr std::string_view query_save_format_identity = "eawr-script-query-save-v2";
+inline constexpr std::string_view state_hash_identity = "eawr-script-state-v2";
 inline constexpr std::string_view authoritative_state_identity = "eawr-authoritative-state-v1";
 
 struct Handle {
     std::uint32_t kind{};
     std::uint64_t id{}; // full-width host identity; object attachment registries impose their own limits
+    std::uint32_t aux{}; // third word: a position wrapper keeps its z here as binary32 bits (0 for every other kind)
     friend bool operator==(const Handle&, const Handle&) = default;
 };
 
@@ -450,6 +451,8 @@ public:
     // restored and rolled back with the Lua graph. For script-visible APIs that are objects of the script itself
     // (a weighted list holding the script's own values) and need no host storage. Before the first instance.
     [[nodiscard]] core::Result<void> register_prelude(std::string_view module);
+    // True when the session manifest holds this logical module path (hosts that add their own pinned module check before a prelude).
+    [[nodiscard]] bool has_module(std::string_view logical_path) const;
     // Registers a method of the host handles of one kind: `handle.Method(...)`
     // calls the binding with the handle as its first argument (the retail
     // wrapper objects are called with '.', not ':'). Reading a name no

@@ -148,8 +148,7 @@ int run(std::vector<fs::path> args) {
     requirements += fs::is_directory(args[3] / "corruption/Data") ? "true}" : "false}";
     eawr::mods::DiscoveryInput discovery;
     for (const auto& layer : profile.profile->layers) discovery.manual_folders.push_back(eawr::mods::steam::path_from_utf8(layer.root));
-    auto records = eawr::mods::discover(discovery);
-    eawr::mods::read_mod_metadata(records);
+    auto records = eawr::mods::discover(discovery);   // discover() already reads the modinfo files
     for (auto& record : records.records)
         for (const auto& layer : profile.profile->layers)
             if (record.root == layer.root) {

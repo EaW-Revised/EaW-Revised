@@ -227,17 +227,26 @@ inline Value position_value(const math::Vec3& position) {
     return Value{std::move(list)};
 }
 
-// A position wrapper (Find_Best_Local_Threat_Center): planar x and y as
-// binary32 bits in the handle id, so it round-trips exactly; z is 0.
-inline Value position_handle(LuaNumber x, LuaNumber y) {
-    return handle(handle_position, (std::uint64_t{ai::binary32_bits(x)} << 32U) | ai::binary32_bits(y));
+// A position wrapper (Find_Best_Local_Threat_Center, Get_Position, Create_Position): x and y as binary32 bits in
+// the handle id and z as binary32 bits in its third word, so it round-trips exactly (a retail Vector3 is three
+// floats); z is 0 when omitted, which keeps the planar wrappers as they were.
+inline Value position_handle(LuaNumber x, LuaNumber y, LuaNumber z = LuaNumber(0)) {
+    Handle wrapper{handle_position, (std::uint64_t{ai::binary32_bits(x)} << 32U) | ai::binary32_bits(y)};
+    wrapper.aux = ai::binary32_bits(z);
+    return Value{wrapper};
+}
+
+// What a script sees for a position it asked an object for: the retail wrapper, not a plain list.
+inline Value position_object(const math::Vec3& position) {
+    return position_handle(numeric::from_fixed(position.x), numeric::from_fixed(position.y), numeric::from_fixed(position.z));
 }
 
 inline std::optional<math::Vec3> position_of_handle(const Handle& wrapper) {
     auto x = numeric::to_fixed(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id >> 32U)));
     auto y = numeric::to_fixed(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id & 0xffffffffU)));
-    if (!x || !y) return std::nullopt;
-    return math::Vec3{x.value(), y.value(), {}};
+    auto z = numeric::to_fixed(ai::binary32_value(wrapper.aux));
+    if (!x || !y || !z) return std::nullopt;
+    return math::Vec3{x.value(), y.value(), z.value()};
 }
 
 // A position argument: a game object (its position), a position wrapper or a

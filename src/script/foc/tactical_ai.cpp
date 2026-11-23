@@ -7,6 +7,7 @@
 #include "ai_mode.hpp"
 #include "ai_script_evaluators.hpp"
 #include "tactical_ai_internal.hpp"
+#include "discrete_distribution.hpp"
 #include "mode_time.hpp"
 #include "tactical_ai_world.hpp"
 #include "eawr/core/sha256.hpp"
@@ -762,6 +763,11 @@ core::Result<PreparedAiSession> prepare_session(
     for (const auto& [path, bytes] : modules) {
         if (auto added = manifest.add(path, bytes); !added) return SessionResult::failure(added.error());
     }
+    // DiscreteDistribution for the battle's story, object and plan scripts (one definition with the galactic story host).
+    if (battle_bindings_enabled(host)) {
+        if (auto added = manifest.add(distribution::distribution_module, std::string(distribution::distribution_source)); !added)
+            return SessionResult::failure(added.error());
+    }
     authoritative::SessionConfig config;
     config.seed = setup.seed;
     config.tick_duration = authoritative::TickDuration{tactical::tick_numerator, tactical::tick_denominator};
@@ -772,6 +778,7 @@ core::Result<PreparedAiSession> prepare_session(
     register_globals(scripts.value(), host, errors);
     register_methods(scripts.value(), host, errors);
     register_battle_object_bindings(scripts.value(), host, errors);
+    register_battle_distribution(scripts.value(), host, errors);
     if (!errors.empty()) return SessionResult::failure(errors.front());
     for (const AiPlayer& player : host->setup.players) {
         if (!player.ai) continue;
@@ -819,7 +826,7 @@ core::Result<PreparedAiSession> prepare_session(
             std::sort(omitted_types.begin(), omitted_types.end());
             if (auto admitted = session.omit_object_script_decisions(omitted_types); !admitted) return admitted;
         }
-        for (const std::string_view verb : {verb_move, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_tactical_superweapon, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable, verb_take_damage, verb_teleport_and_face, verb_prevent_all_fire, verb_change_owner, verb_create_object, verb_despawn}) {
+        for (const std::string_view verb : {verb_move, verb_face, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_tactical_superweapon, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable, verb_take_damage, verb_teleport_and_face, verb_prevent_all_fire, verb_change_owner, verb_create_object, verb_despawn, verb_teleport_position, verb_hide, verb_hyperspace_in, verb_selectable, verb_cancel_hyperspace}) {
             if (auto added = session.register_verb(verb, translate_order); !added) return added;
         }
         if (auto added = session.register_presentation_verb(verb_letter_box); !added) return added;

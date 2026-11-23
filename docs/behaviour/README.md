@@ -2,6 +2,19 @@
 
 These notes record format and runtime semantics used by the implementation. A rule describes its stated scope only; an explicit unknown is not a compatibility claim. Source material and test progress belong outside this directory.
 
+## Evidence trust
+
+For new facts, state the trust level or use the equivalent existing evidence wording:
+
+- **Confirmed**: observed in a retail or debug-build capture or Lua debugger, or stated by the game's own strings or XML. A data value confirms that value, not an untraced runtime consumer.
+- **Strong**: read from debug-build code paths but not yet observed in a capture; existing wording includes “verified (debug build)” and a “confirmed” verdict based on a debug-build code read. Cite the opaque evidence ID where available.
+- **Weak**: inferred from neighbouring code, naming or similarity; existing wording includes “inference”.
+- **Hearsay**: an old note or community claim; do not implement a behaviour on this alone.
+
+Per-document Source tags map as follows: “data” is Confirmed for the value itself, “debug build” is Strong for a code read, “recording” and “capture” are Confirmed for what they show, and “inference” is Weak. Other tags, including “research”, need their underlying evidence and scope examined before assigning a level.
+
+“Not verified”, “unverified” and “capture needed” identify a gap, not a trust level by themselves; an evidence ID identifies a source, so its source and scope determine the level. A behaviour change built on a Weak or Hearsay fact names the capture that would confirm it, or files an owner-capture. Keep evidence IDs opaque and follow the [clean-room rules](../clean-room.md).
+
 ## Formats and runtime
 
 - [Deliberate deviations](deviations.md): where the remake intentionally differs from the original, with evidence level and owner decision
@@ -11,7 +24,7 @@ These notes record format and runtime semantics used by the implementation. A ru
 - [Galactic AI frame service schedule](gc-ai-frame-schedule.md): six-system timing, retained-galaxy perception, budget producers and action-admission qualifications for S4
 - [XML registry](xml-registry-edge-cases.md), with [retail admission](xml-registry-retail-addendum.md) and [file-service limits](xml-registry-file-service-addendum.md)
 - [PGLua chunks](pglua-chunks.md), [Lua host](lua-script-model.md), and [declaration index](lua-api-declarations.md)
-- [Tactical logical tick rate](tactical-tick-rate.md): 30 frames per second, pinned pending original-game behaviour recordings
+- [Tactical logical tick rate](tactical-tick-rate.md): 30 frames per second pinned from the debug build (TR-01); independent retail cadence measurement remains open (TR-U1)
 - [Land pathfinding](land-pathfinding.md): the cell search over the land terrain and occupancy grids (footprint and width admission, giant detour limit, sliced work, admission throttle, checkpoints), with the deviations from the original rectangle search
 - [Frame service schedule](frame-service-schedule.md): command ties, modifier/countdown endpoints, creation and removal boundaries, ship/weapon scan gates, combat timer resets, and rate/recharge/fog/repair, hazard/contact and capture dependencies; TIE first/second-pulse refusal and muzzle advance; waypoint arrival/repeat timing and formation ownership (timing changes after M2 sign-off; captured-pad regression and HUD waypoint seams marked separately)
 - [Tactical time controls](tactical-time-controls.md): pause, fast forward and the game-speed steps (pause and speed controls); [battle end](battle-end.md): the win/lose message and the end 7 s after the outcome (victory display and battle-end delay)

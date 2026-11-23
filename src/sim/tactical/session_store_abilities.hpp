@@ -25,14 +25,20 @@ struct SessionStoreAbilityEffects {
         math::Fixed speed{};
         AbilityKind kind{AbilityKind::concentrate_fire};
         math::Fixed cause{};
+        // Projectile_Combat_Mod_*: a timed modifier (CombatBonuses index `stat`, `amount`, until `expires`);
+        // `category` is the projectile type key, so one live modifier exists per target and key.
+        bool modifier{};
+        std::uint32_t stat{};
+        math::Fixed amount{};
+        std::uint64_t expires{};
         friend bool operator==(const ConcentrateEffect&, const ConcentrateEffect&) = default;
     };
     // Total order over every field: two effects from one source (tractor + concentrate fire) can share
     // (target, category, source), and which comes first reaches the checkpoint bytes and the change test.
     static void sort_concentrate_effects(std::vector<ConcentrateEffect>& effects) {
         std::sort(effects.begin(), effects.end(), [](const ConcentrateEffect& a, const ConcentrateEffect& b) {
-            return std::tie(a.target, a.category, a.source, a.kind, a.cause, a.defense, a.speed)
-                < std::tie(b.target, b.category, b.source, b.kind, b.cause, b.defense, b.speed);
+            return std::tie(a.target, a.category, a.source, a.kind, a.cause, a.defense, a.speed, a.modifier, a.stat, a.amount, a.expires)
+                < std::tie(b.target, b.category, b.source, b.kind, b.cause, b.defense, b.speed, b.modifier, b.stat, b.amount, b.expires);
         });
     }
     // Sorts `next` and, when it differs from the stored effects, marks both sets of targets changed.

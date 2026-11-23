@@ -524,6 +524,18 @@ void Selection::retain_sorted(const std::span<const sim::EntityId> alive) {
     }
 }
 
+bool Selection::remove_sorted(const std::span<const sim::EntityId> refused) {
+    if (refused.empty() || selected_.empty()) return false;
+    const auto before = selected_.size();
+    std::erase_if(selected_, [this, refused](const sim::EntityId entity) {
+        ++membership_operations_;
+        if (!std::binary_search(refused.begin(), refused.end(), entity)) return false;
+        members_.erase(entity);
+        return true;
+    });
+    return selected_.size() != before;
+}
+
 bool Selection::replace(const std::span<const sim::EntityId> units) {
     std::vector<sim::EntityId> next(units.begin(), units.end());
     unique_in_order(next);

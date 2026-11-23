@@ -57,10 +57,17 @@ def identify(exe: Path | str, pins: dict | None = None) -> dict:
 def expected_sha256(file_name: str, pins: dict | None = None) -> str:
     """The pinned hash a refused exe should have had: the default engine's file of the same name, else its GUI exe."""
     pins = pins or load_pins()
-    files = pins.get("engines", {}).get(pins.get("default", ""), {}).get("files", {})
+    engines = pins.get("engines", {})
+    files = engines.get(pins.get("default", ""), {}).get("files", {})
     if not files:
         return "unknown"
-    return files.get(file_name) or files.get("Godot_v4.7.2-stable_win64.exe") or next(iter(files.values()))
+    if file_name in files:
+        return files[file_name]
+    # Another platform's exe (the default engine is the Windows player): the pinned engine that ships under that name.
+    for entry in engines.values():
+        if file_name in entry.get("files", {}):
+            return entry["files"][file_name]
+    return files.get("Godot_v4.7.2-stable_win64.exe") or next(iter(files.values()))
 
 
 def override_active(environ=os.environ) -> str | None:

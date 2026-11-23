@@ -527,10 +527,10 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
                     [&snapshot, &shadow, content, members](auto actor) { return stock_actor_facts(*content, members, snapshot, actor, &shadow); }, workers);
             });
             bind_galactic_ai_actor_changes(actions, actor_facts, executor);
-            actions.bind_freestore_validation([parent = &galaxy, native = &actions, owner, references](const ga::QualifiedFreestore& decoded) {
+            actions.bind_freestore_validation([native = &actions, owner, references](const ga::QualifiedFreestore& decoded) {
                 auto engine = owner.lock();
                 if (!engine || !references) return absent<void>("qualified freestore actor/current/original/parent/lifecycle references");
-                const auto snapshot = parent->snapshot();
+                const auto snapshot = native->snapshot();
                 if (auto checked = references(*snapshot, decoded, native->lane_floor()); !checked) return checked;
                 for (const auto& player : snapshot->players()) if (const auto* held = decoded.reservations(player.player_id))
                     for (const auto& reservation : *held)
@@ -543,10 +543,10 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
             ga::bind_movement_references(actions, engine);
             const auto weak_engine = std::weak_ptr<GalacticAiRuntimeProviders::Engine>(engine);
             const auto weak_world = std::weak_ptr<GalacticAiRuntimeProviders::World>(world);
-            actions.bind_movement_frontier([weak_world, executor, parent = &galaxy](auto player, auto snapshot) {
+            actions.bind_movement_frontier([weak_world, executor, native = &actions](auto player, auto snapshot) {
                 const auto world = weak_world.lock(); const auto* workers = executor();
                 if (!world || !workers) return absent<void>("native movement frontier owner/worker adapter");
-                return world->bind_native_frontier(player, std::move(snapshot), *workers, parent->next_entity_id());
+                return world->bind_native_frontier(player, std::move(snapshot), *workers, native->next_entity_id());
             });
             actions.bind_movement([movement, weak_world, weak_engine, executor](auto player, const auto& snapshot) {
                 const auto* workers = executor();

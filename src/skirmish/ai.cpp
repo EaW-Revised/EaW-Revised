@@ -99,6 +99,7 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         // enter the freestore on their own, nor do ships without a locomotor (WAB-71 droids).
         type.locomotor = (unit.kind == units::UnitKind::ship && unit.movement.max_speed.has_value() && unit.locomotion) ||
             unit.kind == units::UnitKind::squadron;
+        type.cancels_hyperspace = unit.cancels_hyperspace;
         type.star_base = unit.star_base;
         type.selectable = unit.selectable;
         type.space_special_weapon = unit.planetary_weapon.has_value();
@@ -305,7 +306,9 @@ script::foc::AiDifficultyAdjustment player_difficulty(const StartInputs& inputs,
 core::Result<std::optional<sim::tactical::DifficultyScale>> player_difficulty_scale(
     const StartInputs& inputs, const StartPlayer& player) {
     using Result = core::Result<std::optional<sim::tactical::DifficultyScale>>;
-    if (!player.lobby || player.human || player.difficulty == sim::tactical::AiLevel::normal) return Result::success(std::nullopt);
+    // The level's own entry decides: a Normal entry that is neutral (stock) binds no scale below, and a mod's Normal entry that
+    // is not neutral applies like any other level's (#8171).
+    if (!player.lobby || player.human) return Result::success(std::nullopt);
     const script::foc::AiDifficultyAdjustment adjustment = player_difficulty(inputs, player);
     auto health = script::numeric::to_fixed(adjustment.health);
     auto shield = script::numeric::to_fixed(adjustment.shield);

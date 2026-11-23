@@ -26,13 +26,14 @@ inline std::vector<FactionChoice> faction_choices(const net::GalacticLobbyOption
 }
 
 // #6134: what a player's own faction dropdown offers: the planned rows, and every other playable faction row the seat can move to
-// (the host's lobby reshapes the rows when it does; two human sides at most, so a row that would make a third is not offered).
+// (the host's lobby reshapes the rows when it does; up to galactic_lobby_max_human_sides human sides, so a row that would make
+// one more is not offered; nor one the dialog cannot draw, `dialog_rows` player rows, see net::galactic_lobby_human_row_limit).
 inline std::vector<FactionChoice> faction_choices(const net::GalacticLobbyOptions& options,
     const data::Catalog& catalog, data::ui::TextLookup* text, const sim::galactic::MpLobbyCampaign& campaign,
-    const net::LobbySnapshot& room, net::PeerIndex peer) {
+    const net::LobbySnapshot& room, net::PeerIndex peer, std::size_t dialog_rows = 0) {
     std::vector<FactionChoice> result;
     for (std::size_t row = 0; row < options.rows.size(); ++row) {
-        if (!options.rows[row].human && !net::galactic_lobby_options_with_seat_on(options, campaign, room, peer, options.rows[row].player)) continue;
+        if (!options.rows[row].human && !net::galactic_lobby_options_with_seat_on(options, campaign, room, peer, options.rows[row].player, dialog_rows)) continue;
         result.push_back({row, text
             ? presentation::ui::faction_display_name(catalog, text, options.rows[row].faction)
             : options.rows[row].faction});

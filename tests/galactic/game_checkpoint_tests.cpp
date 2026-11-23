@@ -1001,6 +1001,39 @@ void direct_restore_equality() {
         }
     }
 }
+// #8071: a galaxy with the largest human roster (one seat on each of the cap's versus sides) saves mid-game, loads and
+// continues to the same per-tick hashes as the game that never stopped, on one worker and on eight.
+void eight_side_checkpoint_roundtrip() {
+    constexpr auto sides = static_cast<std::uint32_t>(galactic::galactic_max_human_sides);
+    const auto config = galactic::synthetic_galaxy({.planets = 24, .players = sides + 1, .fleets_per_player = 1,
+        .members_per_fleet = 2, .human_sides = sides});
+    const auto identities = cp::game_identities(config);
+    constexpr std::uint64_t save_tick = 90, final_tick = 180;
+    // Each side moves its own fleet between planets it owns (round robin deal), so no order starts a conflict.
+    const auto orders = [&](campaign::GameSession& game, const std::uint64_t tick, const std::uint64_t sequence) {
+        for (std::uint32_t side = 1; side <= sides; ++side)
+            check(game.submit({{tick, {side}, sequence}, galactic::DebugSetFleetOrbit{config.fleets[side - 1].id,
+                config.planets[sequence == 1 ? side + sides : side - 1].id}}));
+    };
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{8}}) {
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        const auto label = "workers " + std::to_string(workers) + ": ";
+        auto uninterrupted = take(campaign::GameSession::create(config));
+        orders(uninterrupted, 40, 1);
+        for (std::uint64_t tick = 0; tick < save_tick; ++tick) (void)take(uninterrupted.step(pool));
+        const auto saved = take(cp::save_game_checkpoint(uninterrupted, identities));
+        auto restored = take(cp::load_game_checkpoint(saved, identities, {}, pool));
+        expect(restored.session.state_sha256() == uninterrupted.state_sha256(), label + "the eight-side game loads to the saved state");
+        expect(take(cp::save_game_checkpoint(restored.session, identities)) == saved, label + "the eight-side checkpoint recaptures canonically");
+        orders(uninterrupted, 120, 2);
+        orders(restored.session, 120, 2);
+        for (std::uint64_t tick = save_tick; tick < final_tick; ++tick) {
+            const auto continued = take(restored.session.step(pool)), expected = take(uninterrupted.step(pool));
+            expect(continued.state_hash.get() == expected.state_hash.get(), label + "the loaded game continues with the uninterrupted hashes");
+        }
+        expect(restored.session.state_sha256() == uninterrupted.state_sha256(), label + "both games end in the same state");
+    }
+}
 void owner_journal_refusal() {
     // A real native admission gives the owner one applied entry. A fresh owner
     // built from a different recording must not silently adopt its state.
@@ -2678,7 +2711,7 @@ int case_galactic_game_checkpoint_tests(int argc, char** argv) {
         if (argc == 3 && std::string_view(argv[1]) == "--other-build-battle-records") {
             other_build_battle_records(argv[2]); other_build_pending_record(argv[2]); return failures == 0 ? 0 : 1;
         }
-        pending_actor_checkpoint_roundtrip(); mod_description_contracts(); resume_metadata_contracts(); nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); owner_journal_after_rebase(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); object_script_checkpoint(); attached_object_script_checkpoint(); object_script_load_errors_are_published(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
+        pending_actor_checkpoint_roundtrip(); mod_description_contracts(); resume_metadata_contracts(); nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); eight_side_checkpoint_roundtrip(); owner_journal_refusal(); owner_journal_after_rebase(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); object_script_checkpoint(); attached_object_script_checkpoint(); object_script_load_errors_are_published(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
         admission_and_fixups(); prebattle_autosave_admission(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();
         scripted_child_barriers(); child_casualty_return();
         if (argc != 2) throw std::runtime_error("expected corpus directory");

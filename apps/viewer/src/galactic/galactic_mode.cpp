@@ -1895,6 +1895,7 @@ void GalacticMode::observe_pointer(const Ref<InputEvent>& event) {
 
 void GalacticMode::input(const Ref<InputEvent>& event) {
     State& state = *state_;
+    if (state.build_tray) state.build_tray->note_world_event(event); // #8029: counted for the report, no effect
     // #4031: the performance overlay's key (F3), in any galactic run; nothing else sees it.
     if (const auto* pressed = Object::cast_to<InputEventKey>(event.ptr());
         pressed != nullptr && pressed->is_pressed() && !pressed->is_echo() && !pressed->is_shift_pressed()

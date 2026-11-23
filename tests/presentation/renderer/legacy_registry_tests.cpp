@@ -34,7 +34,7 @@ constexpr std::array<std::pair<std::string_view, std::string_view>, 9> original_
 
 void registry_contracts() {
     const auto registry = legacy::registry();
-    check(registry.size() == 22,
+    check(registry.size() == 26,
         "the registry includes skinned families and the missing-effect placeholder");
     const std::vector<std::tuple<std::string_view, std::string_view, std::string_view, bool, bool, bool>> expected{
         {"MeshAdditive.fx", "t0", "t0_p0", false, true, false},
@@ -59,6 +59,10 @@ void registry_contracts() {
         {"Planet_Deathstar.fx", "sph_t3", "sph_t3_p0", true, false, true},
         {"Planet_Shim_Closeup.fx", "sph_t3", "sph_t3_p0", true, false, true},
         {"MeshAdditive_CityLights_Closeup.fx", "t0", "t0_p0", false, true, false},
+        {"MeshAlphaScroll.fx", "sph_t0", "sph_t0_p0", false, true, true},
+        {"RSkinAlphaGloss.fx", "sph_t0", "sph_t0_p0", false, true, true},
+        {"MeshGlow.fx", "sph_t0", "sph_t0_p0", true, false, false},
+        {"MeshBumpLight.fx", "sph_t2", "sph_t2_p0", true, false, true},
     };
     for (std::size_t index = 0; index < expected.size() && index < registry.size(); ++index) {
         const auto& [program, technique, pass_name, opaque, transparent, shadows] = expected[index];
@@ -200,6 +204,60 @@ void source_contracts() {
     check(rejection(skin_additive).empty() && legacy::reads_effect_time(skin_additive)
               && value_of<float>(legacy::uniforms(skin_additive), "eawr_effect_time") == 2.5F,
         "skinned scrolling additive reads the supplied scene clock with the shared bindings");
+    auto alpha_scroll = selector(legacy::mesh_alpha_scroll::family, RenderPass::transparent);
+    alpha_scroll.bindings = {{"UVScrollRate", eawr::assets::Vec4f{0.5F, -0.25F, 0.0F, 0.0F}}, {"eawr_effect_time", 4.0F}};
+    const auto scroll_uniforms = legacy::uniforms(alpha_scroll);
+    check(rejection(alpha_scroll).empty() && legacy::reads_effect_time(alpha_scroll)
+              && value_of<std::array<float, 2>>(scroll_uniforms, "eawr_uv_scroll_rate")[1] == -0.25F
+              && value_of<float>(scroll_uniforms, "eawr_effect_time") == 4.0F,
+        "MeshAlphaScroll reads the scene clock and the authored scroll rate");
+    const auto scroll_source = legacy::mesh_alpha_scroll::shader(RenderPass::transparent);
+    check(scroll_source.find("UV += eawr_effect_time * eawr_uv_scroll_rate;") != std::string_view::npos
+            && scroll_source.find("uniform vec2 eawr_uv_scroll_rate") != std::string_view::npos
+            && scroll_source.find("ALPHA = base.a * eawr_vertex_diffuse.a;") != std::string_view::npos
+            && legacy::mesh_alpha_scroll::shader(RenderPass::opaque).empty(),
+        "MeshAlphaScroll scrolls UV in the vertex stage over the shared alpha program, transparent pass only");
+    alpha_scroll.bindings = {};
+    check(!legacy::reads_effect_time(alpha_scroll), "a zero scroll rate needs no per-tick clock write");
+    auto skin_alpha_gloss = selector(legacy::rskin::alpha_gloss_family, RenderPass::transparent);
+    skin_alpha_gloss.bindings = {{"Diffuse", eawr::assets::Vec4f{0.25F, 0.5F, 0.75F, 0.375F}},
+        {"GlossTexture", std::string("gloss.dds")}};
+    const auto skin_gloss_source = legacy::shader_source(skin_alpha_gloss);
+    check(rejection(skin_alpha_gloss).empty() && skin_gloss_source
+              && skin_gloss_source->find("texture(GlossTexture, UV).r") != std::string_view::npos
+              && value_of<std::array<float, 4>>(legacy::uniforms(skin_alpha_gloss), "eawr_diffuse")[3] == 0.375F,
+        "RSkinAlphaGloss shares the gloss-masked alpha arithmetic and its GlossTexture binding");
+    auto mesh_glow_mat = selector(legacy::mesh_glow::family, RenderPass::opaque);
+    mesh_glow_mat.bindings = {{"DistortionScale", 0.5F}};
+    const auto mesh_glow_source = legacy::shader_source(mesh_glow_mat);
+    check(rejection(mesh_glow_mat).empty() && mesh_glow_source
+              && mesh_glow_source->find("2.0 * texture(BaseTexture, UV).rgb * eawr_vertex_color * eawr_distortion_scale")
+                  != std::string_view::npos
+              && value_of<float>(legacy::uniforms(mesh_glow_mat), "eawr_distortion_scale") == 0.5F
+              && !legacy::receives_shadows(mesh_glow_mat),
+        "MeshGlow is the unlit opaque 2 x base x light scale x DistortionScale pass");
+    check(legacy::mesh_glow::reference_pixel({0.25F, 0.5F, 1.0F}, {1.0F, 1.0F, 1.0F}, 1.0F)[0] == 0.5F
+              && legacy::mesh_glow::reference_pixel({0.75F, 0.5F, 1.0F}, {1.0F, 1.0F, 1.0F}, 1.0F)[0] == 1.0F,
+        "MeshGlow saturates at the 8-bit target");
+    auto bump_light = selector(legacy::mesh_bump_light::family, RenderPass::opaque);
+    bump_light.bindings = {{"NormalTexture", std::string("normal.dds")}, {"Specular", eawr::assets::Vec4f{0.5F, 0.5F, 0.5F, 0.0F}}};
+    const auto bump_light_source = legacy::shader_source(bump_light);
+    check(rejection(bump_light).empty() && bump_light_source
+              && bump_light_source->find("base.rgb * (1.0 + 5.0 * base.a)") != std::string_view::npos
+              && bump_light_source->find("normal_texel.a * eawr_vertex_specular") != std::string_view::npos
+              && legacy::authored_binormals(bump_light)
+              && value_of<std::array<float, 3>>(legacy::uniforms(bump_light), "eawr_specular")[0] == 0.5F,
+        "MeshBumpLight lights base x (1 + 5 alpha) with the sun per pixel and the specular per vertex");
+    legacy::mesh_bump_light::PixelInputs light_in;
+    light_in.base = {0.5F, 0.5F, 0.5F, 0.2F};
+    light_in.normal = {0.5F, 0.5F, 1.0F, 1.0F};
+    light_in.diffuse = {1.0F, 1.0F, 1.0F};
+    light_in.light_diffuse = {1.0F, 1.0F, 1.0F};
+    light_in.vertex_diffuse = {0.25F, 0.25F, 0.25F};
+    light_in.vertex_specular = {0.5F, 0.5F, 0.5F};
+    light_in.tangent_light = {0.0F, 0.0F, 1.0F};
+    check(legacy::mesh_bump_light::reference_pixel(light_in)[0] == 2.0F * 1.25F * 1.0F + 0.5F,
+        "MeshBumpLight reference pixel: 2 (n.L light + vertex) x base (1 + 5a) + normal alpha x vertex specular");
     auto skin_alpha = selector(legacy::rskin::alpha_family, RenderPass::transparent);
     skin_alpha.bindings = {{"Diffuse", eawr::assets::Vec4f{0.25F, 0.5F, 0.75F, 0.375F}}};
     check(rejection(skin_alpha).empty()

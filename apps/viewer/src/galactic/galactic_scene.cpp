@@ -692,6 +692,24 @@ bool GalacticMode::State::upload_models() {
                     upload.x_extent = (bounds.value->max[0] - bounds.value->min[0]) * 0.5F;
                     upload.model_bounds = std::array<float, 6>{bounds.value->min[0], bounds.value->min[1], bounds.value->min[2],
                         bounds.value->max[0], bounds.value->max[1], bounds.value->max[2]};
+                    // #8158: the body is what the planet surfaces draw; the additive glow shell around it is wider and soft, and
+                    // a model without a planet surface (asteroids, black hole) is its own body.
+                    std::vector<eawr::viewer::model_preview::UnitSurface> body;
+                    for (const auto& scene_surface : space::scene_surfaces(model)) {
+                        if (scene_surface.route != space::SceneRoute::planet) continue;
+                        for (const auto& surface : surfaces)
+                            if (surface.mesh == scene_surface.mesh_index && surface.submesh == scene_surface.submesh_index)
+                                body.push_back(surface);
+                    }
+                    auto extent = bounds.value;
+                    if (!body.empty()) {
+                        if (auto planet_bounds = eawr::viewer::model_preview::posed_bounds(model, body, bind.value().bones))
+                            extent = planet_bounds.value;
+                    }
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        upload.body_half_extents[axis] = (extent->max[axis] - extent->min[axis]) * 0.5F;
+                        upload.body_radius = std::max(upload.body_radius, upload.body_half_extents[axis]);
+                    }
                 }
             }
         }

@@ -99,7 +99,7 @@ int wmain(int argc, wchar_t** argv) {
             if (index != 0) json += ",";
             json += json_quote(utf8_from_wide(argv[index]));
         }
-        json += "],\"cwd\":" + json_quote(utf8_from_wide(cwd));
+        json += "],\"pid\":" + std::to_string(GetCurrentProcessId()) + ",\"cwd\":" + json_quote(utf8_from_wide(cwd));
         json += ",\"appdata\":" + json_quote(utf8_from_wide(environment(L"APPDATA")));
         json += ",\"path\":" + json_quote(utf8_from_wide(environment(L"PATH")));
         json += std::string(",\"console_window\":") + (GetConsoleWindow() != nullptr ? "true" : "false") + "}\n";

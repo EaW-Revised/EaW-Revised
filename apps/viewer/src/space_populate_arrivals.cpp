@@ -175,6 +175,7 @@ struct SpacePopulation::ComposeBatch final {
         std::optional<bool> blast_charged{};
         // GM-03: its team colour, set on its instance; the upload is colour-free.
         TeamColour colour{};
+        bool colorizable{};
         std::string diagnostic_model{};
         render_categories::HullPart diagnostic_part{render_categories::HullPart::unclassified};
     };
@@ -584,7 +585,10 @@ void SpacePopulation::compose_hull_pieces(ComposeContext& context, ComposeBatch&
                 pieces.back().diagnostic_part = render_categories::hull_part(mesh, mesh.submeshes.at(surface.submesh_index),
                     model->bones, diagnostic_turret_roots, diagnostic_roots_complete);
             }
-            if (!surface.effect_missing && scene::colorizes(surface.shader)) pieces.back().colour = colour;
+            if (!surface.effect_missing && scene::colorizes(surface.shader)) {
+                pieces.back().colorizable = true;
+                pieces.back().colour = colour;
+            }
             pieces.back().cloak_hidden = cloak_ship && ieq(surface.mesh_name, cloak_base_mesh_name);
             if (ieq(surface.mesh_name, "buildup") || ieq(surface.mesh_name, "charged")) {
                 pieces.back().blast_charged = ieq(surface.mesh_name, "charged");
@@ -1031,7 +1035,10 @@ void SpacePopulation::compose_hardpoint_pieces(ComposeContext& context, ComposeB
                                                static_cast<std::uint32_t>(attachment_index)},
                                   live_ship, *frame});
                 pieces.back().cloak_hidden = cloak_ship; // WST-12: the cloak hides the hardpoints
-                if (!effect_missing && scene::colorizes(submesh.shader)) pieces.back().colour = colour;
+                if (!effect_missing && scene::colorizes(submesh.shader)) {
+                    pieces.back().colorizable = true;
+                    pieces.back().colour = colour;
+                }
             }
         }
     }
@@ -1150,7 +1157,7 @@ float SpacePopulation::commit_composed_pieces(ComposeContext& context, ComposeBa
             : render_categories::Role::hull);
         pieces_.push_back({{entity, piece.upload->renderer_asset, source_to_render(piece.source)}, piece.gate,
                            piece.live, piece.local, piece.shield, piece.alternate, piece.cloak, piece.cloak_hidden,
-                           piece.blast_charged, piece.colour});
+                           piece.blast_charged, piece.colour, piece.colorizable});
         if (piece.live && !piece.shield && !piece.cloak && !piece.gate
             && (!piece.alternate || *piece.alternate == 0))
             hull_surface_assets_[*piece.live].push_back(piece.upload->renderer_asset);

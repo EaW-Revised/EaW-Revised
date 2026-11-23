@@ -45,6 +45,8 @@ struct GalacticSession::NativeActionShadow::Data {
         EntityId actor{};
     };
     std::vector<ScriptStep> script_steps;
+    // Derived admission counts follow this copy-on-write batch, including rollback copies.
+    std::size_t script_journal_count{}, script_usage_count{};
     std::map<EntityId, std::optional<DetachedUnit>> detached_rows;
     std::map<FleetId, bool> fleet_blockers;
     std::map<PlanetId, ControlPlanet> control_rows;

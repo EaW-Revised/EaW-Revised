@@ -170,6 +170,17 @@ with named statuses. It must not reproduce undefined values:
 - **An empty environment list.** Retail would use its fallback (R-SEL-09). No corpus map has one.
   Report *no environment* rather than use the fallback.
 
+### Current lighting reader
+
+The remake lighting reader currently selects the first occurrence of each light or
+shadow field and counts later occurrences without reading them. It requires exactly
+the expected size and rejects non-finite values; a wrong-size or non-finite selected
+field makes the candidate environment unavailable. A missing shadow field retains
+its default, while a missing light field fails closed. This differs from R-DEC-02/03;
+the space scene reader and the bloom and wind readers instead read the last
+sufficiently long occurrence as a prefix; bloom and wind also skip non-finite
+values. Aligning the lighting reader and its tests remains open.
+
 ## Original expected-outcome cases
 
 ### Case C-01: heading basis

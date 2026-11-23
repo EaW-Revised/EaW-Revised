@@ -1,4 +1,5 @@
 #include "galactic_mode_internal.hpp"
+#include "battle_seat_view.hpp"
 #include "bink_load_notes.hpp"
 #include "eawr/battle/start.hpp"
 #include "campaign_loading_hud.hpp"
@@ -6,6 +7,7 @@
 #include "space_proof_route.hpp"
 
 #include "eawr/campaign/conflict_entry.hpp"
+#include "eawr/campaign/space_rule_inputs.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/sim/tactical/content.hpp"
@@ -21,6 +23,7 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <iterator>
 
 namespace eawr::presentation::godot_backend {
 using namespace godot;
@@ -28,6 +31,24 @@ using namespace godot;
 namespace {
 std::uint64_t video_memory() {
     return static_cast<std::uint64_t>(Performance::get_singleton()->get_monitor(Performance::RENDER_VIDEO_MEM_USED));
+}
+void copy_colour_roster(MapMode::Options& map, const sim::galactic::GalacticSnapshot& snapshot) {
+    const auto seats = snapshot.seats();
+    map.colour_seats.assign(seats.begin(), seats.end());
+    if (const auto& control = snapshot.seat_control()) {
+        map.colour_teams = control->control.teams;
+        return;
+    }
+    // Rosterless campaigns still have player seats: assign each human faction a stable local side.
+    for (auto& seat : map.colour_seats) {
+        if (seat.kind != sim::SeatKind::human || seat.player == 0) continue;
+        seat.human_side_id = seat.player;
+        if (std::none_of(map.colour_teams.begin(), map.colour_teams.end(),
+                [&](const auto& team) { return team.side == seat.human_side_id; }))
+            map.colour_teams.push_back({seat.human_side_id, seat.seat_id, false});
+    }
+    std::sort(map.colour_teams.begin(), map.colour_teams.end(),
+        [](const auto& a, const auto& b) { return a.side < b.side; });
 }
 }
 
@@ -403,16 +424,13 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         if (conflict) release_battle_presentation();
         return false;
     }
-    const auto local_binding = std::find_if(frame.conflict->seats.begin(), frame.conflict->seats.end(),
-        [&](const auto& seat) { return seat.seat == sim::SeatId{galaxy->local.seat}; });
     // #8082: a seat whose side took the spectate role has no battle player but still joins the battle, read-only, through
-    // the agreed observer perspective. Any other seat without a battle player stays on the galaxy.
-    const auto spectator = std::find_if(frame.battle_spectators.begin(), frame.battle_spectators.end(),
-        [&](const auto& row) { return row.seat == sim::SeatId{galaxy->local.seat}; });
-    const bool spectating = local_binding != frame.conflict->seats.end() && !local_binding->player
-        && spectator != frame.battle_spectators.end();
-    if (local_binding == frame.conflict->seats.end() || (!local_binding->player && !spectating)) return false;
-    const sim::tactical::PlayerId view_player = spectating ? spectator->observer : local_binding->player;
+    // the agreed observer perspective. Any other seat without a battle player (a pending role included) stays on the galaxy.
+    // #8182: that read-only view never selects or orders (battle_seat_view.hpp).
+    const auto seat_view = eawr::viewer::galactic::battle_seat_view(frame, sim::SeatId{galaxy->local.seat});
+    if (!seat_view.enter) return false;
+    const bool spectating = !seat_view.commandable;
+    const sim::tactical::PlayerId view_player = seat_view.view_player;
     if (frame.conflict->layer != campaign::BattleLayer::space) {
         // WGP-90/170: M3 has no playable land child. Auto-resolve stays with
         // its owner; an admitted tactical mission is not silently converted.
@@ -488,7 +506,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
             briefing_movie.clear();
         }
         // A spectator has no briefing of its own: the briefing belongs to the players of the battle.
-        if (!spectating) for (const auto& row : source.briefings) if (row.player == local_binding->player) {
+        if (!spectating) for (const auto& row : source.briefings) if (row.player == view_player) {
             campaign_briefing = row;
             intro_requested = campaign::space_intro_allowed(row.intro);
             break;
@@ -567,7 +585,9 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         const bool begin_barrier = map.loading_begin_barrier;
         map.borrowed_battle = prepared; map.borrowed_feed = feed;
         map.borrowed_player = view_player;
+        map.borrowed_view_only = spectating; // #8182: watched only, no selection, orders or order controls
         map.controller_seat = sim::SeatId{galaxy->local.seat};
+        if (frame.latest) copy_colour_roster(map, *frame.latest);
         for (const auto& identity : options.lan_players)
             map.controller_names.emplace_back(identity.seat, identity.player);
         map.observer_multiplayer = options.lan_match != nullptr;
@@ -728,11 +748,41 @@ bool GalacticMode::State::prepare_handoff() {
             const auto id = ++highest;
             entry.forces.push_back({id, ship->state.type_id, owner == 1 ? invader : defender, 0, campaign::ForceRole::escort});
             placements.push_back({id, ship->record, false});
+            if (owner == 1 && options.coop_preview) {
+                const auto second = std::find_if(std::next(ship), original->start->units.end(), [owner](const auto& unit) {
+                    return unit.state.owner == owner && unit.role == battle::UnitRole::fleet && unit.craft == 0;
+                });
+                if (second == original->start->units.end()) {
+                    failure = "synthetic co-op conflict needs two fleet ships";
+                    return false;
+                }
+                const auto other_id = ++highest;
+                entry.forces.push_back({other_id, second->state.type_id, invader, 0, campaign::ForceRole::escort});
+                placements.push_back({other_id, second->record, false});
+            }
         }
         for (const auto& seat : galaxy_setup.seats) if (seat.player == invader || seat.player == defender) entry.seats.push_back({seat.seat_id, seat.player});
         auto built = campaign::build_conflict_entry(entry, fixture, inputs.value(), placements, highest + 1, galaxy_setup.seed);
         if (!built) { failure = core::format_diagnostic(built.error()); return false; }
         auto selected = std::move(built).value();
+        if (options.coop_preview) {
+            // Exercise the real campaign controller split in this synthetic battle.
+            // A bare conflict entry has skirmish-origin metadata and no campaign accounts.
+            campaign::SpaceRuleInputs rules;
+            for (const auto player : {invader, defender}) {
+                campaign::SpaceRulePlayer account;
+                account.player = player;
+                account.max_tech = 5;
+                account.owned_planets = 1;
+                account.ai = player == defender;
+                rules.players.push_back(account);
+            }
+            std::sort(rules.players.begin(), rules.players.end(), [](const auto& a, const auto& b) { return a.player < b.player; });
+            if (auto bound = campaign::apply_space_rules(selected, inputs.value(), rules); !bound) {
+                failure = core::format_diagnostic(bound.error());
+                return false;
+            }
+        }
         entry = std::move(selected.conflict);
         auto tactical_content = std::move(selected.content);
         battle->replay.setup = entry.tactical;
@@ -839,7 +889,8 @@ bool GalacticMode::State::process_handoff(double delta) {
         if (!feed) { failure = "local seat has no conflict-scoped battle feed"; return false; }
         // The foundation conflict owns its own player IDs. A loaded campaign's
         // display player can differ; use the same seat binding as battle_feed.
-        const auto entry = game->frame(sim::SeatId{galaxy->local.seat}).conflict;
+        const auto handoff_frame = game->frame(sim::SeatId{galaxy->local.seat});
+        const auto entry = handoff_frame.conflict;
         if (!entry || entry->id != conflict) { failure = "battle seat binding is stale"; return false; }
         const auto seat = std::find_if(entry->seats.begin(), entry->seats.end(),
             [&](const auto& binding) { return binding.seat == sim::SeatId{galaxy->local.seat}; });
@@ -862,6 +913,7 @@ bool GalacticMode::State::process_handoff(double delta) {
         map.borrowed_feed = feed;
         map.borrowed_player = battle_player;
         map.controller_seat = sim::SeatId{galaxy->local.seat};
+        if (handoff_frame.latest) copy_colour_roster(map, *handoff_frame.latest);
         for (const auto& identity : options.lan_players)
             map.controller_names.emplace_back(identity.seat, identity.player);
         if (options.lan_match) map.shared_pause_notice = [match = options.lan_match, players = options.lan_players,
@@ -882,6 +934,7 @@ bool GalacticMode::State::process_handoff(double delta) {
         feed_lifetime = feed;
         tactical_host = memnew(Node3D);
         host->add_child(tactical_host);
+        tactical_host->set_name("CampaignSpaceBattleReady");
         tactical_instance = tactical_host->get_instance_id();
         if (mouse_cursor) mouse_cursor->suspend();
         tactical = std::make_shared<MapMode>(std::move(map));

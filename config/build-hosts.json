@@ -18,7 +18,9 @@
     },
     {
       "name": "GPU-HOST-1",
-      "aliases": ["capture"],
+      "aliases": [
+        "capture"
+      ],
       "address": "capture-host.example",
       "user": "builduser",
       "identity": "~/.ssh/id_example",

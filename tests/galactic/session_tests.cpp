@@ -106,9 +106,11 @@ void setup_validation() {
         setup.seats.clear();
         for (std::uint32_t id = 1; id <= 9; ++id) setup.seats.push_back({{id}, 1, galactic::SeatKind::human, id - 1, false, 1});
     });
-    refused("three human sides", [](GalacticSetup& setup) {
-        setup.seats.push_back({{3}, 1, galactic::SeatKind::human, 2, true, 3});
-    });
+    // A third human side is a valid galaxy now (#8071); the cap is the human seat count, refused above.
+    auto three_sides = good;
+    three_sides.seats.push_back({{3}, 1, galactic::SeatKind::human, 2, true, 3});
+    expect(static_cast<bool>(galactic::validate_setup(three_sides)) && static_cast<bool>(GalacticSession::create(three_sides)),
+        "three human sides start a session");
     struct HumanShape { std::uint32_t count; std::uint32_t first_side; };
     for (const auto shape : {HumanShape{8, 8}, HumanShape{8, 4}, HumanShape{4, 1}}) {
         auto setup = good;

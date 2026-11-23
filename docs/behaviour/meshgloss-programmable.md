@@ -2,6 +2,13 @@
 
 The `sph_t0/sph_t0_p0` arithmetic applies to the pinned `MeshGloss.fx` (SHA-256 `d44c399eb75bfa27f274a85d80c24727f4ef73c4b08d485c965c14ad88b5abd0`). See [shader translation](shader-translation.md) for pass selection.
 
+The common-scene sRGB convention and lighting policy below describe the frozen
+prototype and its shader-contract test. The production gloss adapter also decodes
+sRGB texels, computes the material equation in linear space, and encodes the
+result; its output participates in the viewer's stored-value rendering policy
+([rendering](../rendering.md), FP-1). The prototype test remains a separate
+contract and would need a code change if that contract is changed.
+
 ## Observable source-supported rules
 
 - Position uses the supplied world/view/projection transform. Lighting uses
@@ -12,7 +19,8 @@ The `sph_t0/sph_t0_p0` arithmetic applies to the pinned `MeshGloss.fx` (SHA-256 
 - Diffuse irradiance has three independent channel matrices. For a normalized
   world normal extended with homogeneous component one, each channel is its
   quadratic form with that channel's matrix (`m_sphAll`). There is no additional
-  clamping or normalization of the resulting irradiance in this path.
+  clamping or normalization of the resulting irradiance itself in this path.
+  The later pixel operation doubles the interpolated diffuse contribution.
 - Specular is evaluated per vertex. The eye direction points from world position
   to the supplied eye and is normalized. The half direction is the normalized
   sum of that direction and the supplied light-zero direction. The nonnegative
@@ -29,7 +37,9 @@ The `sph_t0/sph_t0_p0` arithmetic applies to the pinned `MeshGloss.fx` (SHA-256 
   alpha. Fragment alpha is interpolated diffuse alpha. Texture alpha therefore
   controls gloss contribution, not output coverage in this path.
 - Sampling is linear minification/magnification/mip filtering, wrap U/V and
-  clamp W. Preserve the common scene's explicit sRGB texture convention.
+  clamp W. The frozen prototype uses the common scene's explicit sRGB texture
+  convention; the production gloss adapter also decodes sRGB texels for its
+  linear material equation and encodes the result as described above.
   Depth writes and less-or-equal depth comparison remain enabled. Blending is
   enabled exactly when light-scale alpha is below one, using source-alpha and
   inverse-source-alpha. The accepted renderer baseline disables fog; a produced

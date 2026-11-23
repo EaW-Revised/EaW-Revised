@@ -797,6 +797,9 @@ core::Result<void> session_detail::Tick::movement() {
                 inputs.approach = frame.approach;
                 inputs.attack_lane = frame.attack_lane;
                 inputs.hold = frame.hold;
+                // WSQ-05: a solo craft (its own whole container) has no team parent.
+                inputs.teamless = frame.profile != nullptr && frame.profile->members.size() == 1
+                    && frame.profile->members.front() == frame.profile->type_id;
                 inputs.guard = frame.guard;
                 inputs.speed_factor = math::multiply(impl_->ability_factor(unit, AbilityModifier::speed),
                     math::Fixed::from_raw(math::Fixed::scale + unit.upgrade_bonuses[5].raw())).value();

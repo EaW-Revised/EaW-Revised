@@ -157,7 +157,7 @@ public:
     void begin_placement(sim::tactical::TypeId type, LiveSessionView& live);
     void cancel_placement(LiveSessionView& live);
     void placement_move(std::array<float, 2> point) { pointer_ = point; }
-    void placement_drop(std::array<float, 2> point, LiveSessionView& live) { left_release(point, {}, live); }
+    void placement_drop(std::array<float, 2> point, LiveSessionView& live) { if (!live.view_only()) left_release(point, {}, live); }
     [[nodiscard]] std::optional<sim::math::Vec3> placement_point() const;
     [[nodiscard]] std::optional<sim::tactical::TypeId> placing() const noexcept { return placing_; }
     // Where a scripted `card=N` gesture points: the HUD's card centre in viewport pixels.

@@ -1,0 +1,12 @@
+{
+  "name": "synthetic-8-factions",
+  "seed": 13,
+  "planets": 24,
+  "players": 9,
+  "human_sides": 8,
+  "fleets_per_player": 1,
+  "members_per_fleet": 2,
+  "coop_seat": false,
+  "debug_commands": false,
+  "fiscal_cycle_seconds": 45.0
+}

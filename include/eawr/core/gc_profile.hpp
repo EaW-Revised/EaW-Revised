@@ -68,6 +68,11 @@ enum class Phase : std::size_t {
     goal_propose, goal_allocate, goal_time, goal_fund, goal_maintain, goal_attach, selection_input, galactic_estimate,
     // The selector input by caller and by step (serial, wall), #7056.
     selection_input_goals, selection_input_exec, sel_world, sel_freestore, sel_contrast, sel_sites, sel_producers, sel_facts, sel_heroes,
+    // Async AI window phases on the sim thread (serial, wall; step 5 numbers): the adoption of a finished window, the apply of due
+    // slices, the window cut (publication, pre-cut, lane shell refresh, deliveries, inbox drain), the lane-shell refresh alone, and
+    // the window body (attempts: services, commit, publication). The body runs inline today; a lane thread moves it off the sim thread.
+    ai_adopt, ai_apply, ai_cut, ai_cut_lane_refresh, ai_window_body,
+    // From here on the phases are per-thread CPU sums (the tick trace's cpu_summed group starts at `perception`).
     perception, perception_record_maintenance, perception_lock_wait, economy_lock_wait, count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::count)> names{
@@ -94,6 +99,7 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::co
     "svc_perception", "svc_goals", "svc_planning", "svc_execution", "svc_learning", "svc_templates",
     "goal_propose", "goal_allocate", "goal_time", "goal_fund", "goal_maintain", "goal_attach", "selection_input", "galactic_estimate",
     "selection_input_goals", "selection_input_exec", "sel_world", "sel_freestore", "sel_contrast", "sel_sites", "sel_producers", "sel_facts", "sel_heroes",
+    "ai_adopt", "ai_apply", "ai_cut", "ai_cut_lane_refresh", "ai_window_body",
     "perception", "perception_record_maintenance", "perception_lock_wait", "economy_lock_wait"};
 struct Values { std::uint64_t calls{}, inclusive_ns{}, exclusive_ns{}; };
 struct Counter { std::atomic<std::uint64_t> calls{}, inclusive_ns{}, exclusive_ns{}; };

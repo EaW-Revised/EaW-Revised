@@ -11,6 +11,7 @@
 #include "eawr/core/load_note.hpp"
 #include "eawr/core/prepared_content.hpp"
 
+#include <array>
 #include <memory>
 #include <cstdint>
 #include <optional>
@@ -191,6 +192,30 @@ private:
 // CGS-22: only an absent variant base (EAWR-XML-0008) lets stock preparation skip a named object type; every other
 // resolve failure still refuses the campaign start.
 [[nodiscard]] bool stock_name_skippable(const core::Diagnostic&);
+// D10 / #8171: a multiplayer room agrees ONE difficulty entry name, but every AI player type authors its own entry names
+// per level (stock: Easy_Default/Normal_Default/Hard_Default; a skirmish-style type: other names). The agreed name is
+// therefore turned into a LEVEL once, and each AI slot then looks that level up in its own player type. Nothing requires
+// a name to match across player types, and no step refuses.
+using MpLevelEntries = std::array<std::string, 3>; // the entry a player type names for Easy, Normal and Hard; empty = none
+struct MpAgreedLevel {
+    sim::tactical::AiLevel level{sim::tactical::AiLevel::normal};
+    bool assumed{}; // no source knew the name: Normal, the engine default level
+};
+// The level an agreed entry name stands for: the entry the campaign's own lobby list offers for a level; else the one level
+// every player type that authors the name maps it to (none or a disagreement is not a match); else the stock names; else
+// Normal with `assumed` set. An empty or unmatched name never fails.
+[[nodiscard]] MpAgreedLevel agreed_mp_level(std::string_view agreed_entry, const MpLevelEntries& campaign_entries,
+    std::span<const MpLevelEntries> type_entries);
+// What one AI slot runs at, from its player type's entries for the agreed level.
+struct MpAiDifficulty {
+    enum class Source : std::uint8_t { level_entry, normal_entry, engine_default };
+    sim::tactical::AiLevel level{sim::tactical::AiLevel::normal}; // the level recorded in the conflict slot
+    std::string adjustment; // the authored entry the slot runs at; empty for the engine default (every multiplier 1)
+    Source source{Source::level_entry};
+};
+// The type's own entry for the level; a type with none for it uses its Normal entry, and a type with neither runs the
+// engine default. Never a refusal.
+[[nodiscard]] MpAiDifficulty choose_mp_ai_difficulty(const MpLevelEntries& type_entries, sim::tactical::AiLevel agreed);
 // The names skipped under CGS-22, computed once per preparation. Resolution of a stock-content name goes through
 // resolve_stock_name: an absent variant base leaves the name out (one load note per name, however many sites ask),
 // every later site consults the same set via `contains`, and any other failure is returned unchanged.

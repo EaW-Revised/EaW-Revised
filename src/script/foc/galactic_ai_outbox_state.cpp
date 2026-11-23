@@ -82,7 +82,7 @@ void put_value(Writer& out, const authoritative::Value& value, int depth) {
         if constexpr (std::is_same_v<T, bool>) out.flag(item);
         else if constexpr (std::is_same_v<T, numeric::LuaNumber>) out.u64(item.repr);
         else if constexpr (std::is_same_v<T, std::string>) out.text(item);
-        else if constexpr (std::is_same_v<T, authoritative::Handle>) { out.u32(item.kind); out.u64(item.id); }
+        else if constexpr (std::is_same_v<T, authoritative::Handle>) { out.u32(item.kind); out.u64(item.id); out.u32(item.aux); }
         else if constexpr (std::is_same_v<T, authoritative::ValueList>) {
             out.u32(static_cast<std::uint32_t>(item.size())); for (const auto& child : item) put_value(out, child, depth + 1);
         }
@@ -96,7 +96,7 @@ authoritative::Value get_value(Reader& in, int depth) {
     case 1: return authoritative::Value{in.flag()};
     case 2: return authoritative::Value::number(numeric::LuaNumber::from_repr(in.u64()));
     case 3: return authoritative::Value::text(in.text());
-    case 4: { const auto kind = in.u32(); return authoritative::Value{authoritative::Handle{kind, in.u64()}}; }
+    case 4: { const auto kind = in.u32(); const auto id = in.u64(); return authoritative::Value{authoritative::Handle{kind, id, in.u32()}}; }
     case 5: {
         const auto count = in.u32();
         if (in.failed() || in.remaining() < count) { in.bad = true; return {}; }

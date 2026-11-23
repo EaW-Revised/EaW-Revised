@@ -2329,6 +2329,8 @@ int main(int argc, char** argv) {
     time_till_dead_bindings();
     type_range_and_hero_bindings();
     battle_object_bindings();
+    layering_object_bindings();
+    layering_library_run();
     order_destinations();
     special_weapon_bindings();
     manual_special_weapon_binding();
@@ -2379,6 +2381,7 @@ int main(int argc, char** argv) {
     reveal_all_contracts();
     letter_box_contracts();
     battle_story_contracts();
+    battle_planet_family_contracts();
     economy_inputs();
     campaign_defender_fallback();
     campaign_retreat_inputs();

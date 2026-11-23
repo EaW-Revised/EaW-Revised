@@ -8,6 +8,8 @@
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/sim/tactical/damage.hpp"
+#include "layerz_fixture.hpp"
+#include <set>
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/admission.hpp"
 #include "../../../src/sim/tactical/checkpoint_fields_internal.hpp"
@@ -1739,6 +1741,7 @@ void script_creation_contracts() {
         auth::ModuleManifest modules;
         expect(modules.add("CREATE.LUA", R"lua(
 function ReadWallet() wallet = Find_Player('local').Get_Credits() end
+function Axis(object, index) local axes = {object.Get_Position().Get_XYZ()} return axes[index] end
 function Create()
     local p = Find_Player('local')
     local ty = Find_Object_Type('RESEARCH')
@@ -1746,7 +1749,7 @@ function Create()
     prior = Create_Generic_Object('previous', {7, 8, 9}, p)
     created = Create_Generic_Object(ty, prior, p)
     immediate = created.Is_Valid() and created.Get_Type() == ty
-        and created.Get_Owner() == p and created.Get_Position()[3] == 9
+        and created.Get_Owner() == p and Axis(created, 3) == 9
     invalid = not pcall(function() Create_Generic_Object(ty, {0, 0, 0}, p, 1) end)
         and not pcall(function() Create_Generic_Object('missing', {0, 0, 0}, p) end)
         and not pcall(function() Create_Generic_Object(ty, false, p) end)
@@ -1760,7 +1763,7 @@ function Check()
     retained = created.Is_Valid() and prior.Is_Valid()
         and created.Get_Type().Get_Name() == 'RESEARCH'
         and created.Get_Owner().Get_ID() == 2
-        and created.Get_Position()[1] == 7 and created.Get_Position()[2] == 8
+        and Axis(created, 1) == 7 and Axis(created, 2) == 8
     campaign_cost = Find_Object_Type('RESEARCH').Get_Tactical_Build_Cost()
 end
 )lua").has_value(), "SSU-03: creation script loads");
@@ -2118,6 +2121,11 @@ void mod_ai_calls() {
         function HoldNoArgs(object) object.Prevent_All_Fire() end
         function HoldNumber(object) object.Prevent_All_Fire(1) end
         function HoldTwoArgs(object) object.Prevent_All_Fire(true, true) end
+        function FaceOk(object, other)
+            object.Turn_To_Face(other)
+            object.Turn_To_Face(other.Get_Position())
+            object.Turn_To_Face({0, 100, 0})
+        end
         function TeleportNoArgs(object) object.Teleport_And_Face() end
         function TeleportNumber(object) object.Teleport_And_Face(5) end
         function TeleportTwoArgs(object, other) object.Teleport_And_Face(other, other) end
@@ -2480,6 +2488,27 @@ void mod_ai_calls() {
     // Prevent_All_Fire(bool) queues one replay command per valid call (a dead object queues none); Teleport_And_Face
     // takes one live game object. Every other shape is a script error naming the call and queues nothing.
     {
+        expect(scripts.value().create_instance(399, "CALLS.LUA").has_value(), "MV-20: face instance");
+        auth::ScriptEvent face;
+        face.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 399, sequence++};
+        face.target = 399; face.kind = auth::ScriptEvent::Kind::call; face.name = "FaceOk";
+        face.arguments = {object_handle, object_handle};
+        expect(scripts.value().submit_event(std::move(face)).has_value(), "MV-20: face calls queue");
+        const auto face_report = scripts.value().service(executor);
+        expect(face_report && face_report.value().diagnostics.empty() && face_report.value().commands.size() == 3,
+            "MV-20: object, position and point targets each stage a command");
+        if (face_report) for (const auto& request : face_report.value().commands) {
+            const auto translated = foc::tactical_ai_detail::translate_order(request);
+            expect(request.verb == foc::verb_face && translated
+                && std::holds_alternative<eawr::sim::tactical::FacePayload>(translated.value().payload),
+                "MV-20: the staged command translates to the replayed face order");
+        }
+        if (face_report && face_report.value().commands.size() == 3) {
+            const auto translated = foc::tactical_ai_detail::translate_order(face_report.value().commands.back());
+            const auto* payload = translated ? std::get_if<eawr::sim::tactical::FacePayload>(&translated.value().payload) : nullptr;
+            expect(payload && payload->target.y == eawr::sim::math::Fixed::from_integer(100).value(),
+                "MV-20: point coordinates survive command translation");
+        }
         expect(scripts.value().create_instance(400, "CALLS.LUA").has_value(), "TL-11: valid-call instance");
         auth::ScriptEvent event;
         event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 400, sequence++};
@@ -3746,6 +3775,334 @@ void battle_object_bindings() {
     foc::tactical_ai_detail::register_battle_object_bindings(galactic_scripts.value(), world.host, twice);
     foc::tactical_ai_detail::register_battle_object_bindings(galactic_scripts.value(), world.host, twice);
     expect(!twice.empty(), "TL-04: a battle host does register them (a second registration is refused)");
+}
+
+// Positions as the retail wrapper (Get_Position, Create_Position, Get_XYZ with z), and the object calls a layering script
+// makes: Teleport(position), Hide, Cancel_Hyperspace, Cinematic_Hyperspace_In, Set_Selectable. The script below is the
+// shape of a layering library's update (read the position, add a random z offset, teleport, hide, hyperspace in), written
+// for this test; it copies no library code.
+void layering_object_bindings() {
+    namespace t = eawr::sim::tactical;
+    World world;
+    const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    world.host->setup.content.types.front().selectable = true; // the SELECTABLE behaviour Set_Selectable needs
+    world.host->setup.content.types.front().cancels_hyperspace = true;
+    world.view->units.front().position = {q(100), q(-200), q(30)};
+    const std::string source = R"LUA(
+        function Read(ship)
+            local p = ship.Get_Position()
+            px, py, pz = p.Get_XYZ()
+            local c = Create_Position(1.5, -2.25, 3.5)
+            cx, cy, cz = c.Get_XYZ()
+            kept = c
+            same = ship.Get_Position() == ship.Get_Position()
+            valid = p.Is_Valid() and c.Is_Valid()
+        end
+        function Layer(ship)
+            local x, y, z = ship.Get_Position().Get_XYZ()
+            local at = Create_Position(x, y, z + 40)
+            ship.Teleport(at)
+            ship.Hide(true)
+            ship.Hide(true)
+            ship.Cancel_Hyperspace()
+            ship.Cinematic_Hyperspace_In(1)
+            ship.Set_Selectable(true)
+            done = true
+        end
+        function Objects(ship, other) ship.Teleport(other) object_teleport = true end
+        function TeleportNone(ship) ship.Teleport() end
+        function TeleportTwo(ship) ship.Teleport(Create_Position(1, 2, 3), 4) end
+        function TeleportBad(ship) ship.Teleport('nowhere') end
+        function HideNone(ship) ship.Hide() end
+        function HideBad(ship) ship.Hide(1) end
+        function SelectBad(ship) ship.Set_Selectable('yes') end
+        function SelectNone(ship) ship.Set_Selectable() end
+        function SelectTwo(ship) ship.Set_Selectable(true, false) end
+        function SelectStatic(ship) ship.Set_Selectable(true) end
+        function Cancel(ship) ship.Cancel_Hyperspace() end
+        function InNone(ship) ship.Cinematic_Hyperspace_In() end
+        function InBad(ship) ship.Cinematic_Hyperspace_In(true) end
+        function InStatic(ship) ship.Cinematic_Hyperspace_In(5) end
+        function PosNone() Create_Position(1, 2) end
+        function PosBad() Create_Position(1, 'two', 3) end
+        function PosExtra() extra_x, extra_y, extra_z = Create_Position(1, 2, 3, 4).Get_XYZ() end
+    )LUA";
+    auth::ModuleManifest manifest;
+    expect(manifest.add("LAYER.LUA", source).has_value(), "layering: fixture loads");
+    auth::SessionConfig config;
+    config.tick_duration = {1, 30};
+    auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+    if (!scripts) { expect(false, "layering: scheduler starts"); return; }
+    std::vector<eawr::core::Diagnostic> errors;
+    foc::tactical_ai_detail::register_globals(scripts.value(), world.host, errors);
+    foc::tactical_ai_detail::register_methods(scripts.value(), world.host, errors);
+    expect(errors.empty(), "layering: production bindings register");
+    // A second object that cannot move.
+    foc::AiType rock; rock.type_id = 4; rock.name = "ROCK";
+    world.host->setup.content.types.push_back(rock);
+    foc::AiType base; base.type_id = 5; base.name = "BASE"; base.locomotor = true;
+    world.host->setup.content.types.push_back(base);
+    world.host->types.clear(); world.host->types_by_name.clear();
+    for (const auto& type : world.host->setup.content.types) {
+        world.host->types.emplace(type.type_id, &type); world.host->types_by_name.emplace(type.name, &type);
+    }
+    auto still = world.view->units.front(); still.id = 11; still.type = 4; still.position = {q(5), q(6), q(7)};
+    world.view->units.push_back(still);
+    auto base_unit = still; base_unit.id = 12; base_unit.type = 5;
+    world.view->units.push_back(base_unit);
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    std::uint64_t next_instance = 1, sequence = 0;
+    const auto ship = auth::Value{auth::Handle{foc::handle_game_object, 10}};
+    const auto fixed = auth::Value{auth::Handle{foc::handle_game_object, 11}};
+    struct Outcome {
+        std::uint64_t instance{};
+        std::vector<auth::ScriptDiagnostic> diagnostics;
+        std::vector<auth::ScriptCommand> commands;
+    };
+    const auto call = [&](const char* name, auth::ValueList arguments) {
+        Outcome outcome; outcome.instance = next_instance++;
+        expect(scripts.value().create_instance(outcome.instance, "LAYER.LUA").has_value(), "layering: call instance");
+        auth::ScriptEvent event;
+        event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, outcome.instance, sequence++};
+        event.target = outcome.instance; event.kind = auth::ScriptEvent::Kind::call; event.name = name;
+        event.arguments = std::move(arguments);
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "layering: call queues");
+        if (auto report = scripts.value().service(executor)) {
+            outcome.diagnostics = report.value().diagnostics;
+            outcome.commands = report.value().commands;
+        } else expect(false, "layering: the call is serviced");
+        return outcome;
+    };
+    const auto number = [&](const Outcome& outcome, std::string_view name) -> std::optional<Real> {
+        const auto value = scripts.value().read_global(outcome.instance, name);
+        if (!value || !value.value()) return std::nullopt;
+        if (const auto* real = std::get_if<Real>(&value.value()->data)) return *real;
+        return std::nullopt;
+    };
+    const auto flag = [&](const Outcome& outcome, std::string_view name) {
+        const auto value = scripts.value().read_global(outcome.instance, name);
+        return value && value.value() && std::get_if<bool>(&value.value()->data) && std::get<bool>(value.value()->data);
+    };
+    const auto base_cancel = call("Cancel", {auth::Value{auth::Handle{foc::handle_game_object, 12}}});
+    expect(base_cancel.diagnostics.empty() && base_cancel.commands.empty(),
+        "TL-17: base locomotor queues no cancellation");
+    const auto read = call("Read", {ship});
+    expect(read.diagnostics.empty() && number(read, "px") == ai::real(100) && number(read, "py") == ai::real(-200)
+        && number(read, "pz") == ai::real(30), "layering: Get_Position answers a wrapper whose Get_XYZ carries z");
+    expect(number(read, "cx") == ai::real(3) / ai::real(2) && number(read, "cy") == ai::real(-9) / ai::real(4) && number(read, "cz") == ai::real(7) / ai::real(2),
+        "layering: Create_Position holds its three numbers");
+    expect(flag(read, "same") && flag(read, "valid"), "layering: positions compare equal by value and are valid");
+    // The wrapper survives a save and a restore with its z.
+    {
+        const auto kept = scripts.value().read_global(read.instance, "kept");
+        const auto* before = kept && kept.value() ? std::get_if<auth::Handle>(&kept.value()->data) : nullptr;
+        expect(before != nullptr && before->kind == foc::handle_position && before->aux != 0U,
+            "layering: a position wrapper keeps z in the handle's third word");
+        const auto bytes = scripts.value().save(executor);
+        expect(bool(bytes), "layering: the scheduler saves");
+        auth::ModuleManifest again;
+        expect(again.add("LAYER.LUA", source).has_value(), "layering: restore fixture");
+        auto fresh = auth::ScriptScheduler::create(config, std::move(again));
+        if (fresh && bytes && before != nullptr) {
+            std::vector<eawr::core::Diagnostic> restore_errors;
+            foc::tactical_ai_detail::register_globals(fresh.value(), world.host, restore_errors);
+            foc::tactical_ai_detail::register_methods(fresh.value(), world.host, restore_errors);
+            expect(fresh.value().load(bytes.value()).has_value(), "layering: the scheduler restores");
+            const auto back = fresh.value().read_global(read.instance, "kept");
+            const auto* after = back && back.value() ? std::get_if<auth::Handle>(&back.value()->data) : nullptr;
+            expect(after != nullptr && *after == *before, "layering: the wrapper's z survives a save and a restore");
+            auto resaved = fresh.value().save();
+            expect(resaved && resaved.value() == bytes.value(), "layering: canonical restore bytes");
+        } else expect(false, "layering: restore scheduler");
+    }
+    const auto layer = call("Layer", {ship});
+    expect(layer.diagnostics.empty() && flag(layer, "done") && layer.commands.size() == 6,
+        "layering: a layering update queues teleport, two hides, cancel, hyperspace in and selectable");
+    if (layer.commands.size() == 6) {
+        std::vector<t::PlayerCommand> decoded;
+        for (const auto& request : layer.commands) {
+            const auto translated = foc::tactical_ai_detail::translate_order(request);
+            expect(translated.has_value(), "layering: each command translates"); if (!translated) return;
+            decoded.push_back(t::PlayerCommand{{0, translated.value().issuer, 0}, translated.value().units, translated.value().payload});
+        }
+        const auto* teleport = std::get_if<t::ScriptTeleportPositionPayload>(&decoded[0].payload);
+        expect(teleport != nullptr && teleport->position.x == q(100) && teleport->position.y == q(-200) && teleport->position.z == q(70),
+            "layering: Teleport lands at the read position plus the z offset");
+        expect(decoded[0].units == std::vector<eawr::sim::EntityId>{10}, "layering: the teleport names the caller");
+        const auto* hide = std::get_if<t::ScriptHidePayload>(&decoded[1].payload);
+        expect(hide != nullptr && hide->hidden && std::holds_alternative<t::ScriptHidePayload>(decoded[2].payload),
+            "layering: Hide(true) twice queues two hides");
+        expect(std::holds_alternative<t::ScriptCancelHyperspacePayload>(decoded[3].payload),
+            "layering: Cancel_Hyperspace queues the cancel command");
+        const auto* hyperspace = std::get_if<t::ScriptHyperspaceInPayload>(&decoded[4].payload);
+        expect(hyperspace != nullptr && hyperspace->frames == 1U, "layering: Cinematic_Hyperspace_In carries its delay frames");
+        const auto* selectable = std::get_if<t::ScriptSelectablePayload>(&decoded[5].payload);
+        expect(selectable != nullptr && selectable->selectable, "layering: Set_Selectable carries its flag");
+        t::TacticalSetup layered;
+        layered.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+        layered.units = {{10, 1, 2}, {11, 4, 2}};
+        for (const auto& command : decoded) {
+            expect(!t::human_wire_payload(command.payload), "layering: scripted view and teleport commands are engine-only");
+            const auto encoded = t::encode_command_body(command, layered);
+            const auto round = encoded ? t::decode_command_body(encoded.value(), layered) : eawr::core::Result<t::PlayerCommand>::failure(encoded.error());
+            expect(encoded && round && round.value() == command, "layering: opcodes 44, 45, 47 and 48 round-trip");
+        }
+    }
+    const auto to_object = call("Objects", {ship, fixed});
+    expect(to_object.diagnostics.empty() && flag(to_object, "object_teleport") && to_object.commands.size() == 1,
+        "layering: Teleport also takes an object as its position");
+    if (to_object.commands.size() == 1) {
+        const auto translated = foc::tactical_ai_detail::translate_order(to_object.commands.front());
+        const auto* teleport = translated ? std::get_if<t::ScriptTeleportPositionPayload>(&translated.value().payload) : nullptr;
+        expect(teleport != nullptr && teleport->position.x == q(5) && teleport->position.z == q(7), "layering: the object's z is kept");
+    }
+    const auto bad = [&](const char* function, auth::ValueList arguments, std::string_view method, const char* what) {
+        const auto outcome = call(function, std::move(arguments));
+        expect(outcome.diagnostics.size() == 1 && outcome.diagnostics.front().message.find(method) != std::string::npos
+            && outcome.commands.empty(), what);
+    };
+    bad("TeleportNone", {ship}, "Teleport", "layering: Teleport needs one argument");
+    bad("TeleportTwo", {ship}, "Teleport", "layering: Teleport takes exactly one argument");
+    bad("TeleportBad", {ship}, "Teleport", "layering: Teleport needs something it can read a position from");
+    bad("HideNone", {ship}, "Hide", "layering: Hide needs its flag");
+    bad("HideBad", {ship}, "Hide", "layering: Hide needs a boolean");
+    bad("SelectBad", {ship}, "Set_Selectable", "layering: Set_Selectable needs a boolean");
+    bad("SelectNone", {ship}, "Set_Selectable", "layering: Set_Selectable needs its flag");
+    bad("SelectTwo", {ship}, "Set_Selectable", "layering: Set_Selectable takes exactly one argument");
+    {
+        const auto outcome = call("SelectStatic", {fixed});
+        expect(outcome.diagnostics.size() == 1 && outcome.diagnostics.front().code == auth::codes::script_warning
+            && outcome.diagnostics.front().message.find("not selectable") != std::string::npos && outcome.commands.empty(),
+            "layering: an object without the SELECTABLE behaviour warns and changes nothing");
+    }
+    bad("InNone", {ship}, "Cinematic_Hyperspace_In", "layering: Cinematic_Hyperspace_In needs its delay");
+    bad("InBad", {ship}, "Cinematic_Hyperspace_In", "layering: Cinematic_Hyperspace_In needs a number");
+    bad("InStatic", {fixed}, "Cinematic_Hyperspace_In", "layering: an object that cannot move cannot hyperspace");
+    bad("PosNone", {}, "Create_Position", "layering: Create_Position needs three numbers");
+    bad("PosBad", {}, "Create_Position", "layering: Create_Position needs numbers");
+    {
+        // A position wrapper waiting in an event argument keeps its z through the scheduler's value codec.
+        const auto save_with = [&](std::uint32_t aux) -> std::optional<std::string> {
+            auth::ModuleManifest pending;
+            if (!pending.add("PENDING.LUA", "function Read(position) end").has_value()) return std::nullopt;
+            auto scheduler = auth::ScriptScheduler::create(config, std::move(pending));
+            if (!scheduler || !scheduler.value().create_instance(1, "PENDING.LUA").has_value()) return std::nullopt;
+            auth::ScriptEvent event;
+            event.key = {scheduler.value().completed_tick() + 1, foc::producer_foc_engine, 1, 0};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Read";
+            auth::Handle position{foc::handle_position, 0x3f80000040000000ULL, aux};
+            event.arguments.push_back(auth::Value{position});
+            if (!scheduler.value().submit_event(std::move(event)).has_value()) return std::nullopt;
+            auto bytes = scheduler.value().save();
+            if (!bytes) return std::nullopt;
+            auth::ModuleManifest again;
+            if (!again.add("PENDING.LUA", "function Read(position) end").has_value()) return std::nullopt;
+            auto fresh = auth::ScriptScheduler::create(config, std::move(again));
+            if (!fresh || !fresh.value().load(bytes.value()).has_value()) return std::nullopt;
+            auto resaved = fresh.value().save();
+            if (!resaved || resaved.value() != bytes.value()) return std::nullopt;
+            return bytes.value();
+        };
+        const auto low = save_with(0x40490fdbU), high = save_with(0x40000000U);
+        expect(low && high, "layering: an event carrying a position wrapper saves and restores to the same bytes");
+        expect(low && high && *low != *high, "layering: the wrapper's z word is part of a saved event argument");
+    }
+    {
+        // Teleport and Cinematic_Hyperspace_In are script errors in a galactic host.
+        World galactic;
+        galactic.host->ai_world = std::make_shared<ModeWorld>();
+        auth::ModuleManifest modes;
+        expect(modes.add("MODE.LUA", "function Go(ship) ship.Teleport(Create_Position(1, 2, 3)) end function Spin(ship) ship.Cinematic_Hyperspace_In(5) end").has_value(), "layering: mode fixture loads");
+        auto mode_scripts = auth::ScriptScheduler::create(config, std::move(modes));
+        if (mode_scripts) {
+            std::vector<eawr::core::Diagnostic> mode_errors;
+            foc::tactical_ai_detail::register_globals(mode_scripts.value(), galactic.host, mode_errors);
+            foc::tactical_ai_detail::register_methods(mode_scripts.value(), galactic.host, mode_errors);
+            std::uint64_t mode_instance = 1, mode_sequence = 0;
+            for (const char* name : {"Go", "Spin"}) {
+                expect(mode_scripts.value().create_instance(mode_instance, "MODE.LUA").has_value(), "layering: mode instance");
+                auth::ScriptEvent event;
+                event.key = {mode_scripts.value().completed_tick() + 1, foc::producer_foc_engine, mode_instance, mode_sequence++};
+                event.target = mode_instance++; event.kind = auth::ScriptEvent::Kind::call; event.name = name;
+                event.arguments.push_back(ship);
+                expect(mode_scripts.value().submit_event(std::move(event)).has_value(), "layering: mode call queues");
+                const auto report = mode_scripts.value().service(executor);
+                expect(report && report.value().diagnostics.size() == 1 && report.value().commands.empty()
+                    && report.value().diagnostics.front().message.find("may only be used in") != std::string::npos,
+                    "layering: Teleport (tactical modes) and Cinematic_Hyperspace_In (space) are gated by mode");
+            }
+        } else expect(false, "layering: mode scheduler starts");
+    }
+    const auto extra = call("PosExtra", {});
+    expect(extra.diagnostics.empty() && number(extra, "extra_x") == Real(1) && number(extra, "extra_z") == Real(3),
+        "layering: Create_Position ignores extra arguments");
+}
+
+// The layering library itself (the MIT fixture under tests/fixtures/lua/eaw-layerz) run against the production bindings:
+// several ships of one type are layered in one script instance and their teleports land at heights that vary inside the
+// configured range, with no per-library case in the host.
+void layering_library_run() {
+    namespace t = eawr::sim::tactical;
+    const std::string manager = layerz_fixture::layermanager, configuration = layerz_fixture::configuration;
+    expect(!manager.empty() && !configuration.empty(), "layering library: the fixture files are present");
+    World world;
+    const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    auto ship = world.view->units.front();
+    world.view->units.clear();
+    constexpr std::uint64_t ship_count = 8;
+    for (std::uint64_t index = 0; index < ship_count; ++index) {
+        ship.id = 10 + index; ship.position = {q(static_cast<std::int64_t>(index) * 100), q(50), q(0)};
+        world.view->units.push_back(ship);
+    }
+    auth::ModuleManifest manifest;
+    expect(manifest.add("LAYER.LUA", R"LUA(
+        function LayerAll(a, b, c, d, e, f, g, h)
+            local manager = require("eaw-layerz/layermanager")
+            for _, ship in ipairs({a, b, c, d, e, f, g, h}) do manager:update_unit_layer(ship) end
+            done = true
+        end
+    )LUA").has_value() && manifest.add("eaw-layerz/layermanager.lua", manager).has_value()
+        && manifest.add("eaw-layerz/configuration.lua", configuration).has_value(), "layering library: modules load");
+    auth::SessionConfig config;
+    config.tick_duration = {1, 30};
+    auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+    if (!scripts) { expect(false, "layering library: scheduler starts"); return; }
+    std::vector<eawr::core::Diagnostic> errors;
+    foc::tactical_ai_detail::register_globals(scripts.value(), world.host, errors);
+    foc::tactical_ai_detail::register_methods(scripts.value(), world.host, errors);
+    foc::tactical_ai_detail::register_battle_object_bindings(scripts.value(), world.host, errors);
+    expect(errors.empty(), "layering library: production bindings register");
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    expect(scripts.value().create_instance(1, "LAYER.LUA").has_value(), "layering library: instance");
+    auth::ScriptEvent event;
+    event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 1, 0};
+    event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "LayerAll";
+    for (std::uint64_t index = 0; index < ship_count; ++index)
+        event.arguments.push_back(auth::Value{auth::Handle{foc::handle_game_object, 10 + index}});
+    expect(scripts.value().submit_event(std::move(event)).has_value(), "layering library: call queues");
+    auto report = scripts.value().service(executor);
+    if (!report) { expect(false, "layering library: the call is serviced"); return; }
+    for (const auto& diagnostic : report.value().diagnostics)
+        expect(diagnostic.code == auth::codes::script_warning || diagnostic.code == auth::codes::unsupported_api,
+            "layering library: only the AI-usage notes are raised: " + diagnostic.code + " " + diagnostic.message);
+    const auto done = scripts.value().read_global(1, "done");
+    expect(done && done.value() && std::get_if<bool>(&done.value()->data) && std::get<bool>(done.value()->data),
+        "layering library: every ship is layered without a script error");
+    std::set<std::int64_t> heights;
+    std::size_t teleports = 0, hyperspace = 0;
+    for (const auto& request : report.value().commands) {
+        const auto translated = foc::tactical_ai_detail::translate_order(request);
+        expect(translated.has_value(), "layering library: each command translates"); if (!translated) return;
+        if (const auto* teleport = std::get_if<t::ScriptTeleportPositionPayload>(&translated.value().payload)) {
+            ++teleports;
+            const auto height = teleport->position.z.raw() / eawr::sim::math::Fixed::scale;
+            expect(height >= -40 && height <= 40, "layering library: the height stays in the configured range");
+            heights.insert(height);
+        }
+        if (std::holds_alternative<t::ScriptHyperspaceInPayload>(translated.value().payload)) ++hyperspace;
+    }
+    expect(teleports == ship_count && hyperspace == ship_count, "layering library: one teleport and one hyperspace-in per ship");
+    expect(heights.size() >= 3, "layering library: the heights vary between ships of one type");
 }
 
 } // namespace foc_contract

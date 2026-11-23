@@ -771,6 +771,80 @@ HudHeroFrame hero_frame(const data::ui::ShellAnchors& shell, const data::ui::Com
     return out;
 }
 
+ShellPlacement hero_frame_placement(const ReferenceSpace& space, const HudHeroFrame& frame, const double edge_inset,
+                                    const double top_inset, const bool left_edge) {
+    // The frame is a manual shell around its centred origin: its caller supplies the translation.
+    CommandBarPlacement policy = frame.placement;
+    ReferencePoint& translation = policy.manual_translation;
+    if (!frame.slots.empty()) {
+        const assets::Vec2f first = frame.slots.front().button.origin;
+        const double left = space.safe_left - space.width / 2.0;
+        const double right = left + space.safe_width;
+        translation.x = (left_edge ? left + edge_inset : right - edge_inset) - first.x;
+        translation.y = space.height / 2.0 - top_inset - first.y;
+    }
+    return place_command_bar(space, 0.0, policy);
+}
+
+HeroStripLayout hero_strip_layout(const HudHeroFrame& frame, const ShellPlacement& placement, const std::size_t heroes,
+                                  const HeroStripBounds& bounds, const double fallback_pitch) {
+    HeroStripLayout out;
+    const std::size_t slots = frame.slots.size();
+    const auto slot_point = [&](const std::size_t index) {
+        const assets::Vec2f origin = frame.slots[index].button.origin;
+        return shell_point_to_screen(origin.x, origin.y, placement);
+    };
+    if (slots == 0) return out; // The caller supplies at least one slot (a synthetic one when the data has none).
+    const auto count_rows = [&](const std::size_t shown) {
+        std::size_t rows = 0;
+        double row_y = 0.0;
+        for (std::size_t hero = 0; hero < shown; ++hero) {
+            const double y = slot_point(hero).y;
+            if (rows == 0 || std::abs(y - row_y) > 0.5) { ++rows; row_y = y; }
+        }
+        return rows;
+    };
+    if (heroes <= slots) {
+        for (std::size_t hero = 0; hero < heroes; ++hero) out.centres.push_back(slot_point(hero));
+        out.rows = count_rows(heroes);
+        return out;
+    }
+    // Heroes past the authored slots fill the rows below the authored ones, in order, left to right (the direction the
+    // slots run), in the first row's pitch and the authored row spacing. The authored heroes never move.
+    const ReferencePoint first = slot_point(0);
+    const double step = slots >= 2 ? slot_point(1).x - first.x : -fallback_pitch;
+    const double direction = step < 0.0 ? -1.0 : 1.0;
+    const double pitch_x = std::max(std::abs(step), 1.0);
+    std::size_t first_row = 1; // the number of slots on the authored first row
+    while (first_row < slots && std::abs(slot_point(first_row).y - first.y) <= 0.5) ++first_row;
+    const double pitch_y = first_row < slots ? std::max(std::abs(slot_point(first_row).y - first.y), 1.0) : pitch_x;
+    for (std::size_t hero = 0; hero < slots; ++hero) out.centres.push_back(slot_point(hero));
+    const std::size_t authored_rows = count_rows(slots);
+    double last_y = first.y;
+    for (std::size_t slot = 1; slot < slots; ++slot) last_y = std::max(last_y, slot_point(slot).y);
+    const std::size_t extras = heroes - slots;
+    const double reach_x = std::max(0.0, direction * (bounds.far_x - first.x));
+    const double reach_y = bounds.bottom - last_y;
+    // The fewest columns (the first row's count at the start) whose rows fit above the bound; the widest row the
+    // space allows when none do, and then the rows below the authored ones pack closer.
+    const std::size_t widest = std::max<std::size_t>(first_row, static_cast<std::size_t>(reach_x / pitch_x) + 1U);
+    std::size_t columns = first_row;
+    for (; columns < widest; ++columns) {
+        const std::size_t rows = (extras + columns - 1) / columns;
+        if (static_cast<double>(rows) * pitch_y <= reach_y) break;
+    }
+    const std::size_t extra_rows = (extras + columns - 1) / columns;
+    const double row_pitch = reach_y > 0.0 ? std::min(pitch_y, reach_y / static_cast<double>(extra_rows)) : 0.0;
+    for (std::size_t extra = 0; extra < extras; ++extra) {
+        const std::size_t row = extra / columns;
+        const std::size_t column = extra % columns;
+        out.centres.push_back({first.x + direction * static_cast<double>(column) * pitch_x,
+                               last_y + static_cast<double>(row + 1) * row_pitch});
+    }
+    out.rows = authored_rows + extra_rows;
+    return out;
+}
+
 data::ui::ReferenceRect button_quad(const HudShellButton& button, const float texel_width,
                                     const float texel_height) noexcept {
     const float width = texel_width * button.scale;

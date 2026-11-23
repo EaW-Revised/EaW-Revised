@@ -353,6 +353,28 @@ inline constexpr std::size_t hero_slot_limit = 11; // hero_slot_<side>00 to 10 (
 [[nodiscard]] HudHeroFrame hero_frame(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
                                       HeroSide side);
 
+// The placement of a hero frame that puts its first slot's bone `edge_inset` reference units from the safe area's
+// left or right edge and `top_inset` from the top; the art and the other slots follow the bones.
+[[nodiscard]] ShellPlacement hero_frame_placement(const ReferenceSpace& space, const HudHeroFrame& frame,
+                                                  double edge_inset, double top_inset, bool left_edge);
+
+// Where the hero strip puts its heroes. Every hero gets a place: no count is a ceiling, nothing pages or scrolls.
+// Up to the frame's authored slot count each hero sits exactly on its slot's bone. Past it the heroes are split evenly
+// over two rows in the authored style (the row pitch and row spacing are the frame's own, a later row is centred under
+// the first, as the authored second row is); when the rows do not fit between the first slot and `bounds`, rows are
+// added, and when no row count fits the pitches shrink, so a hero is never dropped. Pixels, y down.
+struct HeroStripBounds {
+    double far_x{};   // the screen x the row must not pass, in the direction the slots run (the top bar, left)
+    double bottom{};  // the screen y no hero centre may pass (the panels below the strip)
+};
+struct HeroStripLayout {
+    std::vector<ReferencePoint> centres; // one per hero, in slot order
+    std::size_t rows{};
+};
+[[nodiscard]] HeroStripLayout hero_strip_layout(const HudHeroFrame& frame, const ShellPlacement& placement,
+                                                std::size_t heroes, const HeroStripBounds& bounds,
+                                                double fallback_pitch);
+
 // The time panel's buttons, in draw order.
 inline constexpr std::array<std::string_view, 4> tactical_panel_buttons{
     "b_droid_help_tactical", "b_story_arc_t", "b_play_pause_t", "b_fast_forward_t"};

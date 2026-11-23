@@ -69,13 +69,13 @@ try {
         if ((& git -C $cpp rev-parse HEAD).Trim() -ne $pins.godot_cpp.commit) { throw 'godot-cpp pin mismatch' }
     }
     $tools = 'sim_headless','sim_bench','path_bench','asset_scan','asset_validate','xml_scan','scene_scan','sky_scan','unit_scan','script_smoke','hud_movie_prepare'
-    # root Debug with the static debug C runtime, tests off, symbols on so each tool has its PDB
+    # root Debug with the static release C runtime (EAWR_DEBUG_CRT=OFF), tests off, symbols on so each tool has its PDB
     $root = "out\build\$RootBuild"
-    Stage 'root-configure' ("($dev" + "cmake --preset windows-clang-ninja -B $root -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clang`" -DCMAKE_LINKER=`"$lld`" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF -DEAWR_DEBUG_SYMBOLS=ON)") $src
+    Stage 'root-configure' ("($dev" + "cmake --preset windows-clang-ninja -B $root -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clang`" -DCMAKE_LINKER=`"$lld`" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DEAWR_DEBUG_CRT=OFF -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF -DEAWR_DEBUG_SYMBOLS=ON)") $src
     Stage 'root-build' ("($dev" + "cmake --build $root --config Debug --target $($tools -join ' ') -j $Jobs)") $src
     # the online-enabled Debug viewer (relay + GNS), in its own tree; bin/ of THIS tree only
     $vdir = 'out\build\viewer-clang-debug-relay-ninja'
-    Stage 'viewer-configure' ("($dev" + "cmake -S apps\viewer -B $vdir -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clang`" -DCMAKE_LINKER=`"$lld`" -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_GODOT_CPP_ROOT=`"$cpp`" -DEAWR_ENABLE_LAND_SKIRMISH=OFF -DEAWR_DEBUG_SYMBOLS=ON -DEAWR_ENABLE_RELAY=ON -DEAWR_ENABLE_GNS=ON)") $src
+    Stage 'viewer-configure' ("($dev" + "cmake -S apps\viewer -B $vdir -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=`"$clang`" -DCMAKE_CXX_COMPILER=`"$clang`" -DCMAKE_LINKER=`"$lld`" -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DEAWR_DEBUG_CRT=OFF -DEAWR_GODOT_CPP_ROOT=`"$cpp`" -DEAWR_ENABLE_LAND_SKIRMISH=OFF -DEAWR_DEBUG_SYMBOLS=ON -DEAWR_ENABLE_RELAY=ON -DEAWR_ENABLE_GNS=ON)") $src
     Stage 'viewer-build' ("($dev" + "cmake --build $vdir --config Debug --target eawr_viewer -j $Jobs)") $src
     $dll = Join-Path $src 'apps\viewer\project\bin\libeawr_viewer.windows.template_release.x86_64.dll'
     if (-not (Test-Path -LiteralPath $dll) -or -not (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($dll, '.pdb')))) { throw 'debug viewer DLL or PDB missing' }

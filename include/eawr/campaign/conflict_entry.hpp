@@ -21,6 +21,7 @@ struct ResolvedConflictEntry {
     ConflictRecord conflict;
     sim::tactical::TacticalContent content;
     std::vector<std::string> notes{}; // entry-time drops (an orphan passenger), published once as diagnostics, never saved
+    std::vector<std::string> info{};  // entry-time facts worth a log line (the AI slots' difficulty), published at info level, never saved
 };
 struct ConflictEntry {
     ConflictRecord conflict;

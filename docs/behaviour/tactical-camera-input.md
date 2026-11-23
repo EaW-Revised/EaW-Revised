@@ -17,8 +17,15 @@ collision policy. The free camera does not read it.
 Read in the FoC debug build for the [behaviour audit](debug-build-audit.md#tactical-camera-input)
 (debug-build behaviour audit) and measured by runtime check RO-7 (rotate-drag camera law: FoC space and land, 1280 x 720 and
 1920 x 1080, the default mouse scheme). The map cameras implement the middle-button part
-as the [middle-button law](#middle-button-law-foc-pi-9) (PI-9); everything else below stays
-unimplemented.
+as the [middle-button law](#middle-button-law-foc-pi-9) (PI-9). Implementation status is summarized below.
+
+| Original fact | Implementation status |
+|---|---|
+| Lock tags | Not implemented; blocking behaviour untraced |
+| Mouse units, middle drag, click and wheel | Implemented by the map camera; land tilt is a project deviation |
+| Scroll ramp and release | Implemented (CAMIN-REL-1) |
+| Free camera | Project free-flight mode; original availability unverified |
+| Field of view | Project aspect rule described below |
 
 - **Lock tags.** `Land_Tactical_Camera_Locked` and `Space_Tactical_Camera_Locked` set the
   tactical camera's lock flag when the mode starts and when a map loads. The same call resets
@@ -272,7 +279,7 @@ checks. `--eawr-map-camera-selftest` drives real Godot event dispatch in the syn
 fixture; its explicit one-second pan step tests clamping independent of render cadence.
 
 This is local policy. Bounds, speeds, bindings and input timing have no retail movement claim.
-Space MapMode and simulation remain outside this loop.
+Space MapMode and live sessions use the same bridge and adapter in the space context; the simulation is separate from camera control.
 
 <a id="bounded-space-map-loop-p1-30-opt-in"></a>
 
@@ -284,7 +291,7 @@ document can never activate in space and a space document can never activate on 
 committed `apps/viewer/project/config/space-map-camera.xml` names only the synthetic space fixture
 by logical path and SHA-256. It carries a `project-authored` source X/Y target rectangle with a
 source ID, an initial target, height, zoom and yaw, and a version 1 binding table,
-`space-map-camera-bindings.json`, whose every binding is in the `space` context.
+`space-map-camera-bindings.json`, whose every binding is in the `space` context. Live sessions use `space-live-camera-bindings.json`: it drops WASD, so arrows pan and battle input keeps the letter orders. It still binds C for unit preview and Space for battlecam.
 
 - **Bounds authority.** The rectangle in that config is the only bound. No TED extent, volume,
   terrain footprint or pending TED map loading source-bounds ledger is read. The bridge converts source
@@ -505,7 +512,7 @@ project features, not fidelity gaps.
 | Behaviour | FoC | Project |
 |---|---|---|
 | Ctrl + vertical middle drag on land | No tilt: `Land_Mode` `Pitch_Per_Mouse_Unit` is 0 and its `Pitch_Min`..`Pitch_Max` is pinned at 50 | Tilts as in space: -1.5 degrees per mouse unit (FoC `Space_Mode`'s rate), clamped to 5..85 |
-| Space map and live battle camera opening distance | `Space_Mode` `Distance_Default` 1000 of 200..1900 (zoom 0.470588) | 1200 (zoom 0.588235) |
+| Coruscant map and live battle opening distance | `Space_Mode` `Distance_Default` 1000 of 200..1900 (zoom 0.470588) | 1200 (zoom 0.611111 of 100..1900) |
 
 - **Land tilt.** Owner: "I want the tilt on land battles as well, even though it's not in the
   basegame." When the loaded `Land_Mode` rate is 0, the land bridge tilts at
@@ -521,7 +528,7 @@ project features, not fidelity gaps.
 - **Opening distance.** Owner: "I might put the standard zoom a bit further out." Both
   `coruscant-space-map-camera.xml` and `coruscant-live-session-camera.xml` open at 1200, 20%
   further than FoC's 1000 and 22% of the way to `Distance_Max`, so the two space cameras
-  start and middle-click reset alike (the live camera was 600 before). The XML is unchanged.
+  start and middle-click reset alike (the live camera was 600 before). The Empire live config also opens at 1200. The duel config uses zoom 0.411765 (about 841 with the overridden range), an authored framing for both ships and their shots. The XML constants are unchanged.
   Views without a map camera config (fixed captures, FoC comparisons) keep FoC's
   `Distance_Default`.
 
@@ -530,7 +537,7 @@ project features, not fidelity gaps.
 ## Project deviation (owner, closer space-camera zoom): close zoom
 
 Owner: "for space battles the max zoom in level should be increased so i can get better detail
-on ships". Both Coruscant space configs carry a `constant_overrides` block (source
+on ships". The Coruscant and synthetic space configs carry a `constant_overrides` block (source
 `space-camera-owner-deviations`) that lowers `Distance_Min` from FoC's 200 to 100 and, by a second owner
 decision, `Pitch_Min` from -10 to -60 (see [depth floor](#depth-floor-owner-390--60)).
 
@@ -591,9 +598,7 @@ A land or space map camera config may end with one optional block after `<bindin
 ```
 
 The block is self-versioned, so the root `version` of either config schema keeps its meaning.
-A config without the block parses and resolves exactly as before. The only committed configs
-that carry one are the two Coruscant space configs (closer space-camera zoom close zoom); the land, synthetic
-space and free configs carry none, so their runs, reports and fixed-capture bytes do not change.
+A config without the block parses and resolves exactly as before. The committed space map, live-session, Empire live-session, duel, hero-beams, hero-targets and synthetic space configs carry overrides. Each sets `Distance_Min` 100, `Tactical_Min_Scroll_Speed` 823.529412, `Pitch_Min` -60 and `Tactical_Overview_Clicks` 5. The config parser handles the overview count separately from `camera::apply_map_overrides`. Land and free configs carry no block.
 
 **Precedence, lowest to highest.** This is project policy. TED map loading has not established any
 retail per-map camera override format, so nothing here claims to be original precedence.
@@ -603,8 +608,7 @@ retail per-map camera override format, so nothing here claims to be original pre
 2. The project-authored map override block: each entry replaces one scalar field.
 3. The fixed capture frame. It is not a constants layer. `lock_capture` pins the whole
    frame, and the bridge ignores the constants while the frame is pinned. Overrides cannot
-   move a fixed capture, and the tests compare it for exact equality with and without
-   overrides.
+   move a fixed capture. The land override test compares frames with and without overrides. The synthetic space renderer case `test_fixed_capture_hostile_input_matches_untouched_fixed_baseline` compares PNG bytes and capture identity with and without the committed config; this is a test assertion, not a new run receipt.
 
 **Rules** (`camera::apply_map_overrides`, diagnostic `EAWR-CAMERA-0005`, all-or-nothing):
 
@@ -726,6 +730,6 @@ changing raw event types.
   viewport; free-flight look units are Godot viewport pixels.
 - Retail map bounds, retail per-map camera overrides, collision, and gamepad or
   analog input are not implemented.
-  Neither is a UI-takeover cancel, because the viewer has no UI layer.
+  The HUD, minimap and battle input are present. Over the command bar or minimap, edge scroll and wheel still reach the camera; battle input takes left and right buttons first. UI takeover does not cancel camera input.
 - Apart from RO-7's middle-button measurements, no comparison with the original game was
   made, per tick or otherwise. Nothing else here is evidence of original camera fidelity.

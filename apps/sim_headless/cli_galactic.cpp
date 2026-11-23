@@ -207,7 +207,7 @@ template <typename Integer>
 }
 
 // A synthetic campaign definition: {"name": "...", "seed", "planets", "players",
-// "fleets_per_player", "members_per_fleet": integers, "coop_seat", "debug_commands": booleans,
+// "fleets_per_player", "members_per_fleet", "human_sides": integers, "coop_seat", "debug_commands": booleans,
 // "fiscal_cycle_seconds": decimal}. Unknown keys are refused.
 [[nodiscard]] eawr::core::Result<eawr::campaign::SyntheticCampaign> read_campaign(const std::string& text, const std::string& path) {
     using Out = eawr::core::Result<eawr::campaign::SyntheticCampaign>;
@@ -221,7 +221,7 @@ template <typename Integer>
     const auto document = JsonReader(text).document();
     if (!document || document->kind != Json::Kind::object) return refuse("a synthetic campaign is one JSON object");
     constexpr std::string_view known[] = {"name", "seed", "planets", "players", "fleets_per_player", "members_per_fleet",
-        "coop_seat", "debug_commands", "fiscal_cycle_seconds"};
+        "coop_seat", "debug_commands", "fiscal_cycle_seconds", "human_sides"};
     auto keys = document->keys;
     std::sort(keys.begin(), keys.end());
     if (std::adjacent_find(keys.begin(), keys.end()) != keys.end()) return refuse("duplicate campaign key");
@@ -237,12 +237,17 @@ template <typename Integer>
     if (!read_integer(*document, "seed", galaxy.seed) || !read_integer(*document, "planets", galaxy.planets)
         || !read_integer(*document, "players", galaxy.players) || !read_integer(*document, "fleets_per_player", galaxy.fleets_per_player)
         || !read_integer(*document, "members_per_fleet", galaxy.members_per_fleet)
+        || !read_integer(*document, "human_sides", galaxy.human_sides)
         || !read_flag(*document, "coop_seat", galaxy.coop_seat) || !read_flag(*document, "debug_commands", galaxy.debug_commands)) {
         return refuse("a count must be a non-negative integer and a flag a boolean");
     }
     if (galaxy.planets < 2 || galaxy.planets > 10'000 || galaxy.players < 1 || galaxy.players > galactic::galactic_max_players
         || galaxy.fleets_per_player > 1'000 || galaxy.members_per_fleet < 1 || galaxy.members_per_fleet > 1'000) {
         return refuse("planets 2..10000, players 1..64, fleets per player 0..1000, members per fleet 1..1000");
+    }
+    if (document->get("human_sides") != nullptr
+        && (galaxy.human_sides < 1 || galaxy.human_sides > std::min<std::size_t>(galaxy.players, galactic::galactic_max_human_sides))) {
+        return refuse("human sides 1..min(players, " + std::to_string(galactic::galactic_max_human_sides) + ")");
     }
     if (const auto* seconds = document->get("fiscal_cycle_seconds")) {
         const auto* digits = seconds->digits();

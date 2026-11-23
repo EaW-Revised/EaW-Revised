@@ -402,6 +402,8 @@ struct CraftFrame {
     bool target_craft{};
     bool approach{};                  // FA-07: the squadron still flies its approach in formation
     math::Vec3 hold{};
+    // WSQ-05: the craft is its own whole container (no team parent): it idles by itself, flying straight.
+    bool teamless{};
     std::optional<GuardChase> guard{}; // FM-20: the hold is a guarded unit's moving point
     // AB-24: the craft's speed multiplier from its active abilities (1 without).
     math::Fixed speed_factor{math::Fixed::from_raw(math::Fixed::scale)};

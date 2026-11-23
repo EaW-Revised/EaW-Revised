@@ -100,6 +100,19 @@ enum class GalacticRejectReason : std::uint8_t {
     // #7426: a human player's hero menu is only shown for a planet that player has discovered, so the host refuses to
     // open one on an undiscovered planet instead of holding a preparation nobody can see or cancel.
     ability_target_undiscovered = 25,
+    // #8157: a black-market preparation refuses for the reason the player can be told. The prepare step tests the causes in
+    // this order (the offer predicate of WGEP-58), so each refusal names the first test that failed.
+    market_not_opposing_planet = 26, // the planet belongs to the buyer or to an ally
+    market_owner_not_playable = 27,  // the planet's owner is not a playable faction (neutral planet)
+    market_cannot_host = 28,         // the planet authors no Black Market corruption choice
+    market_other_corruption = 29,    // the planet already carries another corruption type
+    market_not_established = 30,     // the planet could host a market but has not been given the Black Market corruption
+    market_nothing_to_offer = 31,    // every test passed but the owner faction registers no market item
+    // #8157: the generic "unknown value" no longer stands in for these ability refusals.
+    ability_not_usable_here = 32, // a drop of a hero whose abilities list no kind that qualifies on that planet
+    ability_unavailable = 33,     // the hero has no such ability, no ability host, or no buyer row
+    ability_disabled = 34,        // the ability is switched off or cancelled by a story or script
+    market_cannot_price = 35,     // a displayed tech value or an offer price left its numeric range while the menu was prepared
 };
 
 // One event. `producer` is the seat whose command produced it; `subject` the object it is

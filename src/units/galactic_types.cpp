@@ -151,6 +151,23 @@ public:
     std::vector<std::uint8_t> bytes;
 };
 
+// #8161, WGEP-158: the original's type-load fixup (debug build, confirmed by a retail capture of Republic at War: a company
+// authoring Required_Ground_Base_Level 0 is built on the ground tab). A type that is not a base (Base_Level 0), is buildable
+// (cost above 0, or -1), is not a named hero (Is_Named_Hero) and does not behave like DUMMY_GROUND_STRUCTURE reads an authored 0 on
+// BOTH required levels as ground level 1; when both levels are nonzero the starbase level is cleared. Every reader of the table
+// (production admission, the build bar's domain, the AI's channel) therefore sees the effective level.
+void apply_build_level_fixup(GalacticType& type) noexcept {
+    if (type.base_level.value_or(0) != 0 || type.named_hero.value_or(false)) return;
+    const auto cost = type.build_cost_credits.value_or(Fixed{}).raw();
+    if (cost <= 0 && cost != -Fixed::scale) return;
+    if (std::any_of(type.behavior.begin(), type.behavior.end(), [](const auto& role) { return equal(role, "DUMMY_GROUND_STRUCTURE"); }))
+        return;
+    if (type.required_ground_base_level.value_or(0) == 0 && type.required_star_base_level.value_or(0) == 0)
+        type.required_ground_base_level = 1;
+    if (type.required_ground_base_level.value_or(0) != 0 && type.required_star_base_level.value_or(0) != 0)
+        type.required_star_base_level = 0;
+}
+
 } // namespace
 
 bool built_on_ground(const GalacticType& type) noexcept {
@@ -365,6 +382,7 @@ GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool i
         for (const auto& child : definition.root.children) {
             if (child.schema_status == data::SchemaStatus::unknown) issue(table, type, child, IssueKind::unknown_tag, "the tag is not known for this class");
         }
+        apply_build_level_fixup(type);
         table.types.push_back(std::move(type));
     }
     // Validate references without constructing any tactical types or hard-coding faction names.

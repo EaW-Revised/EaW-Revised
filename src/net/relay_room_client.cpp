@@ -351,6 +351,7 @@ core::Result<std::shared_ptr<NetworkGnsRoom>> NetworkGnsRoom::reattach(NetworkIn
     return connect(std::move(options), std::move(request), std::move(identity), std::nullopt);
 }
 std::uint64_t NetworkGnsRoom::dropped_signals() const { std::lock_guard lock(impl_->mutex); return impl_->dropped; }
+std::size_t NetworkGnsRoom::queued_signals() const { std::lock_guard lock(impl_->mutex); return impl_->inbound.size(); }
 std::string NetworkGnsRoom::last_refusal() const { std::lock_guard lock(impl_->mutex); return impl_->last_refusal; }
 std::string NetworkGnsRoom::alias() const { std::lock_guard lock(impl_->mutex); return impl_->alias; }
 std::string NetworkGnsRoom::capability() const { std::lock_guard lock(impl_->mutex); return impl_->capability; }

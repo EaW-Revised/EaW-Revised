@@ -86,6 +86,12 @@ def failures_write_nothing(program: str, fixtures: pathlib.Path, work: pathlib.P
     excessive = bad / "excessive.json"
     excessive.write_text(json.dumps({"name": "excessive", "players": 64,
                                     "fleets_per_player": 1000, "members_per_fleet": 1000}))
+    too_many_sides = bad / "sides.json"
+    too_many_sides.write_text('{"name": "sides", "players": 10, "human_sides": 9}')
+    more_sides_than_players = bad / "sides-players.json"
+    more_sides_than_players.write_text('{"name": "sides", "players": 3, "human_sides": 4}')
+    no_sides = bad / "no-sides.json"
+    no_sides.write_text('{"name": "sides", "players": 3, "human_sides": 0}')
     out = bad / "out.csv"
     cases = [
         (3, ("--galactic-replay", str(truncated), "--hash-out", str(out)), "a truncated replay"),
@@ -95,6 +101,9 @@ def failures_write_nothing(program: str, fixtures: pathlib.Path, work: pathlib.P
         (3, ("--galactic", str(no_name), "--hash-out", str(out)), "a campaign without a name"),
         (3, ("--galactic", str(duplicate), "--hash-out", str(out)), "a duplicate campaign key"),
         (3, ("--galactic", str(excessive), "--hash-out", str(out)), "a campaign over the object quota"),
+        (3, ("--galactic", str(too_many_sides), "--hash-out", str(out)), "more human sides than the cap"),
+        (3, ("--galactic", str(more_sides_than_players), "--hash-out", str(out)), "more human sides than players"),
+        (3, ("--galactic", str(no_sides), "--hash-out", str(out)), "zero human sides"),
         (2, ("--galactic", "Campaign_Equal_Footing", "--hash-out", str(out)), "a stock campaign before the setup work"),
         (2, ("--galactic-replay", str(replay)), "a replay run without --hash-out"),
         (2, ("--galactic-replay", str(replay), "--hash-out", str(out), "--ticks", "5"), "--ticks with a replay"),
@@ -140,6 +149,10 @@ def main() -> int:
         campaign_run(arguments.program, arguments.fixtures / "synthetic-coop.json", work, 200,
                      {"campaign": "synthetic-coop", "seed": 11, "players": 3, "seats": 4, "planets": 40, "routes": 50,
                       "fleets": 9, "fleet_members": 36, "fiscal_cycle_frames": 75})
+        # Eight human versus sides and one AI faction (#8071): the same hashes from a start and from every replay worker count.
+        campaign_run(arguments.program, arguments.fixtures / "synthetic-8-factions.json", work, 120,
+                     {"campaign": "synthetic-8-factions", "seed": 13, "players": 9, "seats": 9, "planets": 24, "routes": 30,
+                      "fleets": 9, "fleet_members": 18, "fiscal_cycle_frames": 1350})
         escaped = work / "escaped.json"
         name = 'quoted "campaign" \\ path\nnext\tline'
         escaped.write_text(json.dumps({"name": name}))

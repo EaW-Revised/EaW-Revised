@@ -261,25 +261,91 @@ void galactic_row_order() {
     expect(ui::galactic_row_order(campaign(4, 0, 3), 4) == (Order{0, 1, 2, 3}),
            "four factions on a four-row dialog keep the campaign order, the neutral row in its slot");
     expect(ui::galactic_row_order(campaign(4, 2, 3), 9) == (Order{0, 1, 2, 3}), "a roomy dialog never reorders");
-    expect(ui::galactic_row_order(campaign(13, 0, 3), 4) == (Order{0, 1, 2, 4}),
-           "thirteen factions, starter first: the starter stays on top and the neutral row is skipped");
+    expect(ui::galactic_row_order(campaign(13, 0, 3), 4) == (Order{0, 1, 2}),
+           "thirteen factions, starter first: the starter stays on top, the neutral row is skipped, the last row is kept for the line");
     const auto late = ui::galactic_row_order(campaign(13, 7, 3), 4);
-    expect(late == (Order{7, 0, 1, 2}), "a starter at index 7 is drawn first, then the campaign's first AI rows");
-    expect(ui::galactic_row_order(campaign(13, 7, 3), 9) == (Order{7, 0, 1, 2, 4, 5, 6, 8, 9}),
-           "thirteen factions on a nine-row dialog: the player first, the neutral row never");
+    expect(late == (Order{7, 0, 1}), "a starter at index 7 is drawn first, then the campaign's first AI rows");
+    expect(ui::galactic_row_order(campaign(13, 7, 3), 9) == (Order{7, 0, 1, 2, 4, 5, 6, 8}),
+           "thirteen factions on a nine-row dialog: the player first, the neutral row never, the ninth row is the line");
     expect(ui::galactic_row_order(campaign(13, 12, 3), 1) == (Order{12}), "a one-row dialog draws the player");
     auto two = campaign(13, 9, 3);
     two[5].human = true; two[5].playable = true; two[8].playable = true;
-    expect(ui::galactic_row_order(two, 4) == (Order{5, 9, 8, 0}), "players, then rows a player could take, then AI rows");
+    expect(ui::galactic_row_order(two, 4) == (Order{5, 9, 8}), "players, then rows a player could take, then AI rows");
     // A dialog row's buttons act on the campaign row drawn there: slot 0 holds campaign row 7, whose player ID is 8.
     std::vector<std::uint32_t> players;
     for (std::uint32_t player = 1; player <= 13; ++player) players.push_back(player);
     expect(ui::galactic_slot_player(late, players, 0) == 8U && ui::galactic_slot_player(late, players, 1) == 1U
-            && ui::galactic_slot_player(late, players, 3) == 3U,
+            && ui::galactic_slot_player(late, players, 2) == 2U,
            "the kick button of a dialog row names the player of the campaign row drawn there, not row + 1");
-    expect(!ui::galactic_slot_player(late, players, 4) && !ui::galactic_row_at(late, 4) && ui::galactic_row_at(late, 0) == 7U,
+    expect(!ui::galactic_slot_player(late, players, 3) && !ui::galactic_row_at(late, 3) && ui::galactic_row_at(late, 0) == 7U,
            "a dialog row past the drawn ones names no row");
     expect(ui::galactic_row_order({}, 4).empty() && ui::galactic_row_order(campaign(13, 7, 3), 0).empty(), "no rows or no capacity draws nothing");
+}
+
+// D8 (#8071): the room shows a row for every playable faction of the campaign, up to the dialog's rows; what the dialog has no
+// row for is named by one line on the row after the last drawn one.
+void galactic_rows_for_every_faction() {
+    using Facts = ui::GalacticRowFacts;
+    using Order = std::vector<std::size_t>;
+    // `humans` planned rows, `players` playable rows in all, `ai` AI-only rows, then a neutral row.
+    const auto campaign = [](const std::size_t humans, const std::size_t players, const std::size_t ai) {
+        std::vector<Facts> rows;
+        for (std::size_t index = 0; index < players; ++index) rows.push_back({index < humans, true, false});
+        for (std::size_t index = 0; index < ai; ++index) rows.push_back({false, false, false});
+        rows.push_back({false, false, true});
+        return rows;
+    };
+    const auto draw = [](const std::vector<Facts>& rows, const std::size_t capacity) {
+        const auto order = ui::galactic_row_order(rows, capacity);
+        return std::make_pair(order, ui::galactic_hidden_rows_line(rows, order));
+    };
+    // Stock shape: three playable factions and a neutral one, on the retail dialog's nine rows: every row shown, no line.
+    {
+        const auto [order, line] = draw(campaign(1, 3, 0), 9);
+        expect(order == (Order{0, 1, 2, 3}) && line.empty(), "the stock three factions fit the dialog: every row is drawn, no line");
+    }
+    // The made-up eight-faction campaign: eight planned humans fill eight rows, one AI faction fits the ninth row.
+    {
+        const auto [order, line] = draw(campaign(8, 8, 1), 9);
+        expect(order == (Order{0, 1, 2, 3, 4, 5, 6, 7, 8}) && line.empty(), "eight players and an AI faction fit nine dialog rows");
+    }
+    // More factions than rows: the players first, the AI rows next, the line takes the last row.
+    {
+        const auto rows = campaign(8, 8, 3);
+        const auto [order, line] = draw(rows, 9);
+        expect(order == (Order{0, 1, 2, 3, 4, 5, 6, 7}) && line == "+3 AI factions", "eight players and three more AI factions: the line names the three");
+        const auto [few, few_line] = draw(campaign(1, 3, 6), 4);
+        expect(few == (Order{0, 1, 2}) && few_line == "+6 AI factions", "a four-row dialog: the player, the AI rows that fit, and the line");
+        expect(ui::galactic_hidden_rows_line(campaign(1, 1, 2), Order{0, 1}) == "+1 AI faction", "one hidden row is singular");
+    }
+    // A dialog too small for its players never hides a player behind the line: the line then says rows are missing.
+    {
+        const auto rows = campaign(5, 5, 2);
+        const auto [order, line] = draw(rows, 4);
+        expect(order == (Order{0, 1, 2, 3}) && line == "+3 more factions", "five players on four rows: all rows are players, the line counts the rest");
+    }
+    // The neutral row is never counted.
+    expect(ui::galactic_hidden_rows_line(campaign(1, 2, 0), Order{0, 1}).empty(), "a neutral row is no hidden faction");
+    // The room plans at most net::galactic_lobby_human_row_limit human rows for the dialog: as many as the dialog has rows when
+    // every faction fits, one fewer when rows are cut (that row is the line). Whatever the dialog, every planned player is drawn
+    // and, whenever a row is hidden, the line has a row of its own (the number the net test pins: nine drawn factions on four
+    // dialog rows allow three human rows).
+    for (const std::size_t drawn : {3U, 9U, 13U}) {
+        for (std::size_t capacity = 2; capacity <= 12; ++capacity) {
+            const std::size_t limit = drawn > capacity ? capacity - 1U : capacity;
+            const std::size_t humans = std::min<std::size_t>(limit, std::min<std::size_t>(drawn, 8U));
+            const auto rows = campaign(humans, drawn, 0);
+            const auto order = ui::galactic_row_order(rows, capacity);
+            const auto line = ui::galactic_hidden_rows_line(rows, order);
+            const std::string where = std::to_string(drawn) + " factions on " + std::to_string(capacity) + " rows, " + std::to_string(humans) + " players";
+            std::size_t drawn_humans{};
+            for (const auto index : order) drawn_humans += rows[index].human ? 1U : 0U;
+            expect(drawn_humans == humans, "every planned player has a drawn row: " + where);
+            expect(line.empty() || order.size() + 1U <= capacity, "a hidden row is named by a line that has a row of its own: " + where);
+        }
+    }
+    expect(draw(campaign(3, 9, 0), 4).first == (Order{0, 1, 2}) && draw(campaign(3, 9, 0), 4).second == "+6 AI factions",
+        "nine factions on four rows, three players: the players and the line, as the room's limit allows");
 }
 
 void start_checks() {
@@ -808,6 +874,7 @@ int main() {
     human_team_choices();
     staging_rows();
     galactic_row_order();
+    galactic_rows_for_every_faction();
     start_checks();
     start_enabled();
     fixed_source();

@@ -3,6 +3,7 @@
 #include "eawr/mods/profile.hpp"
 #include <functional>
 #include <memory>
+#include <chrono>
 namespace eawr::mods_service {
 class Records {
 public:
@@ -15,6 +16,7 @@ public:
     void invalidate_reuse(); // drop every reusable chain fingerprint (any mutating method)
     std::function<void(std::string)> emit;
     mods::steam::fs::path executable; // Synthetic helper seam, identical containment to production.
+    std::function<std::chrono::steady_clock::time_point()> now = [] { return std::chrono::steady_clock::now(); };
 private:
     struct State;
     std::unique_ptr<State> state_;

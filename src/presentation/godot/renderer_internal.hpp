@@ -511,6 +511,7 @@ public:
     void set_light_scale(sim::EntityId entity_id, const std::array<float, 3>& rgb);
     void apply_light_scale(RenderingServer& rendering, sim::EntityId entity_id, const Instance& instance) const;
     void set_unit_colorization(sim::EntityId entity_id, const std::array<float, 3>& rgb);
+    void clear_unit_colorization(sim::EntityId entity_id);
     void apply_unit_colorization(RenderingServer& rendering, sim::EntityId entity_id, const Instance& instance) const;
     void set_unit_opacity(sim::EntityId entity_id, float alpha);
     void copy_instance_pose(sim::EntityId source, sim::EntityId target, float light_factor);

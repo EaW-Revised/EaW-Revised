@@ -8,6 +8,7 @@
 #include "galactic_ai_movement_runtime.hpp"
 #include "galactic_ai_selection_content.hpp"
 #include "galactic_ai_selection_work.hpp"
+#include "galactic_ai_outbox_state.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
@@ -47,6 +48,157 @@ namespace auth = eawr::script::authoritative;
 using eawr::sim::math::Fixed;
 std::string assembly_contract(const eawr::sim::PartitionExecutor&, unsigned, bool sparse = true);
 namespace {
+// #7407: a type switch abandons a real plan whose invasion is still held by an older lane slice.
+// The cleanup phase intentionally has no invasion row (the same shape as an overlay-refused admission).
+// Its release must survive in the next batch until the older invasion and the cleanup apply in order.
+std::string pending_invasion_switch_contract(const eawr::sim::PartitionExecutor& executor) {
+    auto configured = setup();
+    configured.players.push_back({2, 2, 0});
+    configured.seats = {{{1}, 1, gc::SeatKind::ai, 0, true, 0}};
+    auto account = configured.player_economy->players.front(); account.player = 2;
+    configured.player_economy->players.push_back(account);
+    auto fiscal = configured.fiscal->players.front(); fiscal.player = 2;
+    configured.fiscal->players.push_back(fiscal);
+    auto producer = configured.production->players.front(); producer.player = 2;
+    configured.production->players.push_back(producer);
+    // Planet 10 stays the AI's own world (the fixture goal applies to FRIENDLY targets only, as stock goals that name one
+    // do); the pending invasion is against an enemy ground base on a second planet 12 that player 2 owns.
+    configured.planets.push_back({12, {}, 2});
+    configured.fiscal->planets.push_back({12, {}});
+    auto enemy_production = configured.production->planets.front();
+    enemy_production.planet = 12; enemy_production.target_owner = enemy_production.starbase_owner = enemy_production.ground_occupier = 2;
+    configured.production->planets.push_back(enemy_production);
+    configured.fleets = {{11, 1, 12, {{20, 100}}}};
+    configured.fleet_control->types.front().transport = true;
+    configured.control.emplace();
+    configured.control->change_seconds = f(7);
+    configured.control->max_ground_forces = 10;
+    configured.control->players = {{1, false, true, 1}, {2, true, false, 2}};
+    configured.control->relations = {{1, 1, true}, {1, 2, false}, {2, 1, false}, {2, 2, true}};
+    configured.control->types = {{100, 0, false, true}};
+    gc::ControlPlanet home; home.planet = 10; home.type = 1000;
+    home.surface_accessible = true; home.ground_base = {1, 1};
+    gc::ControlPlanet enemy; enemy.planet = 12; enemy.type = 1000;
+    enemy.surface_accessible = true; enemy.ground_base = {2, 1};
+    configured.control->planets = {home, enemy};
+    const auto switch_data = [] {
+        auto definitions = data();
+        ai::PlayerType empty; empty.name = "NONE"; empty.difficulty["NORMAL"] = "NORMAL";
+        definitions.players.emplace("NONE", std::move(empty));
+        return definitions;
+    };
+    auto session = must(gc::GalacticSession::create(configured));
+    session.enable_native_invasions(true);
+    Owner owner(session, executor, false, switch_data());
+    must(owner.engine->allocate_galactic_goal(1, 0, owner.engine->target_of_object(10)->id));
+    expect(ai::EngineContractAccess::selected_reservation(*owner.engine), "pending switch reserves a real plan roster");
+    auto& player = ai::EngineContractAccess::player(*owner.engine); player.next_function = player.functions.size();
+    must(owner.engine->service_galactic_system(1, ga::Service::goals, owner.scripts, owner.sequence));
+    const auto plan = player.active.front().plan;
+    expect(plan && player.running.contains(plan), "pending switch owns an attached running plan");
+    ga::IntentOutbox pending(ga::standard_async_schedule);
+    const auto start = pending.begin_batch(0, {session.next_entity_id(), session.next_native_invasion_id()});
+    const auto end = pending.frontier();
+    must(session.reserve_native_frontiers(session.next_entity_id(), end.id, session.next_native_invasion_id(), end.invasion));
+    std::uint64_t request{};
+    const std::array<gc::PlayerId, 1> players{1};
+    {
+        gc::GalacticSession::NativeBarrierOptions options;
+        options.first_id = start.id; options.first_invasion = start.invasion;
+        options.id_end = end.id; options.invasion_end = end.invasion;
+        options.intent_sink = pending.sink(); options.lane = true;
+        auto phase = must(session.begin_native_barrier(players, gc::galactic_max_commands, std::move(options)));
+        must(phase->begin_players()); must(phase->select_player(1)); pending.begin_virtual_tick(15);
+        const auto admission = must(session.admit_native_invasion(1, 11, false));
+        expect(admission.admitted, "pending switch admits an invasion from its active AI seat");
+        expect(admission.queued && admission.request == start.invasion, "pending switch stages an actual pending enemy invasion");
+        request = admission.request; must(phase->discard());
+    }
+    pending.end_batch();
+    const auto block = ai::EngineContractAccess::add_invasion_block(*owner.engine, plan, request);
+    owner.actions->bind_invasion_pending([&pending](auto id) { return pending.holds_invasion(id); });
+    expect(!owner.actions->invasion_status(request) && pending.holds_invasion(request),
+        "the real outbox holds the plan's invasion while the world has no row");
+    const auto identity = eawr::core::sha256_hex(std::span<const std::uint8_t>{});
+    ai::GoalStateContributor goals(owner.engine, identity);
+    struct Saved {
+        std::uint64_t tick{}, sequence{};
+        std::vector<std::uint8_t> world, outbox;
+        gc::GalacticReplay recording; // a direct restore adopts the journal of the recording its owner was built from
+        ga::NativeState perception, goals, actions;
+        ai::GalacticFunding::State funding;
+        std::string scripts;
+    };
+    std::vector<Saved> saves;
+    for (std::uint64_t tick = 1; tick <= 15; ++tick) {
+        (void)must(session.step(executor));
+        saves.push_back({tick, owner.sequence, must(session.save_checkpoint_state()), must(ga::encode_outbox_state(pending, tick)), session.record(),
+            must(owner.world->capture()), must(goals.capture()), must(owner.actions->capture()), owner.funding->state(), must(owner.scripts.save())});
+    }
+    const auto continue_switch = [&](auto& world, Owner& ai_owner, ga::IntentOutbox& outbox, const auto& pool, std::uint64_t tick) {
+        while (tick++ < 15) (void)must(world.step(pool));
+        const auto first = outbox.begin_batch(15, {world.next_entity_id(), world.next_native_invasion_id()});
+        const auto frontier = outbox.frontier();
+        must(world.reserve_native_frontiers(world.next_entity_id(), frontier.id, world.next_native_invasion_id(), frontier.invasion));
+        const auto before_cleanup = world.canonical_state_bytes();
+        {
+            gc::GalacticSession::NativeBarrierOptions options;
+            options.first_id = first.id; options.first_invasion = first.invasion;
+            options.id_end = frontier.id; options.invasion_end = frontier.invasion;
+            options.intent_sink = outbox.sink(); options.lane = true;
+            auto phase = must(world.begin_native_barrier(players, gc::galactic_max_commands, std::move(options)));
+            must(phase->begin_players()); must(phase->select_player(1)); outbox.begin_virtual_tick(1);
+            must(ai_owner.engine->replace_galactic_player_type(1, "NONE", "NORMAL", ai_owner.scripts));
+            expect(!ai::EngineContractAccess::player(*ai_owner.engine).blocks.contains(block)
+                && ai::EngineContractAccess::player(*ai_owner.engine).running.empty()
+                && ai::EngineContractAccess::player(*ai_owner.engine).type->name == "NONE", "type switch releases its running plan and invasion block");
+            must(phase->discard());
+        }
+        expect(world.canonical_state_bytes() == before_cleanup, "control-switch cleanup changes no world state before its slice applies");
+        outbox.end_batch();
+        std::size_t releases{};
+        for (const auto& slice : outbox.pending_slices()) for (const auto& intent : slice.intents)
+            if (const auto* invasion = std::get_if<gc::GalacticSession::NativeActionShadow::InvasionRequest>(&intent.record.request);
+                invasion && invasion->retire && invasion->number == request) ++releases;
+        expect(releases == 1 && outbox.holds_invasion(request), "type-switch cleanup retains one release beside the older pending invasion");
+        std::string trace;
+        ga::IntentCommitOptions options; options.refuse_stale_identities = true;
+        for (std::uint64_t next = 15; next <= 50; ++next) {
+            options.identity_floor = outbox.lane_floor(); options.invasion_floor = outbox.lane_invasion_floor();
+            for (auto& slice : outbox.take_due(next)) (void)must(ga::commit_ordered_intents(world, std::move(slice.intents), pool, options));
+            if (next == 44) expect(world.native_invasion(request) != nullptr,
+                "the older pending invasion is actually readmitted before the later cleanup");
+            (void)must(world.step(pool));
+            trace += world.state_sha256() + eawr::core::sha256_hex(must(ga::encode_outbox_state(outbox, next)));
+        }
+        // A real enemy invasion is still running when its reader is released: its record stays until the invasion ends,
+        // marked released (it is erased at once only for a completed or unqueued one).
+        const auto* released = world.native_invasion(request);
+        expect((!released || released->reader_released) && !outbox.holds_invasion(request), "ordered application releases the actual invasion reader");
+        expect(!ai_owner.engine->galactic_provider_retired(1), "pending-invasion type switch never retires the provider");
+        ai::GoalStateContributor retained(ai_owner.engine, identity);
+        return trace + must(retained.state_hash()) + must(ai_owner.actions->state_hash())
+            + eawr::core::sha256_hex(must(ga::encode_funding_state(ai_owner.funding->state())));
+    };
+    const auto baseline = continue_switch(session, owner, pending, executor, 15);
+    for (const auto& saved : saves) for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter resumed_pool(workers);
+        auto restored = must(gc::GalacticSession::from_replay(saved.recording));
+        must(restored.load_checkpoint_state(saved.world)); restored.enable_native_invasions(true);
+        Owner resumed(restored, resumed_pool, false, switch_data());
+        auto decoded = must(ga::decode_outbox_state(saved.outbox));
+        ga::IntentOutbox outbox(decoded.schedule); outbox.restore(decoded.frontier, decoded.floor, std::move(decoded.slices));
+        resumed.actions->bind_invasion_pending([&outbox](auto id) { return outbox.holds_invasion(id); });
+        must(resumed.world->restore(saved.perception)); must(resumed.funding->restore(saved.funding));
+        must(resumed.actions->restore(saved.actions)); must(resumed.scripts.load(saved.scripts)); resumed.sequence = saved.sequence;
+        ai::GoalStateContributor native(resumed.engine, identity); must(native.restore(saved.goals));
+        expect(must(native.capture()).components == saved.goals.components
+            && must(ga::encode_outbox_state(outbox, saved.tick)) == saved.outbox, "pending plan and real outbox round trip before the switch");
+        expect(continue_switch(restored, resumed, outbox, resumed_pool, saved.tick) == baseline,
+            "every pending-window save continues through type-switch cleanup equally on 1/2/4/8 workers");
+    }
+    return baseline;
+}
 void goal_reach_index_contracts() {
     const auto lookup = [](const ai::GalacticGoalReachIndex& index, const std::vector<ai::GalacticGoalReach>& rows, decltype(ai::GalacticGoalReach::player) player,
         gc::PlanetId source, std::string_view policy) -> std::optional<std::vector<gc::PlanetId>> {
@@ -689,10 +841,14 @@ int main() {
         std::array<std::string, 3> native_identity_baselines;
         std::array<std::string, 24> assembly_baselines;
         std::string frontier_baseline;
+        std::string pending_switch_baseline;
         std::string sparse_force_baseline;
         std::string indexed_selection_baseline, named_team_baseline;
         for (const auto count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter executor(count);
+            const auto pending_switch = pending_invasion_switch_contract(executor);
+            if (pending_switch_baseline.empty()) pending_switch_baseline = pending_switch;
+            else expect(pending_switch == pending_switch_baseline, "pending-invasion switch equals on 1/2/4/8 workers");
             const auto prepared_content_trace = indexed_selection_contract(executor);
             if (indexed_selection_baseline.empty()) indexed_selection_baseline = prepared_content_trace;
             else expect(prepared_content_trace == indexed_selection_baseline, "indexed selection preparation equals at 1/2/4/8 workers");

@@ -784,6 +784,7 @@ int main(int argc, char** argv) {
     test_out_of_combat();
     test_arrival_vulnerability();
     test_recharge();
+    test_recharge_limits();
     test_energy();
     test_segment();
     test_hostile_projectile_filter();

@@ -46,6 +46,7 @@
 #include <chrono>
 #include <mutex>
 #include <memory>
+#include <numeric>
 #include <future>
 #include <condition_variable>
 #include <deque>
@@ -177,6 +178,30 @@ dg::GalacticData make_data(const Names& names) {
     d.campaigns.push_back(campaign);
     return d;
 }
+// D8 (#8071): a made-up campaign with `playable` player factions, `ai_only` AI factions and a neutral one, all at one planet (as
+// make_data), for the tests that need more rows than stock has.
+dg::GalacticData make_wide_data(const std::size_t playable, const std::size_t ai_only) {
+    dg::GalacticData d;
+    dg::Campaign campaign; campaign.name = "Multiplayer"; campaign.locations = {"P"}; campaign.planets = {"P"};
+    campaign.supports_custom_settings = true; campaign.is_multiplayer = true;
+    campaign.minimum_custom_tech = 1; campaign.maximum_custom_tech = 5;
+    for (std::size_t index = 0; index < playable + ai_only; ++index) {
+        const std::string name = (index < playable ? "PLAYER_" : "AI_") + std::to_string(index + 1);
+        dg::Faction row; row.name = name; row.is_neutral = false; row.is_playable = index < playable;
+        row.displayed_tech_level_adjustment = 0;
+        row.multiplayer_campaign_heroes = {"Hero", "Hero"};
+        d.factions.push_back(row);
+        campaign.starting_credits.push_back({name, 9000}); campaign.starting_tech_levels.push_back({name, 2});
+        campaign.max_tech_levels.push_back({name, 5}); campaign.home_locations.push_back({name, "P"});
+    }
+    dg::Faction neutral; neutral.name = "NEUTRAL"; neutral.is_neutral = true; neutral.displayed_tech_level_adjustment = 0;
+    d.factions.push_back(neutral);
+    dg::Planet planet; planet.name = "P"; planet.galactic_position = dg::Position{}; planet.behaviors = {"PLANET"};
+    d.planets.push_back(planet);
+    d.constants = {{"MaximumFleetMovementDistance", "10", whole(10)}, {"Fiscal_Cycle_Time_In_Secs", "45", whole(45)}};
+    d.campaigns.push_back(campaign);
+    return d;
+}
 eawr::units::GalacticTypeTable make_types() {
     eawr::units::GalacticType ship; ship.name = "Ship"; ship.object_class = "SpaceUnit"; ship.can_hyperspace_without_ability = true;
     auto hero = ship; hero.name = "Hero";
@@ -188,7 +213,8 @@ struct Local {
     dg::GalacticData data;
     eawr::units::GalacticTypeTable types;
     cp::MpLocalContent content;
-    explicit Local(const Names& names = {}) : data(make_data(names)), types(make_types()) {
+    explicit Local(const Names& names = {}) : Local(make_data(names)) {}
+    explicit Local(dg::GalacticData made_up) : data(std::move(made_up)), types(make_types()) {
         content.data = &data; content.types = &types;
         content.script_manifest_digest = std::string(64, 'a'); content.xml_digest = std::string(64, 'b');
         content.command_quota = static_cast<std::uint32_t>(net::max_batch_commands);
@@ -209,10 +235,10 @@ const char* const difficulty = "Normal_Default";
 // ---- codec, versioning, mode ----
 
 net::GalacticLobbyOptions two_side_options(const Local& local) {
-    return require(net::default_galactic_lobby_options(local.catalog().front(), difficulty, match_seed));
+    return require(net::default_galactic_lobby_options(local.catalog().front(), difficulty, match_seed, 3, 2));
 }
 net::GalacticLobbyOptions coop_options(const Local& local) {
-    return require(net::default_galactic_lobby_options(local.catalog().front(), difficulty, match_seed, 3, false));
+    return require(net::default_galactic_lobby_options(local.catalog().front(), difficulty, match_seed, 3, 1));
 }
 
 void codec_and_mode() {
@@ -582,7 +608,7 @@ void coop_single_player_sets() {
     std::size_t playable{};
     for (const auto& faction : list[1].factions) if (faction.playable) { ++playable; expect(faction.name == "REBEL", "only the authored human faction is playable"); }
     expect(playable == 1, "one playable faction on a single-player entry");
-    auto options = require(net::default_galactic_lobby_options(list[1], difficulty, match_seed, 3, true));
+    auto options = require(net::default_galactic_lobby_options(list[1], difficulty, match_seed, 3, 2));
     std::size_t humans{};
     for (const auto& row : options.rows) humans += row.human ? 1 : 0;
     expect(humans == 1, "a single-player entry plans one co-op side even when two sides are asked for");
@@ -689,21 +715,21 @@ void difficulty_follows_the_campaigns_ai_types() {
     expect(require(net::default_galactic_lobby_options(mixed, "Hard_Default", match_seed)).difficulty == "Hard_Default",
         "default options keep an offered difficulty");
     for (const auto& entry : mixed.difficulties) {
-        auto options = require(net::default_galactic_lobby_options(mixed, entry, match_seed, 3, false));
+        auto options = require(net::default_galactic_lobby_options(mixed, entry, match_seed, 3, 1));
         expect(net::validate_galactic_lobby(snapshot_of(options, {seat_of(0, 1, options, 1, "host")}), false, list).has_value(),
             "every offered difficulty validates");
     }
     for (const char* wrong : {"Hard_Minor", "Normal_Skirmish", "Easy_Story"}) {
-        auto options = require(net::default_galactic_lobby_options(mixed, "Normal_Default", match_seed, 3, false));
+        auto options = require(net::default_galactic_lobby_options(mixed, "Normal_Default", match_seed, 3, 1));
         options.difficulty = wrong;
         expect(refused(snapshot_of(options, {seat_of(0, 1, options, 1, "host")}), false, list, "does not apply to campaign Mixed"),
             "a difficulty the campaign does not offer is refused with its reason");
     }
-    auto lower = require(net::default_galactic_lobby_options(mixed, "Normal_Default", match_seed, 3, false));
+    auto lower = require(net::default_galactic_lobby_options(mixed, "Normal_Default", match_seed, 3, 1));
     lower.difficulty = "normal_default";
     expect(net::validate_galactic_lobby(snapshot_of(lower, {seat_of(0, 1, lower, 1, "host")}), false, list).has_value(),
         "the difficulty compares in any case, as the AI setup does");
-    auto free_text = require(net::default_galactic_lobby_options(named("NoAi"), "Whatever_Mod", match_seed, 3, false));
+    auto free_text = require(net::default_galactic_lobby_options(named("NoAi"), "Whatever_Mod", match_seed, 3, 1));
     expect(free_text.difficulty == "Whatever_Mod"
         && net::validate_galactic_lobby(snapshot_of(free_text, {seat_of(0, 1, free_text, 1, "host")}), false, list).has_value(),
         "a campaign without a list keeps accepting an authored name");
@@ -742,9 +768,10 @@ void staging_validation() {
     Local three_factions;
     three_factions.data.factions[2].is_playable = true;
     const auto three_catalog = three_factions.catalog();
-    auto three = require(net::default_galactic_lobby_options(three_catalog.front(), difficulty, match_seed));
-    three.rows[2].human = true;
-    expect(refused(snapshot_of(three, {}), false, three_catalog, "two human sides"), "a third human side is refused");
+    auto three = require(net::default_galactic_lobby_options(three_catalog.front(), difficulty, match_seed, 3, 3));
+    expect(three.rows[0].human && three.rows[1].human && three.rows[2].human, "a room can plan every playable faction (D1, no constant of two)");
+    expect(net::validate_galactic_lobby(snapshot_of(three, {seat_of(0, 1, three, 1, "host"), seat_of(1, 2, three, 2, "guest"),
+        seat_of(2, 3, three, 3, "third")}), true, three_catalog).has_value(), "a third human side validates at Start");
     // Seats.
     expect(refused(snapshot_of(two, {seat_of(0, 1, two, 1, "host"), seat_of(1, 2, two, 3, "guest")}), false, catalog), "a seat on a row no human may hold is refused");
     auto wrong_side = seat_of(1, 2, two, 2, "guest"); wrong_side.selection.team = 1;
@@ -936,6 +963,22 @@ public:
         require(host().admit(peer, "identity-" + std::to_string(peer), seat.selection, row, revision()));
         rounds(3);
     }
+    // D8: the seat the lobby's pump gives a newcomer: a planned row nobody holds, else it claims the first AI playable faction
+    // (the admission hook plans the row), else it shares the emptiest planned row. Returns the faction row (player ID) it sits on.
+    gc::PlayerId admit_newcomer(unsigned peer, const std::string& name) {
+        const auto options = require(net::decode_galactic_lobby_game(host().snapshot().game));
+        const gc::MpLobbyCampaign* campaign = nullptr;
+        for (const auto& candidate : peers[0].backend->campaigns()) if (candidate.name == options.campaign) campaign = &candidate;
+        expect(campaign != nullptr, "the room's campaign is in the host's catalog");
+        const auto row = net::galactic_lobby_newcomer_row(options, *campaign, host().snapshot());
+        expect(row.has_value(), "the room has a row for the newcomer");
+        const auto found = std::find_if(options.rows.begin(), options.rows.end(), [&](const auto& value) { return value.player == *row; });
+        const auto side = net::galactic_lobby_side(options, *row);
+        net::LobbySelection selection{name, found->faction, 0, side.value_or(0U), *row};
+        require(host().admit(peer, "identity-" + std::to_string(peer), selection, *row, revision()));
+        rounds(3);
+        return *row;
+    }
     void round(std::uint64_t delta = 1) {
         network.round += delta;
         for (auto& session : sessions) require(session.pump(network.round));
@@ -986,6 +1029,10 @@ public:
         value.follow_choice = [this, peer](const net::LobbySnapshot& before, net::LobbySnapshot& candidate, net::PeerIndex who) {
             if (peers[peer].backend->checkpoint_view()) return eawr::core::Result<void>::success();
             return net::follow_galactic_choice(before, candidate, who, peers[peer].backend->campaigns());
+        };
+        value.follow_departure = [this, peer](const net::LobbySnapshot& before, net::LobbySnapshot& after, net::PeerIndex who) {
+            if (peers[peer].backend->checkpoint_view()) return;
+            net::follow_galactic_departure(before, after, who, peers[peer].backend->campaigns());
         };
         value.offer = [this, peer](const net::LobbySnapshot& snapshot, const std::vector<net::SetupSeat>& seats) {
             auto result = peers[peer].backend->offer(snapshot, seats);
@@ -2010,8 +2057,8 @@ void free_faction_choice() {
     three_factions.data.factions[2].is_playable = true; // REBEL, EMPIRE and UNDERWORLD are all playable
     const auto catalog = three_factions.catalog();
     const auto& campaign = catalog.front();
-    const auto options = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed));
-    expect(options.rows[0].human && options.rows[1].human && !options.rows[2].human, "the room plans the first two playable factions");
+    const auto options = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed, 3, 2));
+    expect(options.rows[0].human && options.rows[1].human && !options.rows[2].human, "two planned rows leave the third playable faction to be taken");
     const auto before = snapshot_of(options, {seat_of(0, 1, options, 1, "host"), seat_of(1, 2, options, 2, "guest")});
     // The pure rule.
     const auto moved = net::galactic_lobby_options_with_seat_on(options, campaign, before, 1, 3);
@@ -2021,8 +2068,9 @@ void free_faction_choice() {
     expect(!net::galactic_lobby_options_with_seat_on(options, campaign, before, 1, 4).has_value(), "a neutral faction cannot be taken");
     expect(!net::galactic_lobby_options_with_seat_on(options, campaign, before, 1, 9).has_value(), "an unknown row cannot be taken");
     const auto shared = snapshot_of(options, {seat_of(0, 1, options, 2, "host"), seat_of(1, 2, options, 2, "guest")});
-    expect(!net::galactic_lobby_options_with_seat_on(options, campaign, shared, 1, 3).has_value(),
-        "a move that would plan a third human side is refused (the other seat still holds the row it leaves)");
+    const auto third_side = net::galactic_lobby_options_with_seat_on(options, campaign, shared, 1, 3);
+    expect(third_side.has_value() && third_side->rows[0].human && third_side->rows[1].human && third_side->rows[2].human,
+        "a third human side is planned when the other seat still holds the row the guest leaves");
     Local two_playable;
     expect(!net::galactic_lobby_options_with_seat_on(options, two_playable.catalog().front(), before, 1, 3).has_value(),
         "a faction the campaign does not let a player hold cannot be taken");
@@ -2035,16 +2083,11 @@ void free_faction_choice() {
     expect(candidate.seats[0].selection.team == 1 && candidate.seats[1].selection.team == 2 && candidate.seats[1].selection.faction == "UNDERWORLD",
         "every seat's side and faction follow its row");
     expect(net::validate_galactic_lobby(candidate, false, catalog).has_value(), "the reshaped room validates");
-    auto crowded = shared;
-    crowded.seats[1].selection.slot = 3; crowded.seats[1].selection.faction = "UNDERWORLD";
-    const auto refusal = net::follow_galactic_choice(shared, crowded, 1, catalog);
-    expect(!refusal && refusal.error().message.find("at most two human sides") != std::string::npos,
-        "a third side is refused with the reason");
     // The faction dropdown offers the same rows the hook accepts.
     const auto offered = eawr::viewer::galactic::faction_choices(options, eawr::data::Catalog{}, nullptr, campaign, before, 1);
     expect(offered.size() == 3 && offered[2].row == 2, "the guest's dropdown lists the free playable faction");
     const auto host_offered = eawr::viewer::galactic::faction_choices(options, eawr::data::Catalog{}, nullptr, campaign, shared, 1);
-    expect(host_offered.size() == 2, "a faction that would make a third side is not listed");
+    expect(host_offered.size() == 3, "every playable faction is listed while the human side ceiling allows another side");
     expect(eawr::viewer::galactic::faction_choice_player(options, 2, campaign) == std::optional<gc::PlayerId>{3}
         && !eawr::viewer::galactic::faction_choice_player(options, 3, campaign).has_value(),
         "the free faction maps to its player, a neutral row to none");
@@ -2052,7 +2095,7 @@ void free_faction_choice() {
     // A live room: the guest picks the free faction through the lobby, the host's session reshapes the room.
     std::vector<std::shared_ptr<Local>> locals;
     for (int i = 0; i < 2; ++i) { locals.push_back(std::make_shared<Local>()); locals.back()->data.factions[2].is_playable = true; }
-    GcRoom room(locals, require(net::default_galactic_lobby_options(locals[0]->catalog().front(), difficulty, match_seed)), 1, 0, true);
+    GcRoom room(locals, require(net::default_galactic_lobby_options(locals[0]->catalog().front(), difficulty, match_seed, 3, 2)), 1, 0, true);
     room.admit(1, 2, "guest");
     expect(room.host().snapshot().seats.size() == 2, "the guest holds the Empire row");
     // The host opens its options modal now: it keeps a copy of the options, rows included.
@@ -2283,6 +2326,354 @@ void nine_seat_room() {
     for (unsigned peer = 0; peer < 8; ++peer) {
         expect(results[peer].setup().adapter().state_hash() == hex(payload.roster.tick_zero), "peer " + std::to_string(peer) + " reached the agreed tick zero");
         expect(room.peers[peer].agreement()->content == room.peers[0].agreement()->content, "peer " + std::to_string(peer) + " derived the same identities");
+    }
+}
+
+// ---- D8 (#8071): a row for every playable faction; a player takes a row to make it human ----
+
+// The pure placement rule and the room's planned rows, on the stock shape (three playable factions and a neutral one).
+void d8_default_rows_and_placement() {
+    Local stock;
+    stock.data.factions[2].is_playable = true; // REBEL, EMPIRE and UNDERWORLD
+    const auto catalog = stock.catalog();
+    const auto& campaign = catalog.front();
+    const auto options = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed));
+    expect(options.rows.size() == 4 && options.rows[0].human && !options.rows[1].human && !options.rows[2].human && !options.rows[3].human,
+        "a new room plans the host's row only; every other playable faction starts as an AI faction");
+    const auto two = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed, 3, 2));
+    expect(two.rows[0].human && two.rows[1].human && !two.rows[2].human, "a caller may still plan two rows");
+    const auto many = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed, 3, 99));
+    expect(many.rows[0].human && many.rows[1].human && many.rows[2].human && !many.rows[3].human,
+        "planned rows are bounded by the campaign's playable factions, never the neutral one");
+    const auto none = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed, 3, 0));
+    expect(none.rows[0].human && !none.rows[1].human, "a room always plans the host's row");
+
+    const auto room = snapshot_of(options, {seat_of(0, 1, options, 1, "host")});
+    expect(net::galactic_lobby_newcomer_row(options, campaign, room) == std::optional<gc::PlayerId>{2},
+        "a newcomer claims the first playable faction that is still an AI faction");
+    auto planned = options; planned.rows[2].human = true;
+    expect(net::galactic_lobby_newcomer_row(planned, campaign, snapshot_of(planned, {seat_of(0, 1, planned, 1, "host")}))
+            == std::optional<gc::PlayerId>{3},
+        "a row the host planned and nobody holds comes before an AI faction");
+    auto held = options; held.rows[1].human = held.rows[2].human = true;
+    expect(net::galactic_lobby_newcomer_row(held, campaign, snapshot_of(held, {seat_of(0, 1, held, 1, "a"), seat_of(1, 2, held, 2, "b"),
+        seat_of(2, 3, held, 3, "c")})) == std::optional<gc::PlayerId>{1},
+        "with every faction held the newcomer shares the emptiest row (a co-op seat)");
+    auto coop = campaign; coop.single_player_rules = true;
+    const auto coop_room = require(net::default_galactic_lobby_options(coop, difficulty, match_seed, 3, 3));
+    expect(coop_room.rows[0].human && !coop_room.rows[1].human, "a co-op campaign plans exactly one row");
+    expect(net::galactic_lobby_newcomer_row(coop_room, coop, snapshot_of(coop_room, {seat_of(0, 1, coop_room, 1, "host")}))
+            == std::optional<gc::PlayerId>{1},
+        "a co-op campaign seats the newcomer beside the host, never on an AI faction");
+    expect(net::galactic_lobby_newcomer_row(options, campaign, net::LobbySnapshot{}).has_value(),
+        "a room with a planned row always has a place for a newcomer");
+    auto no_rows = options; for (auto& row : no_rows.rows) row.human = false;
+    expect(!net::galactic_lobby_newcomer_row(no_rows, campaign, room).has_value(), "a room with no planned row has no place");
+}
+
+// Three peers on the stock shape: each newcomer takes the next faction, a leaver gives its faction back to the AI, the ready
+// rule unreadies only the seats whose side moved, and the room starts with three human sides.
+void d8_three_peer_lobby() {
+    // Three playable factions, one AI faction and a neutral one.
+    const auto three = [] {
+        std::vector<std::shared_ptr<Local>> locals;
+        for (int i = 0; i < 3; ++i) locals.push_back(std::make_shared<Local>(make_wide_data(3, 1)));
+        return locals;
+    };
+    const auto rows_of = [](GcRoom& room) { return require(net::decode_galactic_lobby_game(room.host().snapshot().game)); };
+    {
+        auto locals = three();
+        GcRoom room(locals, require(net::default_galactic_lobby_options(locals[0]->catalog().front(), difficulty, match_seed)), 1);
+        expect(room.host().snapshot().seats.size() == 1 && rows_of(room).rows[0].human && !rows_of(room).rows[1].human,
+            "the room opens with the host's row planned and the other playable factions as AI");
+        expect(room.admit_newcomer(1, "guest") == 2U, "the first guest takes the Empire row");
+        auto planned = rows_of(room);
+        expect(planned.rows[0].human && planned.rows[1].human && !planned.rows[2].human
+                && room.host().snapshot().seats[1].selection.team == 2 && room.host().snapshot().seats[1].selection.faction == "PLAYER_2",
+            "claiming the row plans it: a second human side");
+        // Ready for both seats; the third player's claim of the last faction moves no side, so both stay ready.
+        room.round(2000);
+        require(room.sessions[0].request(net::LobbyAction::ready, room.revision()));
+        require(room.sessions[1].request(net::LobbyAction::ready, room.revision()));
+        room.rounds(3);
+        expect(room.host().snapshot().seats[0].ready && room.host().snapshot().seats[1].ready, "host and guest are ready");
+        expect(room.admit_newcomer(2, "third") == 3U, "the second guest takes the Underworld row");
+        const auto after = room.host().snapshot();
+        expect(after.seats.size() == 3 && after.seats[0].ready && after.seats[1].ready && !after.seats[2].ready,
+            "a claim that moves no other seat's side keeps their ready");
+        expect(after.seats[2].selection.team == 3 && rows_of(room).rows[2].human, "the third human side is planned");
+        expect(net::validate_galactic_lobby(after, true, locals[0]->catalog()).has_value(), "three human sides validate at Start");
+        // The guest on the second side leaves: its row is an AI faction again and the third side moves up to the second.
+        room.round(2000);
+        require(room.sessions[2].request(net::LobbyAction::ready, room.revision()));
+        room.rounds(3);
+        require(room.sessions[1].request(net::LobbyAction::leave, room.revision()));
+        room.rounds(4);
+        const auto left = room.host().snapshot();
+        const auto left_rows = rows_of(room);
+        expect(left.seats.size() == 2 && left_rows.rows[0].human && !left_rows.rows[1].human && left_rows.rows[2].human,
+            "a leaver's row goes back to the AI");
+        expect(left.seats[1].selection.slot == 3 && left.seats[1].selection.team == 2 && left.seats[0].ready && !left.seats[1].ready,
+            "the seat whose side moved is unreadied; the seat whose side stayed keeps its ready");
+        expect(net::validate_galactic_lobby(left, false, locals[0]->catalog()).has_value(), "the room after a leave validates");
+    }
+    {
+        // A claim of an earlier faction moves the host's side: the host's ready is withdrawn, the others' stay.
+        auto locals = three();
+        auto options = require(net::default_galactic_lobby_options(locals[0]->catalog().front(), difficulty, match_seed));
+        options.rows[0].human = false; options.rows[2].human = true; // the host plays the third faction
+        GcRoom room(locals, options, 3);
+        expect(room.admit_newcomer(1, "guest") == 1U, "the first newcomer takes the first AI faction");
+        room.round(2000);
+        require(room.sessions[0].request(net::LobbyAction::ready, room.revision()));
+        require(room.sessions[1].request(net::LobbyAction::ready, room.revision()));
+        room.rounds(3);
+        expect(room.host().snapshot().seats[0].ready && room.host().snapshot().seats[1].ready
+                && room.host().snapshot().seats[0].selection.team == 2 && room.host().snapshot().seats[1].selection.team == 1,
+            "host and guest are ready on sides two and one");
+        expect(room.admit_newcomer(2, "third") == 2U, "the second newcomer takes the remaining faction between them");
+        const auto after = room.host().snapshot();
+        expect(after.seats[0].selection.team == 3 && after.seats[1].selection.team == 1 && after.seats[2].selection.team == 2,
+            "the sides follow the faction order");
+        expect(!after.seats[0].ready && after.seats[1].ready && !after.seats[2].ready,
+            "only the seat whose side moved is unreadied by the per-seat rule");
+    }
+    {
+        // Three real peers start: three human sides in the offer, one tick-zero digest on every peer.
+        auto locals = three();
+        GcRoom room(locals, require(net::default_galactic_lobby_options(locals[0]->catalog().front(), difficulty, match_seed)), 1);
+        room.admit_newcomer(1, "guest");
+        room.admit_newcomer(2, "third");
+        room.commit();
+        std::vector<net::LobbyResult> results;
+        for (auto& session : room.sessions) results.push_back(require(session.take_result()));
+        const auto payload = require(net::decode_galactic_setup(results[0].setup().offer().setup));
+        expect(payload.roster.teams.size() == 3 && payload.roster.seats.size() == 4 && results[0].setup().offer().seats.size() == 3,
+            "the room's Start hands three human sides to setup, one AI faction left");
+        for (std::size_t peer = 0; peer < results.size(); ++peer) {
+            expect(results[peer].setup().adapter().completed_tick() == 0, "the barrier never steps tick one");
+            expect(results[peer].setup().adapter().state_hash() == hex(payload.roster.tick_zero),
+                "peer " + std::to_string(peer) + " reached the agreed tick zero");
+            expect(room.peers[peer].agreement()->content == room.peers[0].agreement()->content, "every peer derived the same identities");
+        }
+    }
+}
+
+// The made-up eight-faction campaign: eight rows, eight planned sides, a ninth seat cannot be a ninth side.
+void d8_eight_faction_campaign() {
+    const auto wide = [] { return std::make_shared<Local>(make_wide_data(8, 1)); };
+    std::vector<std::shared_ptr<Local>> locals;
+    for (int i = 0; i < 9; ++i) locals.push_back(wide());
+    const auto catalog = locals[0]->catalog();
+    const auto& campaign = catalog.front();
+    expect(campaign.factions.size() == 10, "eight playable factions, one AI faction and a neutral one");
+    GcRoom room(locals, require(net::default_galactic_lobby_options(campaign, difficulty, match_seed)), 1);
+    for (unsigned peer = 1; peer < 8; ++peer)
+        expect(room.admit_newcomer(peer, "p" + std::to_string(peer)) == peer + 1U, "each newcomer takes the next faction");
+    const auto options = require(net::decode_galactic_lobby_game(room.host().snapshot().game));
+    for (std::size_t row = 0; row < 8; ++row) expect(options.rows[row].human, "all eight playable rows are human sides");
+    expect(!options.rows[8].human && !options.rows[9].human, "the AI-only and neutral rows stay AI");
+    const auto full = room.host().snapshot();
+    expect(full.seats.size() == 8 && full.seats[7].selection.team == 8, "eight seats, eight sides");
+    expect(net::validate_galactic_lobby(full, true, catalog).has_value(), "eight human sides validate at Start");
+    const auto draft = require(net::galactic_roster_draft(full, catalog));
+    expect(draft.teams.size() == 8 && draft.seats.size() == 9, "the roster has eight human sides and the AI faction");
+    // The ninth peer finds no free faction: it shares a row, which the human seat limit refuses at Ready and Start, with the reason.
+    expect(room.admit_newcomer(8, "ninth") == 1U, "with every playable faction held, the ninth seat is a co-op seat on the first row");
+    const auto nine = room.host().snapshot();
+    expect(net::validate_galactic_lobby(nine, false, catalog).has_value(), "staging holds the ninth seat");
+    const auto refusal = net::validate_galactic_lobby(nine, true, catalog);
+    expect(!refusal && refusal.error().message.find("at most 8 human seats") != std::string::npos
+            && refusal.error().message.find("second one") != std::string::npos,
+        "Ready and Start say that no faction can take a second player once all eight have one");
+}
+
+// A ninth playable faction: the human side ceiling is what stops a ninth side, not the campaign's playable count.
+void d8_side_ceiling() {
+    Local wide(make_wide_data(9, 0));
+    const auto catalog = wide.catalog();
+    const auto& campaign = catalog.front();
+    const auto options = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed, 3, 8));
+    for (std::size_t row = 0; row < 8; ++row) expect(options.rows[row].human, "eight sides are planned");
+    expect(!options.rows[8].human, "the ninth playable faction stays AI");
+    std::vector<net::LobbySeat> seats;
+    for (std::uint32_t peer = 0; peer < 8; ++peer) seats.push_back(seat_of(peer, peer + 1, options, peer + 1, "p" + std::to_string(peer)));
+    const auto before = snapshot_of(options, seats);
+    const auto moved_row = net::galactic_lobby_options_with_seat_on(options, campaign, before, 7, 9);
+    expect(moved_row.has_value() && !moved_row->rows[7].human && moved_row->rows[8].human, "a seat moving to the ninth faction closes the row it leaves");
+    auto shared = seats; shared.push_back(seat_of(8, 9, options, 8, "ninth"));
+    const auto refused_move = net::galactic_lobby_options_with_seat_on(options, campaign, snapshot_of(options, shared), 7, 9);
+    expect(!refused_move.has_value(), "a ninth side is refused while another seat still holds the row the seat leaves");
+    auto candidate = snapshot_of(options, shared);
+    candidate.seats[7].selection.slot = 9; candidate.seats[7].selection.faction = "PLAYER_9"; candidate.seats[7].selection.team = 0;
+    const auto refusal = net::follow_galactic_choice(snapshot_of(options, shared), candidate, 7, catalog);
+    expect(!refusal && refusal.error().message.find("at most 8 human sides") != std::string::npos,
+        "the refusal names the ceiling");
+    auto nine = options; nine.rows[8].human = true;
+    expect(refused(snapshot_of(nine, {}), false, catalog, "at most 8 human sides"), "nine planned sides are refused");
+    const auto offered = eawr::viewer::galactic::faction_choices(options, eawr::data::Catalog{}, nullptr, campaign,
+        snapshot_of(options, shared), 7);
+    expect(offered.size() == 8, "the dropdown lists no faction that would make a ninth side");
+}
+
+// D8 (#8071), review fix: a dialog with fewer player rows than the campaign has factions never seats a player on a row it does not draw.
+// A campaign switch in staging with guests seated: every guest keeps (claims) a row of its own; only a co-op campaign, or a room with no
+// row left on the dialog, shares the host's row.
+void d8_campaign_switch() {
+    {
+        Local stock(make_wide_data(3, 1));
+        const auto catalog = stock.catalog();
+        const auto& campaign = catalog.front();
+        const auto fresh = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed));
+        auto room = snapshot_of(fresh, {seat_of(0, 1, fresh, 1, "host"), seat_of(1, 2, fresh, 1, "g1"), seat_of(2, 3, fresh, 1, "g2")});
+        const auto switched = net::galactic_lobby_reseat(fresh, campaign, room, 9);
+        expect(switched.has_value() && switched->slots.size() == 3, "a switch re-seats every seat");
+        if (switched) {
+            expect(switched->slots[0] == 1U && switched->slots[1] == 2U && switched->slots[2] == 3U,
+                "the host takes the first planned row and each guest a row of its own, not the host's");
+            std::size_t humans{};
+            for (const auto& row : switched->options.rows) humans += row.human ? 1U : 0U;
+            expect(humans == 3, "the rows the guests claimed are planned: three human sides");
+        }
+        // With two seats only two rows are planned.
+        auto two = snapshot_of(fresh, {seat_of(0, 1, fresh, 1, "host"), seat_of(1, 2, fresh, 1, "g1")});
+        const auto pair = net::galactic_lobby_reseat(fresh, campaign, two, 9);
+        expect(pair && pair->slots[0] == 1U && pair->slots[1] == 2U, "one guest: its own row");
+        // A co-op campaign is one side: every seat shares the host's row.
+        auto coop = campaign;
+        coop.single_player_rules = true;
+        const auto coop_fresh = require(net::default_galactic_lobby_options(coop, difficulty, match_seed));
+        const auto shared = net::galactic_lobby_reseat(coop_fresh, coop, room, 9);
+        expect(shared && shared->slots[0] == shared->slots[1] && shared->slots[1] == shared->slots[2], "a co-op campaign seats everyone on the host's row");
+    }
+    {
+        // A room with guests waits for its seats: a multiplayer campaign with fewer playable factions could never start, so the switch is
+        // refused with the reason; a campaign with enough rows, a co-op one, and a room with only the host are not.
+        Local three(make_wide_data(3, 1)), two(make_wide_data(2, 1));
+        const auto stock = three.catalog();
+        const auto small = two.catalog();
+        const auto fresh = require(net::default_galactic_lobby_options(stock.front(), difficulty, match_seed));
+        auto room = snapshot_of(fresh, {seat_of(0, 1, fresh, 1, "host"), seat_of(1, 2, fresh, 1, "g1"), seat_of(2, 3, fresh, 1, "g2")});
+        room.capacity = 3;
+        const auto refusal = net::galactic_lobby_switch_refusal(small.front(), room);
+        expect(refusal.has_value() && refusal->find("3 players") != std::string::npos && refusal->find("only 2 factions") != std::string::npos,
+            "a room for three players refuses a campaign with two factions, naming both numbers");
+        expect(!net::galactic_lobby_switch_refusal(stock.front(), room).has_value(), "a campaign with a faction for every seat is fine");
+        auto coop = small.front();
+        coop.single_player_rules = true;
+        expect(!net::galactic_lobby_switch_refusal(coop, room).has_value(), "a co-op campaign seats everyone on one side");
+        auto alone = room;
+        alone.seats.resize(1);
+        expect(!net::galactic_lobby_switch_refusal(small.front(), alone).has_value(), "a room with only the host is opened again instead");
+    }
+    {
+        // Eight playable factions on a four row dialog: three rows of their own, then shared rows; nobody on a hidden row.
+        Local wide(make_wide_data(8, 1));
+        const auto catalog = wide.catalog();
+        const auto& campaign = catalog.front();
+        const auto fresh = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed));
+        std::vector<net::LobbySeat> seats{seat_of(0, 1, fresh, 1, "host")};
+        for (std::uint32_t peer = 1; peer <= 4; ++peer) seats.push_back(seat_of(peer, peer + 1, fresh, 1, "g" + std::to_string(peer)));
+        const auto room = snapshot_of(fresh, std::move(seats));
+        const auto switched = net::galactic_lobby_reseat(fresh, campaign, room, 4);
+        expect(switched.has_value(), "five seats on a four row dialog are placed");
+        if (switched) {
+            std::size_t humans{};
+            for (const auto& row : switched->options.rows) humans += row.human ? 1U : 0U;
+            expect(humans == 3 && switched->slots[1] == 2U && switched->slots[2] == 3U && switched->slots[3] <= 3U && switched->slots[4] <= 3U,
+                "three rows of their own, the rest share a drawn row");
+        }
+    }
+}
+
+void d8_dialog_row_limit() {
+    // The limit: eight drawn factions on a nine row dialog all fit; nine drawn on a four row dialog keep the last row for the line.
+    {
+        Local wide(make_wide_data(8, 1));
+        const auto catalog = wide.catalog();
+        const auto& campaign = catalog.front(); // eight playable, one AI faction (nine drawn) and a neutral one (never drawn)
+        expect(net::galactic_lobby_human_row_limit(campaign, 0) == 8, "no dialog: the human side ceiling");
+        expect(net::galactic_lobby_human_row_limit(campaign, 9) == 8 && net::galactic_lobby_human_row_limit(campaign, 12) == 8,
+            "nine drawn factions on a nine row dialog all fit: the ceiling");
+        expect(net::galactic_lobby_human_row_limit(campaign, 4) == 3, "four rows for nine factions: three players and the line");
+        expect(net::galactic_lobby_human_row_limit(campaign, 1) == 1, "a one row dialog draws its player and cannot draw a line");
+        Local few(make_wide_data(3, 0));
+        expect(net::galactic_lobby_human_row_limit(few.catalog().front(), 3) == 3 && net::galactic_lobby_human_row_limit(few.catalog().front(), 4) == 4,
+            "three drawn factions on a three row dialog: no row is cut, so no line is kept");
+        // The room opens for every playable row by default (D8): three factions, three humans; eight factions on nine seats, eight; no
+        // fewer than two and no more than the transport's seats.
+        expect(net::galactic_lobby_default_humans(few.catalog().front(), 9) == 3, "three playable factions: a room for three humans");
+        expect(net::galactic_lobby_default_humans(campaign, 9) == 8, "eight playable factions: the human side ceiling");
+        expect(net::galactic_lobby_default_humans(campaign, 5) == 5, "the transport's seats cap the default");
+        Local one(make_wide_data(1, 2));
+        expect(net::galactic_lobby_default_humans(one.catalog().front(), 9) == 2, "a room is for at least two humans");
+        expect(net::galactic_lobby_max_humans(campaign, 9) == 8 && net::galactic_lobby_max_humans(few.catalog().front(), 9) == 3,
+            "the dropdown offers no more humans than the playable factions, never above eight: no room for nine");
+        Local many(make_wide_data(8, 1));
+        expect(net::galactic_lobby_max_humans(many.catalog().front(), 12) == 8, "a nine seat map still offers eight at most");
+        // A co-op campaign (one side, co-op seats) keeps two as its default, the seat ceiling as its most.
+        auto coop = few.catalog().front();
+        coop.single_player_rules = true;
+        expect(net::galactic_lobby_default_humans(coop, 9) == 2 && net::galactic_lobby_max_humans(coop, 9) == 8,
+            "a co-op campaign opens for two humans, all on one side");
+    }
+    // A four row mod dialog on the eight faction campaign, five humans: the room seats the first three on rows of their own; every other
+    // joiner shares one of those rows (a co-op seat, drawn), and a claim of a row past the limit is refused with the dialog named.
+    {
+        std::vector<std::shared_ptr<Local>> locals;
+        for (int i = 0; i < 6; ++i) locals.push_back(std::make_shared<Local>(make_wide_data(8, 1)));
+        const auto catalog = locals[0]->catalog();
+        const auto& campaign = catalog.front();
+        const auto options = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed));
+        auto room = snapshot_of(options, {seat_of(0, 1, options, 1, "host")});
+        auto planned = options;
+        const auto seat_in = [&](const net::GalacticLobbyOptions& rows, const net::LobbySnapshot& before, const net::PeerIndex peer) {
+            const auto row = net::galactic_lobby_newcomer_row(rows, campaign, before, 4);
+            expect(row.has_value(), "a newcomer always has a row");
+            auto next = before;
+            next.seats.push_back(seat_of(peer, peer + 1, rows, *row, "p" + std::to_string(peer)));
+            return std::make_pair(*row, next);
+        };
+        for (net::PeerIndex peer = 1; peer <= 2; ++peer) {
+            const auto [row, next] = seat_in(planned, room, peer);
+            expect(row == peer + 1U && !planned.rows[row - 1U].human, "a newcomer claims the next AI faction while the dialog has rows");
+            auto candidate = next;
+            require(net::follow_galactic_choice(room, candidate, peer, catalog, 4));
+            planned = require(net::decode_galactic_lobby_game(candidate.game));
+            room = candidate;
+        }
+        std::size_t humans{};
+        for (const auto& row : planned.rows) humans += row.human ? 1U : 0U;
+        expect(humans == 3 && !planned.rows[3].human, "three rows are planned; the fourth dialog row is the line");
+        // The fourth and fifth humans do not claim a fourth row: they share one that is drawn.
+        for (net::PeerIndex peer = 3; peer <= 4; ++peer) {
+            const auto [row, next] = seat_in(planned, room, peer);
+            expect(row <= 3U && planned.rows[row - 1U].human, "past the limit a newcomer shares a planned row, never claims a hidden one");
+            auto candidate = next;
+            require(net::follow_galactic_choice(room, candidate, peer, catalog, 4));
+            expect(require(net::decode_galactic_lobby_game(candidate.game)) == planned, "a shared row changes no row");
+            room = candidate;
+        }
+        expect(room.seats.size() == 5, "five humans in the room, all on drawn rows");
+        for (const auto& seat : room.seats) expect(seat.selection.slot <= 3U, "no seat sits on a row the dialog does not draw");
+        // A guest that asks for a hidden faction is refused, with the dialog named; without a dialog the same choice stands.
+        auto asking = room;
+        asking.seats[4].selection.slot = 6; asking.seats[4].selection.faction = "PLAYER_6"; asking.seats[4].selection.team = 0;
+        const auto refusal = net::follow_galactic_choice(room, asking, 4, catalog, 4);
+        expect(!refusal && refusal.error().message.find("draws only 3 player rows") != std::string::npos,
+            "the claim of a hidden row is refused with the window's row count named");
+        auto without = room;
+        without.seats[4].selection.slot = 6; without.seats[4].selection.faction = "PLAYER_6"; without.seats[4].selection.team = 0;
+        expect(net::follow_galactic_choice(room, without, 4, catalog).has_value(), "no dialog, no limit: the same claim is allowed");
+        expect(!net::galactic_lobby_options_with_seat_on(planned, campaign, room, 4, 6, 4).has_value()
+                && net::galactic_lobby_options_with_seat_on(planned, campaign, room, 4, 6).has_value(),
+            "the faction list offers no hidden row to a window that cannot draw it");
+        // The room's own validation (a host edit that plans a fourth row, a loaded save) is refused the same way.
+        auto fourth = planned; fourth.rows[3].human = true;
+        const auto check = net::validate_galactic_lobby(snapshot_of(fourth, {}), false, catalog, 4);
+        expect(!check && check.error().message.find("draws only 3 player rows") != std::string::npos, "a fourth planned row is refused by the room");
+        expect(net::validate_galactic_lobby(snapshot_of(fourth, {}), false, catalog).has_value(), "the same room validates without a dialog limit");
+        expect(net::validate_galactic_lobby(snapshot_of(planned, {}), false, catalog, 4).has_value(), "three rows validate on four");
     }
 }
 
@@ -3471,6 +3862,34 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
             expect(seats[0].player == 2 && seats[1].player == 2, "both seats share the authored human faction");
             expect(host->lobby_galactic_game(options), "host can return to multiplayer campaigns");
             wait([&] { return synchronized() && host->lobby_state()->snapshot.game.map == "Multiplayer"; });
+            {
+                // D8: back on a multiplayer campaign the guest has a faction row of its own again, not the host's.
+                const auto back = host->lobby_state()->snapshot.seats;
+                expect(back.size() == 2 && back[0].selection.slot == 1 && back[1].selection.slot == 2 && back[0].player != back[1].player,
+                    "after the switch back each seat holds its own faction row");
+            }
+            {
+                // The same with the campaign's fresh default (the host's row planned only, what the lobby screen publishes on a switch):
+                // the guest claims the next row, so the room plans two human sides again.
+                expect(host->lobby_galactic_game(coop), "host switches to the co-op campaign again");
+                wait([&] { return synchronized() && host->lobby_state()->snapshot.game.map == "SoloEmpire"; });
+                const auto* multiplayer = cp::find_mp_lobby_campaign(campaigns, "Multiplayer");
+                expect(multiplayer != nullptr, "the multiplayer campaign is in the room list");
+                if (multiplayer) {
+                    const auto fresh_default = require(net::default_galactic_lobby_options(*multiplayer, difficulty, match_seed));
+                    expect(host->lobby_galactic_game(fresh_default), "host switches back to the multiplayer campaign with its fresh default");
+                    wait([&] { return synchronized() && host->lobby_state()->snapshot.game.map == "Multiplayer"; });
+                    const auto again = host->lobby_state()->snapshot;
+                    const auto planned = require(net::decode_galactic_lobby_game(again.game));
+                    std::size_t humans{};
+                    for (const auto& row : planned.rows) humans += row.human ? 1U : 0U;
+                    expect(again.seats.size() == 2 && humans == 2 && again.seats[0].selection.slot != again.seats[1].selection.slot
+                            && again.seats[0].player != again.seats[1].player,
+                        "the guest claims its own row on the fresh default: two planned rows, one seat each");
+                    expect(host->lobby_galactic_game(options), "host restores the room options");
+                    wait([&] { return synchronized() && host->lobby_state()->snapshot.game.map == "Multiplayer"; });
+                }
+            }
             expect(host->lobby_galactic_checkpoint(options, {{0, {11}, 1}, {1, {12}, 2}}), "restore separate rows for later checks");
             wait([&] { return synchronized() && host->lobby_state()->snapshot.seats[0].player == 1; });
         }
@@ -3665,24 +4084,34 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
     host->cancel(); guest->cancel();
 }
 
-void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false) {
+// `claims` is the room the lobby screen opens for a campaign (D8, #8071) through the same seat path: the host's "Human players"
+// count is the seats it configures (configure_seats, the room's capacity and the mesh), and the room opens with the default options,
+// the host's row only. `count` peers then join a stock-shaped campaign (three playable factions, one AI faction, a neutral one) and
+// each claims the next row, so the room starts with `count` human sides and the rest of the factions AI.
+// `modded` is a campaign room whose host mounts a mod list (#8195): every guest holds its mod review for two seconds after all of
+// them are waiting (a player reading the "Mods differ" box, a harness with nobody to answer it), the host must keep every pending
+// guest in the room and show each as still checking, and once all have answered the room reaches staging and a GC start.
+void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false, bool claims = false, bool modded = false) {
     std::vector<std::shared_ptr<Local>> locals;
     std::vector<std::shared_ptr<viewer::LanMatch>> peers;
     std::vector<gc::PlayerId> owners;
     for (unsigned i = 1; i <= count; ++i) owners.push_back(i);
     for (std::size_t i = 0; i < count; ++i) {
-        locals.push_back(std::make_shared<Local>());
+        locals.push_back(claims ? std::make_shared<Local>(make_wide_data(3, 1)) : std::make_shared<Local>());
         auto match = viewer::make_lan_match();
         match->configure_seats(owners);
         match->configure_lobby("Player " + std::to_string(i + 1), 0, {}, [](const auto&) {
             eawr::core::Diagnostic error; error.code = "EAWR-TEST-0002"; error.message = "GC never builds tactical setup";
             return eawr::core::Result<eawr::sim::tactical::TacticalSetup>::failure(error);
         });
-        match->configure_galactic(std::make_shared<viewer::GalacticLobbyBackend>(locals.back()->content));
+        auto backend = std::make_shared<viewer::GalacticLobbyBackend>(locals.back()->content);
+        if (modded && i == 0) backend->set_mounted_mods({3, 1, 0, 0, 0, 0});
+        match->configure_galactic(std::move(backend));
         peers.push_back(std::move(match));
     }
     peers[0]->host(0);
-    expect(peers[0]->set_galactic_game(two_side_options(*locals[0])), "open nine-seat campaign room");
+    expect(peers[0]->set_galactic_game(claims ? require(net::default_galactic_lobby_options(locals[0]->catalog().front(), difficulty, match_seed))
+                                               : two_side_options(*locals[0])), "open nine-seat campaign room");
     const eawr::skirmish::FixtureOptions none{};
     peers[0]->pump_setup(none);
     for (std::size_t i = 1; i < count; ++i) peers[i]->join("127.0.0.1:" + std::to_string(peers[0]->view().port));
@@ -3690,14 +4119,35 @@ void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false) {
     // workers took 40-96 s on a busy host, and a Ready sent from a stale room revision is not retried by anyone. A refused or
     // ended peer still fails at once; a true hang is ended by this test's ctest TIMEOUT, and a phase that has made no progress
     // for two minutes prints the per-seat state once so the log says what it waited on.
+    std::optional<std::chrono::steady_clock::time_point> reviews_held_since;
+    bool reviews_released = !modded;
+    const auto hold_reviews = [&] {
+        if (reviews_released) return;
+        const bool all_waiting = std::all_of(peers.begin() + 1, peers.end(), [](const auto& peer) { return peer->view().mod_review_pending; });
+        if (!all_waiting) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (!reviews_held_since) {
+            reviews_held_since = now;
+            for (std::size_t i = 1; i < peers.size(); ++i)
+                expect(!peers[i]->lobby_state(), "a guest in its mod review has no lobby view yet");
+        }
+        if (now - *reviews_held_since < std::chrono::seconds(2)) return;
+        const auto host_state = peers[0]->lobby_state();
+        expect(host_state && host_state->mod_checks_known && host_state->mod_checks.size() == count,
+            "the host lists every seat while the guests are reviewing mods");
+        std::size_t checking = 0;
+        for (const auto& row : host_state->mod_checks) checking += row.done ? 0U : 1U;
+        expect(checking == count - 1, "the host shows every reviewing guest as still checking mods");
+        reviews_released = true;
+    };
     const auto wait = [&](const char* phase, const auto& predicate) {
         const auto entered = std::chrono::steady_clock::now();
         bool described = false;
         while (true) {
-            for (const auto& peer : peers) {
-                peer->pump_setup(none);
-                if (peer->view().mod_review_pending) peer->accept_mod_review();
-            }
+            for (const auto& peer : peers) peer->pump_setup(none);
+            hold_reviews();
+            if (reviews_released)
+                for (const auto& peer : peers) if (peer->view().mod_review_pending) peer->accept_mod_review();
             if (predicate()) return;
             for (const auto& peer : peers) expect(peer->view().phase != viewer::LanPhase::ended,
                 "nine-seat campaign connection refused: " + peer->view().message);
@@ -3726,6 +4176,28 @@ void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false) {
         }
         return true;
     });
+    if (claims) {
+        // Every joiner took a seat and claimed the next playable faction: one human side per peer.
+        const auto room = peers[0]->lobby_state()->snapshot;
+        const auto rows = require(net::decode_galactic_lobby_game(room.game));
+        std::size_t humans{};
+        for (const auto& row : rows.rows) humans += row.human ? 1U : 0U;
+        expect(humans == count, "every peer of the room holds a faction row of its own");
+        std::set<gc::PlayerId> held;
+        for (const auto& seat : room.seats) held.insert(seat.selection.slot);
+        expect(held.size() == count && *held.begin() == 1U && *held.rbegin() == count, "the peers claimed the first rows in turn, one each");
+    }
+    if (modded) {
+        // Both sides of the review agree: the host from the guests' acknowledgements, every guest from the host's report.
+        wait("mod checks", [&] {
+            for (const auto& peer : peers) {
+                const auto state = peer->lobby_state();
+                if (!state || !state->mod_checks_known || state->mod_checks.size() != count) return false;
+                for (const auto& row : state->mod_checks) if (!row.done) return false;
+            }
+            return true;
+        });
+    }
     if (count == 9) {
         // The room can stage nine peers, but the agreed GC roster permits at most eight humans.
         for (const auto& peer : peers) {
@@ -3817,7 +4289,7 @@ void installed_stock_native_ai_agreement(const cp::MpLocalContent& local,
     const gc::MpLobbyCampaign& campaign, std::uint64_t seed) {
     // The real AI perception setup must accept every seed the lobby can hand out. The default rows are the owner's
     // layout: two human sides (Rebel host, Empire guest) and the remaining stock faction (Underworld) as AI.
-    auto options = require(net::default_galactic_lobby_options(campaign, difficulty, seed));
+    auto options = require(net::default_galactic_lobby_options(campaign, difficulty, seed, 3, 2));
     expect(options.seed == seed, "the lobby options carry the host's seed");
     options.custom = true; options.credits = 10000; options.allow_heroes = false;
     options.starting_tech = 2; options.maximum_tech = 5;
@@ -4114,7 +4586,7 @@ void faction_captions_and_selection() {
     database.crc_order.push_back(0);
     eawr::data::ui::TextLookup text(database);
     const Local local;
-    const auto host = require(net::default_galactic_lobby_options(local.catalog().front(), difficulty, match_seed));
+    const auto host = require(net::default_galactic_lobby_options(local.catalog().front(), difficulty, match_seed, 3, 2));
     const auto joiner = require(net::decode_galactic_lobby_game(require(net::encode_galactic_lobby_game(host))));
     const auto choices = eawr::viewer::galactic::faction_choices(joiner, catalog.catalog, &text);
     expect(choices.size() == 2 && choices[0].caption == "Republic" && choices[1].caption == "Republic",
@@ -4188,7 +4660,7 @@ int mod_versus_start(const std::string& mod_id) {
     expect(!campaigns.empty(), "mod " + mod_id + " lists a lobby campaign");
     std::size_t ambient_only{};
     for (const auto& campaign : campaigns) {
-        auto options = require(net::default_galactic_lobby_options(campaign, difficulty, 42));
+        auto options = require(net::default_galactic_lobby_options(campaign, difficulty, 42, 3, 2));
         std::vector<gc::PlayerId> humans;
         bool controlled_ai = false;
         for (std::size_t index = 0; index < options.rows.size(); ++index) {
@@ -4327,6 +4799,12 @@ int main(int argc, char** argv) {
         saved_mapping_clears_every_acceptance();
         host_toggles_row_open_ai();
         nine_seat_room();
+        d8_default_rows_and_placement();
+        d8_three_peer_lobby();
+        d8_eight_faction_campaign();
+        d8_side_ceiling();
+        d8_dialog_row_limit();
+        d8_campaign_switch();
         two_sides_with_extra_ai();
         content_mismatch_returns_to_staging();
         mounted_mod_warning();
@@ -4356,6 +4834,9 @@ int main(int argc, char** argv) {
         viewer_many_seat_launch(9);
         viewer_many_seat_launch(8);
         viewer_many_seat_launch(3, true);
+        viewer_many_seat_launch(3, false, true);
+        viewer_many_seat_launch(3, false, false, true);
+        viewer_many_seat_launch(4, false, false, true);
         installed_observer_agreement();
         viewer::shutdown_lan_drains();
         std::cout << "galactic lobby contracts passed: gc2 codec and versioning, campaign list, staging refusals, two-peer and nine-seat rooms, skirmish bytes pinned\n";

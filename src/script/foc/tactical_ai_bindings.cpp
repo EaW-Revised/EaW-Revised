@@ -226,6 +226,31 @@ core::Result<ValueList> evaluate_perception(const Host& host, BindingContext& co
 
 } // namespace
 
+// legacy #1713 (RGC-119): the first live object whose current type is the named one, any owner. The view lists objects in
+// ascending identity (creation order; the retail active-object order is unverified), so the first match is the lowest. nil
+// when nothing matches or the name is unknown. The scan stops at the first match, so it is charged by the units it visited.
+core::Result<ValueList> first_object_of_type(Host& host, BindingContext& context, const std::string& name) {
+    const auto key = upper(name);
+    std::optional<tactical::TypeId> type;
+    if (const auto found = host.types_by_name.find(key); found != host.types_by_name.end()) {
+        type = found->second->type_id;
+    } else if (const auto& names = host.setup.content.catalog_types) {
+        const auto registered = std::lower_bound(names->begin(), names->end(), key,
+            [](const auto& entry, const std::string& value) { return entry.first < value; });
+        if (registered != names->end() && registered->first == key) type = registered->second;
+    }
+    if (!type) return none();
+    std::uint64_t visited = 0;
+    for (const ViewUnit& unit : host.view->units) {
+        ++visited;
+        if (unit.type != *type) continue;
+        context.charge_host_work(visited);
+        return one(handle(handle_game_object, unit.id));
+    }
+    context.charge_host_work(visited);
+    return none();
+}
+
 void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector<core::Diagnostic>& errors, bool install_type_lists,
     bool tactical_world_queries) {
     const auto add = [&](std::string_view name, Binding binding) {
@@ -306,26 +331,7 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
     if (tactical_world_queries) add("Find_First_Object", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const std::string* name = arguments.empty() ? nullptr : as_text(arguments[0]);
         if (name == nullptr) return fail("Find_First_Object expects an original type name");
-        const auto key = upper(*name);
-        std::optional<tactical::TypeId> type;
-        if (const auto found = host->types_by_name.find(key); found != host->types_by_name.end()) {
-            type = found->second->type_id;
-        } else if (const auto& names = host->setup.content.catalog_types) {
-            const auto registered = std::lower_bound(names->begin(), names->end(), key,
-                [](const auto& entry, const std::string& value) { return entry.first < value; });
-            if (registered != names->end() && registered->first == key) type = registered->second;
-        }
-        if (!type) return none();
-        // The scan stops at the first match, so it is charged by the units it visited.
-        std::uint64_t visited = 0;
-        for (const ViewUnit& unit : host->view->units) {
-            ++visited;
-            if (unit.type != *type) continue;
-            context.charge_host_work(visited);
-            return one(handle(handle_game_object, unit.id));
-        }
-        context.charge_host_work(visited);
-        return none();
+        return first_object_of_type(*host, context, *name);
     });
     add("EvaluatePerception", [host](BindingContext& context, const ValueList& arguments) {
         return evaluate_perception(*host, context, arguments);
@@ -516,12 +522,12 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         return one(handle(handle_player, unit->owner));
     });
     object("Get_Position", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
-        if (const auto unit = pending_created_object(*host, context, arguments[0])) return one(position_value(unit->position));
+        if (const auto unit = pending_created_object(*host, context, arguments[0])) return one(position_object(unit->position));
         auto immediate = galactic_immediate_query(context, *host, "galactic.created_position", {arguments[0]});
         if (!immediate || !immediate.value().empty()) return immediate;
         const ViewUnit* unit = live_object(*host, arguments[0]);
         if (unit == nullptr) return none();
-        return one(position_value(unit->position));
+        return one(position_object(unit->position));
     });
     object("Get_Distance", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const ViewUnit* unit = live_object(*host, arguments[0]);
@@ -692,6 +698,84 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
             {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
         return none();
     });
+    // Teleport(position) (debug build): exactly one argument, resolved as a position (a position wrapper, an object or a
+    // plain list; a script error otherwise), then the caller moves to the point (z included) keeping its facing and stops
+    // there. Only in a tactical mode (a script error in the galactic host). The sim applies it through the replay command
+    // queue; a squadron container takes its members along with their offsets, a craft alone is not moved. Garrisons are a
+    // land-battle concept, so there is none to leave here. A dead caller answers nothing.
+    object("Teleport", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if (host->ai_world && host->ai_world->goal_mode() == "GALACTIC")
+            return fail("Teleport: this function may only be used in tactical modes.");
+        const std::size_t count = arguments.size() - 1;
+        if (count != 1)
+            return fail("Teleport: invalid number of parameters.  Expected 1, got " + std::to_string(count) + ".");
+        const auto point = position_of(*host, arguments[1]);
+        if (!point) return fail("Teleport: unable to deduce a position from parameter 1.");
+        context.issue_command(std::string(verb_teleport_position),
+            {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], number(numeric::from_fixed(point->x)),
+             number(numeric::from_fixed(point->y)), number(numeric::from_fixed(point->z))});
+        return none();
+    });
+    // Hide(flag) (debug build): the flag is required and must be a boolean (a script error otherwise); the object's model
+    // and attached sound are hidden or shown. A presentation flag the sim keeps and checkpoints; no combat effect. The
+    // retail "object has no model" error is not hosted (the host has no model table); a dead caller answers nothing.
+    object("Hide", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if (arguments.size() < 2) return fail("Hide: Missing required boolean parameter.");
+        if (!std::holds_alternative<bool>(arguments[1].data)) return fail("Hide: Expected bool parameter.");
+        context.issue_command(std::string(verb_hide), {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
+        return none();
+    });
+    // Set_Selectable(flag) (debug build): exactly one argument (a script error naming
+    // the count otherwise), a dead object warns and answers nothing, a non-boolean is a script error, and an object
+    // without the SELECTABLE behaviour warns ("not selectable") and changes nothing. Otherwise the object is deselected
+    // (its team members too) and its selection data takes the flag: a false flag makes the unit refuse player selection.
+    object("Set_Selectable", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if (arguments.size() != 2)
+            return fail("Set_Selectable: invalid number of parameters.  Expected 1, got " + std::to_string(arguments.size() - 1) + ".");
+        if (!std::holds_alternative<bool>(arguments[1].data)) return fail("Set_Selectable: invalid type for parameter 1.  Expected boolean.");
+        const AiType* type = host->type(unit->type);
+        if (type == nullptr || !type->selectable) {
+            context.report(authoritative::codes::script_warning, "Set_Selectable: this object is not selectable.");
+            return none();
+        }
+        context.issue_command(std::string(verb_selectable), {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
+        return none();
+    });
+    // Cancel_Hyperspace() (TL-17, debug build): reads no argument and answers nothing. A dead object does nothing; outside a
+    // space battle, or on an object without a fighter or simple space locomotor, the call does nothing. Otherwise the sim
+    // ends the object's hyperspace arrival sequence at once (an object that is not arriving is left alone there).
+    object("Cancel_Hyperspace", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if ((host->ai_world && host->ai_world->goal_mode() == "GALACTIC") || (host->world != nullptr ? host->world->domain() : tactical::BattleDomain::space) != tactical::BattleDomain::space)
+            return none();
+        const AiType* type = host->type(unit->type);
+        if (type == nullptr || !type->cancels_hyperspace) return none();
+        context.issue_command(std::string(verb_cancel_hyperspace), {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], number(LuaNumber(0))});
+        return none();
+    });
+    // Cinematic_Hyperspace_In(frames) (debug build): one number (a script error otherwise: none given, or not a number),
+    // an object that cannot move is a script error, and the sim starts the hyperspace arrival sequence at the object's
+    // position. The "type is hyperspace capable" gate is not hosted (no per-type flag here): every mobile type starts it.
+    object("Cinematic_Hyperspace_In", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if ((host->ai_world && host->ai_world->goal_mode() == "GALACTIC") || (host->world != nullptr ? host->world->domain() : tactical::BattleDomain::space) != tactical::BattleDomain::space)
+            return fail("Cinematic_Hyperspace_In: this function may only be used in space mode.");
+        if (arguments.size() < 2) return fail("Cinematic_Hyperspace_In: invalid number of parameters.  Expected interger value for delay frames");
+        if (!std::holds_alternative<LuaNumber>(arguments[1].data)) return fail("Cinematic_Hyperspace_In: invalid type for parameter 1.  Expected number.");
+        const AiType* type = host->type(unit->type);
+        if (type == nullptr || !type->locomotor)
+            return fail("Cinematic_Hyperspace_In: object " + (type != nullptr ? type->name : std::string("object")) + " can't move, so it certainly can't hyperspace.");
+        context.issue_command(std::string(verb_hyperspace_in), {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
+        return none();
+    });
     // Change_Owner(player) (debug build): exactly one argument (a script error otherwise), then a dead object warns and
     // answers nothing, then a non-player argument is a script error. A valid call queues one replay command for the next
     // tick and answers nothing; the same owner is a no-op in the sim. Planets (a faction change on the planetary
@@ -855,6 +939,18 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         return none();
     };
     object("Move_To", move_like);
+    // MV-20: face orders use the same ordered and replayed movement path as player face orders.
+    object("Turn_To_Face", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if (arguments.size() < 2) return fail("Turn_To_Face expects a target");
+        const auto target = position_of(*host, arguments[1]);
+        if (!target) return fail("Turn_To_Face cannot deduce a position");
+        context.issue_command(std::string(verb_face),
+            {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0],
+             number(numeric::from_fixed(target->x)), number(numeric::from_fixed(target->y)), number(numeric::from_fixed(target->z))});
+        return none();
+    });
     // FH-40, space-orders OR-12 and OR-14: an attack-move or guard of a live object keeps the
     // object as its target; any other position is an attack-move or guard of that point.
     const auto ordered = [host](std::string_view verb) {
@@ -1368,7 +1464,7 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
     position("Get_XYZ", [](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const auto& wrapper = std::get<Handle>(arguments[0].data);
         return core::Result<ValueList>::success(ValueList{number(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id >> 32U))),
-            number(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id & 0xffffffffU))), number(LuaNumber(0))});
+            number(ai::binary32_value(static_cast<std::uint32_t>(wrapper.id & 0xffffffffU))), number(ai::binary32_value(wrapper.aux))});
     });
     if (install_type_lists) if (auto added = scripts.register_method(handle_type_list, "Parse", [](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
             const auto* names = arguments.size() == 3 ? std::get_if<std::vector<Value>>(&arguments[1].data) : nullptr;

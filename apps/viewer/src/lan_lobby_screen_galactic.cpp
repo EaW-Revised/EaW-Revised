@@ -127,6 +127,10 @@ bool EawrLanLobby::prefetch_galactic_content(const bool needs_mod_digests) {
 // A fresh host does not wait for the mod content digests, Load Game does (galactic_press_gate).
 void EawrLanLobby::finish_pending_galactic() {
     Impl& impl = *impl_;
+    // The host options page shows the number of humans the room opens for: once the campaign list is known, it is the campaign's
+    // playable factions unless the host chose another number.
+    if (page_ == Page::host_options && impl.host_options.game_type == galactic_game_type && !impl.galactic_humans_chosen
+        && !impl.galactic_humans_defaulted && impl.galactic_backend && impl.galactic_backend->content_ready()) fill_host_seats();
     if (!impl.host_pending && !impl.load_pending) { impl.load_digest_wait.reset(); impl.pending_text.clear(); impl.content_wait_since.reset(); return; }
     // A prefetch thread that could not start is retried here; the buttons never wait on a load nobody runs.
     const bool host_ready = !impl.host_pending || prefetch_galactic_content(false);
@@ -174,7 +178,7 @@ void report_host_mod_list_not_shared(bool& refresh_due, std::string& notice, con
 }
 } // namespace
 
-std::optional<std::string> EawrLanLobby::host_galactic_game() {
+std::optional<std::string> EawrLanLobby::host_galactic_game(const net::GalacticLobbyOptions* preset) {
     Impl& impl = *impl_;
     impl.host_mod_notice.clear(); // a notice belongs to one room: this is where a new room starts, and it may raise one below
     if (!impl.galactic_backend) return std::string("No campaign content is loaded.");
@@ -198,6 +202,10 @@ std::optional<std::string> EawrLanLobby::host_galactic_game() {
     }
     if (!impl.galactic_backend->content_ready()) return std::string("Campaign content is still loading.");
     if (const auto error = impl.galactic_backend->load_error()) return core::format_diagnostic(*error);
+    if (preset != nullptr) {
+        if (!match_->set_galactic_game(*preset)) return std::string("The campaign room could not be opened.");
+        return std::nullopt;
+    }
     const auto& campaigns = impl.galactic_backend->campaigns();
     if (campaigns.empty()) return std::string("No campaign is installed.");
     // The room opens on the first row a player can hold; a mod may have no multiplayer campaign at all.
@@ -216,6 +224,9 @@ void EawrLanLobby::refresh_galactic_staging() {
     PageState& state = *state_;
     Resources& resources = *resources_;
     const std::size_t dialog_rows = state.dialog_rows;
+    // The host's room plans no human row this dialog cannot draw (net::galactic_lobby_human_row_limit), so a claim that would land on
+    // a hidden row is refused with a message instead of seating a player nobody sees. Set before the room is pumped.
+    if (impl.host && impl.galactic_backend) impl.galactic_backend->set_dialog_rows(dialog_rows);
     // The galactic room is not built from a skirmish selection: the host's options opened it, edits go through the list.
     match_->pump_setup(skirmish::FixtureOptions{});
     review_host_mods();
@@ -438,7 +449,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
     const auto unseated = [&](std::size_t index) {
         if (campaign == nullptr || index >= campaign->factions.size()) return false;
         const auto& faction = campaign->factions[index];
-        return faction.neutral || (!faction.playable && !faction.ai_controller);
+        return !net::galactic_lobby_row_drawn(faction);
     };
     std::vector<model::GalacticRowFacts> facts;
     if (options) {
@@ -450,6 +461,8 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
     impl.galactic_row_order = model::galactic_row_order(facts, dialog_rows);
     const auto& order = impl.galactic_row_order;
     const std::size_t shown_rows = order.size();
+    // D8 (#8071): the factions the dialog has no row for are named by one line on the row after the last drawn one.
+    const std::string hidden_line = model::galactic_hidden_rows_line(facts, order);
     // #8020: the humans of a slot, one entry each (name and mods state), in seat order.
     struct SlotPlayer final { net::PeerIndex peer{}; std::string name; std::string line; std::array<std::string, 3> tags; };
     std::vector<std::vector<SlotPlayer>> slot_players(dialog_rows);
@@ -481,7 +494,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
     }
 
     // Refill the combos only when what they show changed: a refill closes an open drop-down.
-    std::string signature = std::string(impl.host ? "GH" : "GJ") + (checkpoint ? "saved" : "new") + std::to_string(shown_rows) + (staging ? "s" : "-")
+    std::string signature = std::string(impl.host ? "GH" : "GJ") + (checkpoint ? "saved" : "new") + std::to_string(shown_rows) + hidden_line + (staging ? "s" : "-")
         + (options ? options->campaign : std::string{}) + (impl.coop_campaign_tab ? "|coop" : "|mp") + "|" + std::to_string(view.seat);
     for (const model::StagingRow& row : rows)
         signature += "|" + std::to_string(static_cast<int>(row.kind)) + "," + row.name + "," + row.faction + ","
@@ -547,6 +560,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
         const model::StagingRow& row = rows[slot];
         const std::string suffix = std::to_string(slot);
         const bool shown = slot < shown_rows && row.kind != model::RowKind::none;
+        const bool line_slot = slot == shown_rows && !hidden_line.empty();
         const std::size_t index = slot < shown_rows ? order[slot] : options ? options->rows.size() : 0U; // the campaign row on this slot
         const bool has_row = slot < shown_rows;
         const bool mine = shown && row.local && staging && !checkpoint;
@@ -557,7 +571,13 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
         if (auto* rename = EAWR_CONTROL(EawrUiEdit, "EAWR_STAGING_NAME_" + suffix)) rename->set_visible(false);
         if (name != nullptr) {
             name->clear();
-            name->set_visible(shown);
+            name->set_visible(shown || line_slot);
+            if (line_slot) {
+                name->add_item(text(hidden_line), 0);
+                name->select(0);
+                name->set_tooltip_text(text(hidden_line));
+                name->set_disabled(true);
+            }
             if (shown) {
                 const bool open_row = row.kind == model::RowKind::open;
                 // A planned row nobody takes at Start becomes an AI faction, so an open row says so.
@@ -670,7 +690,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
                     // A free playable faction is offered too (#6134); the host moves the rows when the seat takes it.
                     const auto choices = campaign && room
                         ? viewer::galactic::faction_choices(*options, *resources.content->catalog, resources.text ? &*resources.text : nullptr,
-                            *campaign, room->snapshot, match_->view().seat)
+                            *campaign, room->snapshot, match_->view().seat, dialog_rows)
                         : viewer::galactic::faction_choices(*options, *resources.content->catalog, resources.text ? &*resources.text : nullptr);
                     for (const auto& choice : choices)
                         faction->add_item(text(choice.caption), static_cast<int>(choice.row));
@@ -712,13 +732,13 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             icon->second->set_color(row.accepted ? Color(0.2F, 0.85F, 0.3F, 0.95F) : Color(0.15F, 0.15F, 0.15F, 0.9F));
         }
         row_state.kind = row.kind == model::RowKind::human ? "human" : row.kind == model::RowKind::ai ? "ai"
-                       : row.kind == model::RowKind::open ? "open" : "none";
-        row_state.name = row.name;
+                       : row.kind == model::RowKind::open ? "open" : line_slot ? "more" : "none";
+        row_state.name = line_slot ? hidden_line : row.name;
         row_state.faction = row.faction;
         row_state.team = row.team ? std::to_string(*row.team + 1) : std::string{};
         row_state.accepted = row.accepted;
         row_state.enabled = mine;
-        row_state.visible = shown;
+        row_state.visible = shown || line_slot;
         impl.row_states.push_back(std::move(row_state));
     }
 
@@ -796,6 +816,18 @@ bool EawrLanLobby::galactic_item_selected(const int64_t index, const std::string
             auto fresh = net::default_galactic_lobby_options(campaign, impl.galactic_options->difficulty, impl.galactic_options->seed,
                 impl.galactic_options->input_delay);
             if (!fresh) { note_chat(model::ChatKind::error, fresh.error().message); break; }
+            // The room's seats follow the campaign (a host pick stays while the campaign can start with it). Nobody else is in the room:
+            // it is opened again with the new number (its connections are fixed when it opens). With guests seated the number stays, and
+            // the host is told when the campaign has more player factions than the room has seats.
+            const auto wanted = galactic_wanted_humans(campaign);
+            const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
+            if (wanted != impl.human_owners.size() && room->snapshot.seats.size() == 1 && !online) {
+                reopen_galactic_room(std::move(fresh).value(), wanted);
+                return true;
+            }
+            if (wanted > impl.human_owners.size())
+                note_chat(model::ChatKind::normal, "This room holds " + std::to_string(impl.human_owners.size()) + " players; the campaign has room for "
+                    + std::to_string(wanted) + ". Open the room again to hold more.");
             if (!match_->lobby_galactic_game(fresh.value())) {
                 if (const auto lobby = match_->lobby_state(); lobby && lobby->notice) note_chat(model::ChatKind::error, lobby->notice->message);
             }

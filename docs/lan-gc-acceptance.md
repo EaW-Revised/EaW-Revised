@@ -9,7 +9,11 @@ Use `-Case galactic -Ticks 9000 -DryRun -TimeoutSeconds 1800` for the short
 rehearsal, then `-Case galactic -Ticks 81000 -TimeoutSeconds 7200` for acceptance.
 Both commands also require `-HostMachine`, `-JoinMachine`, `-HoldFile`,
 `-ViewerArtifact`, and preferably `-OutRoot`. `-Campaign auto` chooses the first
-installed multiplayer campaign; a named campaign must occur in that list.
+hostable entry in the installed campaign list (one with a playable faction); a named
+campaign must occur in that list.
+The backend list also contains single-player-rule campaigns. This automation bypasses
+the lobby UI, so it cannot verify the Co-op tab; its opposing-human and human-battle
+coverage requirements cannot be met by a co-op run.
 No mod root is mounted for this stock-content qualification.
 
 Both human seats occupy opposing factions. Unheld factions retain their agreed
@@ -78,5 +82,13 @@ at least five seconds apart; a new revision restores its budget immediately.
 Paired queue acquisition yields partial leases on a queue deadline and retries
 within the overall deadline. Transport and configuration exceptions fail after
 partial leases are released.
+`--eawr-gc-lan-peers <N>` (2 to 8, default 2) sets how many human peers the scripted lobby waits for: every peer readies
+its own seat once N seats are in the room, and the host starts when the room enables Start. No peer id is assumed (a
+peer's id follows its connection order). The one-host N-viewer case
+(`tests/presentation/renderer/test_viewer_galactic_3viewer_lan_runtime.py`) runs a host and two joiners on one GPU host;
+the room's rule of at most two human sides makes the three humans a 2 + 1 split, and
+`tools/rig/lan_gc_acceptance.verify_viewers` checks that every peer reaches the agreed final tick, none desyncs, the
+hash streams and final state hash are equal and the claimed seats are the roster's human seats.
+
 If setup cannot launch within 300 seconds, it writes a failing lobby
 `report.json` and exits with status 3; this cannot earn gameplay credit.

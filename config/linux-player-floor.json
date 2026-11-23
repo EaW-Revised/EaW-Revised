@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "_comment": "The oldest Linux the Linux x64 player supports. glibc: no libeawr_viewer.linux.template_release.x86_64.so symbol may need a newer GLIBC_ version (tools/offload/linux_glibc_floor.py fails the native viewer leg otherwise). glibcxx: the newest GLIBCXX_ version it may import (a libstdc++ at least that new must be installed; Ubuntu 24.04 ships 3.4.32). The patched Linux editor engine itself needs glibc 2.38.",
+  "glibc": "2.38",
+  "glibcxx": "3.4.32",
+  "online_needed": ["libssl.so.3", "libcrypto.so.3"]
+}

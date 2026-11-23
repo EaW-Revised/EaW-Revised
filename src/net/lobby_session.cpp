@@ -754,7 +754,13 @@ struct LobbyRuntime {
         if (deny && identity == identities.end()) return failure<void>(LobbyReason::authority, "seat has no admitted identity");
         if (deny) denied.insert(identity->second);
         identities.erase(peer); chat_times.erase(peer); request_times.erase(peer);
+        std::optional<LobbySnapshot> before;
+        if (hooks.follow_departure && state.phase != LobbyPhase::committed && state.phase != LobbyPhase::closed) before = state;
         state.seats.erase(std::remove_if(state.seats.begin(), state.seats.end(), [peer](const auto& value) { return value.peer == peer; }), state.seats.end());
+        if (before) {
+            hooks.follow_departure(*before, state, peer);
+            clear_changed_ready(before->seats, state.seats);
+        }
         hooks.remove_peer(peer, reason);
         static_cast<void>(send(peer, LobbyClosed{{state.room, state.revision, reason, sanitize_lobby_text(notice_text, 512)}}));
         return core::Result<void>::success();
@@ -1129,6 +1135,11 @@ core::Result<void> LobbySession::admit(PeerIndex peer, std::string identity, Lob
     if (value.next_seat == std::numeric_limits<std::uint32_t>::max()) return failure<void>(LobbyReason::resource_limit, "stable seat IDs exhausted");
     auto candidate = value.state;
     candidate.seats.push_back({peer, sim::SeatId{value.next_seat}, player, clean_selection(std::move(selection)), false});
+    if (value.hooks.follow_choice) {
+        // A mode may plan the row the newcomer sits on; the seats whose own choice that changed are unreadied.
+        if (auto followed = value.hooks.follow_choice(value.state, candidate, peer); !followed) return followed;
+        value.clear_changed_ready(value.state.seats, candidate.seats);
+    }
     if (auto valid = value.validate(candidate); !valid) return valid;
     if (auto advanced = value.advance(true); !advanced) return advanced;
     candidate.revision = value.state.revision; value.state = std::move(candidate); ++value.next_seat; value.identities.emplace(peer, std::move(identity));

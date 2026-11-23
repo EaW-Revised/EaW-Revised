@@ -3,6 +3,7 @@
 // nothing to apply it to yet, accepts the call and records an unsupported_api note (the rule says which).
 
 #include "tactical_ai_internal.hpp"
+#include "discrete_distribution.hpp"
 
 #include <string>
 #include <utility>
@@ -39,11 +40,41 @@ core::Result<bool> one_boolean(std::string_view method, const ValueList& argumen
 
 } // namespace
 
+bool battle_bindings_enabled(const HostPtr& host) {
+    return !host->ai_world || host->ai_world->goal_mode() != "GALACTIC";
+}
+
+void register_battle_distribution(authoritative::ScriptScheduler& scripts, const HostPtr& host,
+    std::vector<core::Diagnostic>& errors) {
+    if (!battle_bindings_enabled(host)) return;
+    if (auto added = distribution::register_discrete_distribution(scripts); !added) errors.push_back(added.error());
+}
+
 // TL-04..TL-08. Registered only for a battle scheduler: the galactic scheduler binds Get_Planet_Location and
 // Prevent_AI_Usage itself (the galactic free store), and the others do not apply to it.
 void register_battle_object_bindings(authoritative::ScriptScheduler& scripts, const HostPtr& host,
     std::vector<core::Diagnostic>& errors) {
-    if (host->ai_world && host->ai_world->goal_mode() == "GALACTIC") return;
+    if (!battle_bindings_enabled(host)) return;
+    const auto global = [&](std::string_view name, Binding binding) {
+        if (auto added = scripts.register_binding(name, std::move(binding)); !added) errors.push_back(added.error());
+    };
+    // FindPlanet(name): the original resolves the type by name and answers the first object of that type in the ACTIVE mode, so a
+    // battle answers nil unless the battle itself holds an object of that planet type (debug build; static reading, no runtime
+    // walk). A missing or non-string argument is a script error. FindPlanet.Get_All_Planets reads the FIRST mode's planet
+    // objects: the galaxy in a campaign battle (every planet, ascending, as planet handles), nothing in a skirmish.
+    global("FindPlanet", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.empty()) return fail("FindPlanet -- No planet name set");
+        const std::string* name = as_text(arguments[0]);
+        if (name == nullptr) return fail("FindPlanet -- Parameter 1 is not a valid string");
+        return first_object_of_type(*host, context, *name);
+    });
+    global("FindPlanet.Get_All_Planets", [host](BindingContext& context, const ValueList&) -> core::Result<ValueList> {
+        std::vector<authoritative::Value> planets;
+        planets.reserve(host->setup.galactic_planets.size());
+        for (const std::uint64_t id : host->setup.galactic_planets) planets.push_back(handle(handle_galactic_planet, id));
+        context.charge_host_work(planets.size());
+        return one(authoritative::Value{std::move(planets)});
+    });
     const auto method = [&](std::string_view name, Binding binding) {
         if (auto added = scripts.register_method(handle_game_object, name, std::move(binding)); !added) errors.push_back(added.error());
     };

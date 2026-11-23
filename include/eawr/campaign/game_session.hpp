@@ -459,6 +459,9 @@ public:
     using AutoResolver = std::function<core::Result<std::optional<AutoResolveOutcomeApplication>>(
         const ConflictRecord&, const sim::galactic::GalacticSnapshot&, const sim::PartitionExecutor&)>;
     void set_auto_resolver(AutoResolver resolve);
+    // #8171: a multiplayer game settles an unenterable battle through this resolver on every peer, so a multiplayer
+    // live start or restore must have one installed.
+    [[nodiscard]] bool has_auto_resolver() const noexcept;
     using VoteProgress = std::function<core::Result<std::optional<bool>>(
         const ConflictRecord&, const std::map<sim::galactic::PlayerId, bool>&)>;
     void set_vote_progress(VoteProgress progress);
@@ -504,6 +507,9 @@ public:
     [[nodiscard]] core::Result<void> restore_victory_state(const sim::galactic::VictoryState&);
     [[nodiscard]] core::Result<void> restore_actor_representations(std::span<const std::uint8_t> census_section);
     [[nodiscard]] std::string state_sha256() const;
+    // Names and short digests of the parts state_sha256() is built from (galaxy, child world/script/context, native AI, story,
+    // summary, timeline), so a restore that refuses on a hash mismatch can say which part differs. Diagnostic use only.
+    [[nodiscard]] std::string hash_components() const;
     [[nodiscard]] sim::galactic::GalacticReplay record() const;
     [[nodiscard]] GameRecording recording() const;
     // Complete accepted input, including future commands/conflicts and load prologues.

@@ -567,6 +567,7 @@ bool BattleEffects::present_combat_effects(const platform::LiveTickEvents& recor
     for (const tactical::CombatEvent& event : record.combat_events) {
         const FighterEffectScope fighter_scope(
             event.kind == tactical::CombatEventKind::projectile_hit || event.kind == tactical::CombatEventKind::heal_pulse
+                || event.kind == tactical::CombatEventKind::combat_modifier_applied
                 ? event.target : sim::EntityId{});
         if (measure_owner_) {
             ++owner_counts_[0];
@@ -618,6 +619,23 @@ bool BattleEffects::present_combat_effects(const platform::LiveTickEvents& recor
             if (!handler.heal_lightning.empty() && healing_bolts_.size() < healing_bolt_limit)
                 healing_bolts_.push_back({event.shooter, event.target, handler.heal_lightning,
                     static_cast<double>(record.tick) - 1.0, source_bone, target_bone});
+            continue;
+        }
+        if (event.kind == tactical::CombatEventKind::combat_modifier_applied) {
+            // Add_Combat_Modifier_To_Enemies: the status particle goes on the recipient at the detonation, on its
+            // root bone (the original's status-particle bone list is not walked yet).
+            const auto particle = combat_mod_particles_.find(event.outcome);
+            const auto target = last_seen_.find(event.target);
+            if (particle == combat_mod_particles_.end() || target == last_seen_.end()) continue;
+            const auto target_type = types_.find(target->second.type);
+            if (target_type == types_.end()) continue;
+            const std::uint32_t target_bone = target_type->second.root_bone;
+            auto point = target->second.position;
+            particles::Basis3 basis{};
+            if (bones) if (const auto pose = bones(event.target, target_bone)) {
+                point = {pose->frame.origin.x, pose->frame.origin.y, pose->frame.origin.z}; basis = pose->frame.basis;
+            }
+            if (!process_spawn(particle->second, point, basis, "combat_mod_status", record.tick, event.target, target_bone)) return false;
             continue;
         }
         if (event.kind == tactical::CombatEventKind::point_defence_zap) {

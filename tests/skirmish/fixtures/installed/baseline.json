@@ -1,6 +1,6 @@
 {
   "group": "installed",
-  "program_sha256": "c9c416d9ec9d171b7406487771e6557240c799fb0b320a4a6da248fe8fd96007",
+  "program_sha256": "c12e0d85249eb8c0063cbea266babbc49ee50d05b41b3de574dc6f79b3994dcc",
   "workers": [
     1,
     2,
@@ -13,176 +13,176 @@
   "rows": [
     {
       "replay": "banked-hardpoints.eawr-replay",
-      "replay_sha256": "ae6b6dd71a7990cc08163ed0adf35c1ec019c8a7eeaba73d4aefea65235e7e0d",
+      "replay_sha256": "c8665f1e80eca90a3d7ae720352ad2eac4e473dea627a726e0c943a6581c3590",
       "workers": 1,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "01a47026af1c8bd70b208cfff9d4ed6a8d5ba3fa2632e6bcbd76b444589a3270",
+        "hashes": "a015fd443e58ab8decd5f3d7a37b70dab1ec87ef1d587a1fa13f26b6908fc3c2",
         "events": "3f26aa0885fa3cc6901572ec2f1ba4ce274f2be6a82c53a1eb70b7ccf979a527",
         "snapshots": "418c393e10596bb4e1e07c39c7ba75e922284e1916907d5924f1fce0398286ea"
       }
     },
     {
       "replay": "banked-hardpoints.eawr-replay",
-      "replay_sha256": "ae6b6dd71a7990cc08163ed0adf35c1ec019c8a7eeaba73d4aefea65235e7e0d",
+      "replay_sha256": "c8665f1e80eca90a3d7ae720352ad2eac4e473dea627a726e0c943a6581c3590",
       "workers": 2,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "01a47026af1c8bd70b208cfff9d4ed6a8d5ba3fa2632e6bcbd76b444589a3270",
+        "hashes": "a015fd443e58ab8decd5f3d7a37b70dab1ec87ef1d587a1fa13f26b6908fc3c2",
         "events": "3f26aa0885fa3cc6901572ec2f1ba4ce274f2be6a82c53a1eb70b7ccf979a527",
         "snapshots": "418c393e10596bb4e1e07c39c7ba75e922284e1916907d5924f1fce0398286ea"
       }
     },
     {
       "replay": "banked-hardpoints.eawr-replay",
-      "replay_sha256": "ae6b6dd71a7990cc08163ed0adf35c1ec019c8a7eeaba73d4aefea65235e7e0d",
+      "replay_sha256": "c8665f1e80eca90a3d7ae720352ad2eac4e473dea627a726e0c943a6581c3590",
       "workers": 4,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "01a47026af1c8bd70b208cfff9d4ed6a8d5ba3fa2632e6bcbd76b444589a3270",
+        "hashes": "a015fd443e58ab8decd5f3d7a37b70dab1ec87ef1d587a1fa13f26b6908fc3c2",
         "events": "3f26aa0885fa3cc6901572ec2f1ba4ce274f2be6a82c53a1eb70b7ccf979a527",
         "snapshots": "418c393e10596bb4e1e07c39c7ba75e922284e1916907d5924f1fce0398286ea"
       }
     },
     {
       "replay": "banked-hardpoints.eawr-replay",
-      "replay_sha256": "ae6b6dd71a7990cc08163ed0adf35c1ec019c8a7eeaba73d4aefea65235e7e0d",
+      "replay_sha256": "c8665f1e80eca90a3d7ae720352ad2eac4e473dea627a726e0c943a6581c3590",
       "workers": 8,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "01a47026af1c8bd70b208cfff9d4ed6a8d5ba3fa2632e6bcbd76b444589a3270",
+        "hashes": "a015fd443e58ab8decd5f3d7a37b70dab1ec87ef1d587a1fa13f26b6908fc3c2",
         "events": "3f26aa0885fa3cc6901572ec2f1ba4ce274f2be6a82c53a1eb70b7ccf979a527",
         "snapshots": "418c393e10596bb4e1e07c39c7ba75e922284e1916907d5924f1fce0398286ea"
       }
     },
     {
       "replay": "carrier-waypoints.eawr-replay",
-      "replay_sha256": "6bdd9b37ee9c6a13e2f91b13239532a126a38f7dafc7bc474cd4aa8bfe387711",
+      "replay_sha256": "549b27e4d8405b72d16ee497082fd17471e7c4e5fa94be4272b63cf48d68c82d",
       "workers": 1,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "28b9388aef2a7a35df1b40d7017f016b31602f1d70a2b7bb7b53d0e133110735",
+        "hashes": "9ec13dec4bd98a00ab84c663e9da1bad8fdbf61dd363a5641d423fcb68aec240",
         "events": "18d893d3c24dc23386c9a1ebb1be822d1b6ba942cda9d6383c28b1029a6a1fd8",
         "snapshots": "9df95045ab389529f1bcccd157978d4bb0638ea774ee075af1cd0df75e3d4a15"
       }
     },
     {
       "replay": "carrier-waypoints.eawr-replay",
-      "replay_sha256": "6bdd9b37ee9c6a13e2f91b13239532a126a38f7dafc7bc474cd4aa8bfe387711",
+      "replay_sha256": "549b27e4d8405b72d16ee497082fd17471e7c4e5fa94be4272b63cf48d68c82d",
       "workers": 2,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "28b9388aef2a7a35df1b40d7017f016b31602f1d70a2b7bb7b53d0e133110735",
+        "hashes": "9ec13dec4bd98a00ab84c663e9da1bad8fdbf61dd363a5641d423fcb68aec240",
         "events": "18d893d3c24dc23386c9a1ebb1be822d1b6ba942cda9d6383c28b1029a6a1fd8",
         "snapshots": "9df95045ab389529f1bcccd157978d4bb0638ea774ee075af1cd0df75e3d4a15"
       }
     },
     {
       "replay": "carrier-waypoints.eawr-replay",
-      "replay_sha256": "6bdd9b37ee9c6a13e2f91b13239532a126a38f7dafc7bc474cd4aa8bfe387711",
+      "replay_sha256": "549b27e4d8405b72d16ee497082fd17471e7c4e5fa94be4272b63cf48d68c82d",
       "workers": 4,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "28b9388aef2a7a35df1b40d7017f016b31602f1d70a2b7bb7b53d0e133110735",
+        "hashes": "9ec13dec4bd98a00ab84c663e9da1bad8fdbf61dd363a5641d423fcb68aec240",
         "events": "18d893d3c24dc23386c9a1ebb1be822d1b6ba942cda9d6383c28b1029a6a1fd8",
         "snapshots": "9df95045ab389529f1bcccd157978d4bb0638ea774ee075af1cd0df75e3d4a15"
       }
     },
     {
       "replay": "carrier-waypoints.eawr-replay",
-      "replay_sha256": "6bdd9b37ee9c6a13e2f91b13239532a126a38f7dafc7bc474cd4aa8bfe387711",
+      "replay_sha256": "549b27e4d8405b72d16ee497082fd17471e7c4e5fa94be4272b63cf48d68c82d",
       "workers": 8,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "28b9388aef2a7a35df1b40d7017f016b31602f1d70a2b7bb7b53d0e133110735",
+        "hashes": "9ec13dec4bd98a00ab84c663e9da1bad8fdbf61dd363a5641d423fcb68aec240",
         "events": "18d893d3c24dc23386c9a1ebb1be822d1b6ba942cda9d6383c28b1029a6a1fd8",
         "snapshots": "9df95045ab389529f1bcccd157978d4bb0638ea774ee075af1cd0df75e3d4a15"
       }
     },
     {
       "replay": "leech-shields.eawr-replay",
-      "replay_sha256": "3b40e4df37268383810da97f08195b14c9e92d3b32b73a6f4b2b6ec9419ffc93",
+      "replay_sha256": "d0ba9f6414c400ea71a73c4f51c0173322ee4784d7ae19d1de5aefb746485630",
       "workers": 1,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "b0b418acb42159bfb76163df6eea77194b8dcddd3eef86427f3302bbe2045f34",
+        "hashes": "c5f9c0e75eda44a9df9cf3efc3369690f6a8ee6286e7846e7ca77d0ecc973d34",
         "events": "c9e3e29ef12de73f5fd68865bd3a4160ad610ddcdc5c04364eb69d289bc75447",
         "snapshots": "c8812a4cd76762796116655c5a4f2de97a9ac42eac89f9f8e5c860d1eaa69f0a"
       }
     },
     {
       "replay": "leech-shields.eawr-replay",
-      "replay_sha256": "3b40e4df37268383810da97f08195b14c9e92d3b32b73a6f4b2b6ec9419ffc93",
+      "replay_sha256": "d0ba9f6414c400ea71a73c4f51c0173322ee4784d7ae19d1de5aefb746485630",
       "workers": 2,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "b0b418acb42159bfb76163df6eea77194b8dcddd3eef86427f3302bbe2045f34",
+        "hashes": "c5f9c0e75eda44a9df9cf3efc3369690f6a8ee6286e7846e7ca77d0ecc973d34",
         "events": "c9e3e29ef12de73f5fd68865bd3a4160ad610ddcdc5c04364eb69d289bc75447",
         "snapshots": "c8812a4cd76762796116655c5a4f2de97a9ac42eac89f9f8e5c860d1eaa69f0a"
       }
     },
     {
       "replay": "leech-shields.eawr-replay",
-      "replay_sha256": "3b40e4df37268383810da97f08195b14c9e92d3b32b73a6f4b2b6ec9419ffc93",
+      "replay_sha256": "d0ba9f6414c400ea71a73c4f51c0173322ee4784d7ae19d1de5aefb746485630",
       "workers": 4,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "b0b418acb42159bfb76163df6eea77194b8dcddd3eef86427f3302bbe2045f34",
+        "hashes": "c5f9c0e75eda44a9df9cf3efc3369690f6a8ee6286e7846e7ca77d0ecc973d34",
         "events": "c9e3e29ef12de73f5fd68865bd3a4160ad610ddcdc5c04364eb69d289bc75447",
         "snapshots": "c8812a4cd76762796116655c5a4f2de97a9ac42eac89f9f8e5c860d1eaa69f0a"
       }
     },
     {
       "replay": "leech-shields.eawr-replay",
-      "replay_sha256": "3b40e4df37268383810da97f08195b14c9e92d3b32b73a6f4b2b6ec9419ffc93",
+      "replay_sha256": "d0ba9f6414c400ea71a73c4f51c0173322ee4784d7ae19d1de5aefb746485630",
       "workers": 8,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "b0b418acb42159bfb76163df6eea77194b8dcddd3eef86427f3302bbe2045f34",
+        "hashes": "c5f9c0e75eda44a9df9cf3efc3369690f6a8ee6286e7846e7ca77d0ecc973d34",
         "events": "c9e3e29ef12de73f5fd68865bd3a4160ad610ddcdc5c04364eb69d289bc75447",
         "snapshots": "c8812a4cd76762796116655c5a4f2de97a9ac42eac89f9f8e5c860d1eaa69f0a"
       }
     },
     {
       "replay": "special-blast.eawr-replay",
-      "replay_sha256": "4f456feec81a363db76b67d5a024ffa800a54dab5a4f10bae90949dd14582543",
+      "replay_sha256": "cd4f3f83f6154e7a03f8e71c459056a48986114332258dc31dce9c97f9598f2f",
       "workers": 1,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "d6a0f72c756fedf370952ec945e938cc5d680b38738e014ecfa271e0a49972c8",
+        "hashes": "472dcb6cecd465525e6fe3896b306a2a0932f14e149d34744c04e93294698503",
         "events": "6fc61370d241bf19bea0b6b540cf923781f832c92e16974117216d0fe41b3177",
         "snapshots": "3c098c5c1f6df67f1360fe8f51c5babcfdf5807c9bce74d278a3da4a21d5eea5"
       }
     },
     {
       "replay": "special-blast.eawr-replay",
-      "replay_sha256": "4f456feec81a363db76b67d5a024ffa800a54dab5a4f10bae90949dd14582543",
+      "replay_sha256": "cd4f3f83f6154e7a03f8e71c459056a48986114332258dc31dce9c97f9598f2f",
       "workers": 2,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "d6a0f72c756fedf370952ec945e938cc5d680b38738e014ecfa271e0a49972c8",
+        "hashes": "472dcb6cecd465525e6fe3896b306a2a0932f14e149d34744c04e93294698503",
         "events": "6fc61370d241bf19bea0b6b540cf923781f832c92e16974117216d0fe41b3177",
         "snapshots": "3c098c5c1f6df67f1360fe8f51c5babcfdf5807c9bce74d278a3da4a21d5eea5"
       }
     },
     {
       "replay": "special-blast.eawr-replay",
-      "replay_sha256": "4f456feec81a363db76b67d5a024ffa800a54dab5a4f10bae90949dd14582543",
+      "replay_sha256": "cd4f3f83f6154e7a03f8e71c459056a48986114332258dc31dce9c97f9598f2f",
       "workers": 4,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "d6a0f72c756fedf370952ec945e938cc5d680b38738e014ecfa271e0a49972c8",
+        "hashes": "472dcb6cecd465525e6fe3896b306a2a0932f14e149d34744c04e93294698503",
         "events": "6fc61370d241bf19bea0b6b540cf923781f832c92e16974117216d0fe41b3177",
         "snapshots": "3c098c5c1f6df67f1360fe8f51c5babcfdf5807c9bce74d278a3da4a21d5eea5"
       }
     },
     {
       "replay": "special-blast.eawr-replay",
-      "replay_sha256": "4f456feec81a363db76b67d5a024ffa800a54dab5a4f10bae90949dd14582543",
+      "replay_sha256": "cd4f3f83f6154e7a03f8e71c459056a48986114332258dc31dce9c97f9598f2f",
       "workers": 8,
       "requires_game_root": true,
       "sha256": {
-        "hashes": "d6a0f72c756fedf370952ec945e938cc5d680b38738e014ecfa271e0a49972c8",
+        "hashes": "472dcb6cecd465525e6fe3896b306a2a0932f14e149d34744c04e93294698503",
         "events": "6fc61370d241bf19bea0b6b540cf923781f832c92e16974117216d0fe41b3177",
         "snapshots": "3c098c5c1f6df67f1360fe8f51c5babcfdf5807c9bce74d278a3da4a21d5eea5"
       }

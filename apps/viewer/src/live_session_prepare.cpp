@@ -16,8 +16,10 @@
 #include "eawr/presentation/live/live_units.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
+#include "eawr/presentation/ui/gc_battle_colours.hpp"
 #include "eawr/units/unit_tables.hpp"
 
+#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
@@ -122,6 +124,18 @@ bool LiveSessionView::prepare_head(const vfs::Vfs& filesystem, const std::string
         neutral_fog_colour_ = std::array<float, 3>{neutral->r / 255.0F, neutral->g / 255.0F, neutral->b / 255.0F};
     }
     faction_colours_ = minimap_settings;
+    gc_palette_.clear();
+    gc_seat_colours_.clear();
+    if (options_.borrowed_battle) {
+        if (auto palette = skirmish::read_lobby_colours(filesystem))
+            for (const auto& entry : palette.value()) gc_palette_.push_back(entry.rgb);
+        // Developer workshop switch: set EAWR_GC_ALLY_OWN_COLOURS=1 for distinct co-op colours.
+        const bool shades = godot::OS::get_singleton()->get_environment("EAWR_GC_ALLY_OWN_COLOURS")
+            != godot::String("1");
+        for (const auto& seat : options_.colour_seats)
+            if (const auto colour = ui::gc_participant_colour(seat.seat_id, options_.colour_seats,
+                    options_.colour_teams, gc_palette_, shades)) gc_seat_colours_.emplace(seat.seat_id, *colour);
+    }
     // #3076: FoC enables unit colorization for the skirmish game mode only; a campaign battle runs without it.
     colorization_enabled_ = !options_.borrowed_battle;
     const skirmish::Fixture& fixture = skirmish::m2_fixture();

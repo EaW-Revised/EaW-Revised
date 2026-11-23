@@ -413,6 +413,36 @@ private:
     std::size_t threads_{};
 };
 
+void test_script_view_lists() {
+    // TL-14/TL-15: the index publishes the units whose Lua Hide / Set_Selectable(false) flags are set, ascending.
+    std::vector<tactical::TacticalInstance> rows(5);
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        rows[i].entity_id = static_cast<eawr::sim::EntityId>(10 + i);
+        rows[i].team = 10U;
+        rows[i].visible_to = 1U;
+    }
+    rows[1].script_hidden = true;
+    rows[3].script_hidden = true;
+    rows[3].script_unselectable = true;
+    rows[4].script_unselectable = true;
+    const std::vector<tactical::SnapshotPlayer> players{{1, 10}};
+    const auto snapshot = std::make_shared<const tactical::TacticalSnapshot>(5, players, rows, std::vector<tactical::Event>{});
+    space::SnapshotIndex index;
+    index.refresh(snapshot, 1);
+    expect(index.script_hidden() == std::vector<eawr::sim::EntityId>{11, 13}
+               && index.script_unselectable() == std::vector<eawr::sim::EntityId>{13, 14},
+           "TL-14/TL-15: the index lists hidden and unselectable units");
+    expect(index.is_script_hidden(11) && !index.is_script_hidden(12) && index.script_unselectable_contains(14)
+               && !index.script_unselectable_contains(11), "TL-14/TL-15: membership answers by entity");
+    expect(index.visible().size() == 5, "TL-14: a hidden unit stays in the sensor list (selection, minimap, orders)");
+    rows[1].script_hidden = false;
+    rows[3].script_hidden = false;
+    rows[3].script_unselectable = false;
+    rows[4].script_unselectable = false;
+    index.refresh(std::make_shared<const tactical::TacticalSnapshot>(6, players, rows, std::vector<tactical::Event>{}), 1);
+    expect(index.script_hidden().empty() && index.script_unselectable().empty(), "TL-14/TL-15: cleared flags leave the lists");
+}
+
 void test_pose_worker_budget() {
     std::vector<tactical::TacticalInstance> before(512), after(512);
     for (std::size_t i = 0; i < before.size(); ++i) {
@@ -457,6 +487,7 @@ int main() {
     test_no_fog_flag();
     test_snapshot_index_budget();
     test_stealth_visibility();
+    test_script_view_lists();
     test_pose_worker_budget();
     test_fading_entities();
     test_spinning();

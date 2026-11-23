@@ -1230,9 +1230,11 @@ void loopback_overflow(const std::string& certificate, const std::string& key) {
     for (int i = 0; i < 300; ++i) if (!t.host->send(1, Bytes{static_cast<std::uint8_t>(i)})) std::this_thread::sleep_for(5ms);
     until([&] { return one->dropped_signals() > 0; }, "The guest's receive queue overflows and drops");
     expect(one->status() && t.host->status() && attached_count(t.host->roster()) == 2, "Nobody lost a connection to the overflow");
+    const auto queued = one->queued_signals();
+    expect(queued > 0 && queued <= f.client.queue_frames, "The queue held its bound");
     std::size_t kept{};
     while (require(one->poll())) ++kept;
-    expect(kept > 0 && kept <= 64, "The queue held its bound");
+    expect(kept >= queued, "The queued signals can be drained");
     until([&] { return static_cast<bool>(t.host->send(1, Bytes{200})); }, "The sender queue drains");
     // Blobs still in flight from before the drain arrive first; the new one follows them.
     GnsRoomSignal last;

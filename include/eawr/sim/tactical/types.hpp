@@ -157,6 +157,11 @@ enum class OrderKind : std::uint8_t {
     script_teleport = 34, // Lua Teleport_And_Face: replay opcode 41, no unit order.
     script_hold_fire = 35, // Lua Prevent_All_Fire: replay opcode 42, no unit order.
     script_change_owner = 36, // Lua Change_Owner: replay opcode 43, no unit order.
+    script_teleport_position = 37, // Lua Teleport(position): replay opcode 44, no unit order.
+    script_hide = 38, // Lua Hide(flag): replay opcode 45, no unit order.
+    script_hyperspace_in = 40, // Lua Cinematic_Hyperspace_In(frames): replay opcode 47, no unit order.
+    script_selectable = 41, // Lua Set_Selectable(flag): replay opcode 48, no unit order.
+    script_cancel_hyperspace = 42, // Lua Cancel_Hyperspace(): replay opcode 46, no unit order.
 };
 
 // The order a unit last accepted: a move or face keeps its point in `destination`, an attack its
@@ -589,10 +594,42 @@ struct ScriptChangeOwnerPayload {
     friend constexpr bool operator==(const ScriptChangeOwnerPayload&, const ScriptChangeOwnerPayload&) noexcept = default;
 };
 
+// Lua `Teleport(position)`: each listed unit leaves its garrison, moves to the point (z included) and stops there.
+// Only the script host issues it.
+struct ScriptTeleportPositionPayload {
+    math::Vec3 position{};
+    friend constexpr bool operator==(const ScriptTeleportPositionPayload&, const ScriptTeleportPositionPayload&) noexcept = default;
+};
+
+// Lua `Hide(flag)`: hides or shows each listed unit's model and attached sound. A presentation flag only.
+struct ScriptHidePayload {
+    bool hidden{};
+    friend constexpr bool operator==(const ScriptHidePayload&, const ScriptHidePayload&) noexcept = default;
+};
+
+// Lua `Cinematic_Hyperspace_In(frames)`: each listed unit that can fly starts the hyperspace arrival sequence at its
+// own position, `frames` (rounded) frames from the sequence's start.
+struct ScriptHyperspaceInPayload {
+    std::uint32_t frames{};
+    friend constexpr bool operator==(const ScriptHyperspaceInPayload&, const ScriptHyperspaceInPayload&) noexcept = default;
+};
+
+// Lua `Set_Selectable(flag)`: sets or clears the unit's refusal to be selected by players.
+struct ScriptSelectablePayload {
+    bool selectable{true};
+    friend constexpr bool operator==(const ScriptSelectablePayload&, const ScriptSelectablePayload&) noexcept = default;
+};
+
+// Lua `Cancel_Hyperspace()`: each listed unit that is still in its hyperspace arrival sequence leaves it at once, standing
+// at the arrival's exit point (TL-17). Any other unit is left alone.
+struct ScriptCancelHyperspacePayload {
+    friend constexpr bool operator==(const ScriptCancelHyperspacePayload&, const ScriptCancelHyperspacePayload&) noexcept = default;
+};
+
 using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
     AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload, PadBuildPayload,
     CreditGrantPayload, QuitPayload, PadSellPayload, AreaAbilityPayload, ManualTargetPayload, RevealAllPayload,
-    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload, TacticalSuperweaponPayload, ScriptCreateObjectPayload, ScriptTeleportPayload, ScriptHoldFirePayload, ScriptChangeOwnerPayload, ScriptDespawnPayload>;
+    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload, TacticalSuperweaponPayload, ScriptCreateObjectPayload, ScriptTeleportPayload, ScriptHoldFirePayload, ScriptChangeOwnerPayload, ScriptDespawnPayload, ScriptTeleportPositionPayload, ScriptHidePayload, ScriptHyperspaceInPayload, ScriptSelectablePayload, ScriptCancelHyperspacePayload>;
 
 // Whether a command acts on the issuer's economy (#530) rather than on units.
 [[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
@@ -626,6 +663,11 @@ struct PlayerCommand {
     if (std::holds_alternative<ScriptTeleportPayload>(payload)) return OrderKind::script_teleport;
     if (std::holds_alternative<ScriptHoldFirePayload>(payload)) return OrderKind::script_hold_fire;
     if (std::holds_alternative<ScriptChangeOwnerPayload>(payload)) return OrderKind::script_change_owner;
+    if (std::holds_alternative<ScriptTeleportPositionPayload>(payload)) return OrderKind::script_teleport_position;
+    if (std::holds_alternative<ScriptHidePayload>(payload)) return OrderKind::script_hide;
+    if (std::holds_alternative<ScriptHyperspaceInPayload>(payload)) return OrderKind::script_hyperspace_in;
+    if (std::holds_alternative<ScriptSelectablePayload>(payload)) return OrderKind::script_selectable;
+    if (std::holds_alternative<ScriptCancelHyperspacePayload>(payload)) return OrderKind::script_cancel_hyperspace;
     if (std::holds_alternative<TacticalSuperweaponPayload>(payload)) return OrderKind::tactical_superweapon;
     if (std::holds_alternative<LandGarrisonPayload>(payload)) return OrderKind::land_garrison;
     if (std::holds_alternative<LandUnloadPayload>(payload)) return OrderKind::land_unload;

@@ -174,11 +174,16 @@ std::string solo_difficulty_entry(const data::galactic::GalacticData& data, cons
     else if (folded == "HARD") index = 2;
     // CGS-26 fallback: a campaign whose AI types name no entry for the level runs on the stock name of that level.
     static constexpr std::array<const char*, 3> stock{"Easy_Default", "Normal_Default", "Hard_Default"};
-    const auto* authored = data.campaign(campaign);
-    if (authored == nullptr) return stock[index];
-    const auto row = make_row(data, *authored, authored->is_multiplayer.value_or(false));
-    const auto entries = campaign_difficulties(data, *authored, row.factions, authored->is_multiplayer.value_or(false), ai_levels);
+    const auto entries = campaign_difficulty_entries(data, campaign, ai_levels);
     return entries[index].empty() ? std::string(stock[index]) : entries[index];
+}
+
+std::array<std::string, 3> campaign_difficulty_entries(const data::galactic::GalacticData& data, const std::string_view campaign,
+    const LobbyAiLevels& ai_levels) {
+    const auto* authored = data.campaign(campaign);
+    if (authored == nullptr) return {};
+    const auto row = make_row(data, *authored, authored->is_multiplayer.value_or(false));
+    return campaign_difficulties(data, *authored, row.factions, authored->is_multiplayer.value_or(false), ai_levels);
 }
 
 AiControllerChoice ai_controller_choice(const data::galactic::GalacticData& data, const data::galactic::Campaign& campaign,

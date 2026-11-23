@@ -135,6 +135,8 @@ private:
         const std::vector<std::optional<detail::BlastStep>>& blasts,
         std::vector<std::optional<detail::BlastStep>>& blasts_without_source, UnitStage& staged,
         std::vector<std::optional<detail::ProjectileStep>>& flights, auto& deliver_area, auto& queue_damage);
+    // WAD-27: the hardpoint route of one delivery of a random-hardpoint projectile (one draw from the projectile's stream).
+    [[nodiscard]] std::uint32_t random_delivery_route(const Projectile& source, const LiveUnit& target, std::uint32_t current);
     void queue_delayed_impact(const Projectile& source, const detail::BlastRecipient& recipient,
         UnitStage& staged, std::vector<Impl::PendingBlastDamage>& pending_blast_damage);
     core::Result<void> deliver_area_impact(const Projectile& projectile, const detail::BlastRecipient& recipient,
@@ -438,6 +440,7 @@ private:
     std::optional<Orders> orders_;
     struct Flights {
         std::vector<std::vector<EntityId>> weaken_recipients;
+        std::vector<std::vector<EntityId>> combat_mod_recipients; // aligned with flights; detonating shots only
         std::optional<const DamageRules*> damage_rules;
         std::optional<std::vector<std::optional<detail::ProjectileStep>>> flights;
         std::optional<std::uint64_t> projectile_candidates;
@@ -467,6 +470,8 @@ private:
         std::optional<std::vector<UnitState>> killed;
         std::optional<std::vector<Impl::PendingBlastDamage>> pending_blast_damage;
         std::optional<std::vector<Projectile>> projectiles;
+        // WAD-27: one stream per random-hardpoint projectile and frame, drawn in commit order.
+        std::map<EntityId, CombatRandom> random_hardpoint_streams;
     };
     std::optional<Impacts> impacts_;
     struct Commands {

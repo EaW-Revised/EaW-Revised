@@ -563,7 +563,7 @@ function main() Warn(); coroutine.yield(true) end
     collision[offset] = '\1'; collision.insert(offset + 4, std::string("\1", 1) + std::string(7, '\0')); reject(collision);
     reject(bytes.substr(0, bytes.size() - 1));
     auto old = bytes;
-    const auto version = old.find("eawr-script-galactic-save-v4");
+    const auto version = old.find("eawr-script-galactic-save-v5");
     expect(version != std::string::npos, "current GC save domain");
     if (version != std::string::npos) { old[version + std::string_view("eawr-script-galactic-save-v").size()] = '2'; reject(old); }
     auto notified = scripts.save().value();

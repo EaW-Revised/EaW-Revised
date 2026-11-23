@@ -697,18 +697,33 @@ void LiveSessionView::write_report_battle_start(std::ostream& output) const {
                   }
                   return rows;
               }() << "]"
+           << ", \"gc_colour_seats\": [" << [&] {
+                  std::string rows;
+                  for (const auto& seat : options_.colour_seats) {
+                      const auto colour = gc_seat_colours_.find(seat.seat_id);
+                      rows += (rows.empty() ? "" : ", ") + std::string("{\"seat\": ")
+                          + std::to_string(seat.seat_id.value) + ", \"player\": " + std::to_string(seat.player)
+                          + ", \"side\": " + std::to_string(seat.human_side_id)
+                          + ", \"has_colour\": " + (colour == gc_seat_colours_.end() ? "false}" : "true}");
+                  }
+                  return rows;
+              }() << "]"
            << ", \"rendered_colours\": [" << [&] {
                   std::string rows;
                   for (const auto& ship : placed_ships_) {
                       if (!ship.live_entity || !ship.team_colour) continue;
                       const auto found = owner_of_entity_.find(ship.live_entity);
                       const auto owner = found == owner_of_entity_.end() ? 0U : found->second;
+                      sim::SeatId controller{};
+                      if (battle_frame_.latest) for (const auto& instance : battle_frame_.latest->instances())
+                          if (instance.entity_id == ship.live_entity) { controller = instance.controller_seat; break; }
                       const auto& rgb = *ship.team_colour;
                       // WGT-120: neutral owners use type/faction colour even in skirmish.
                       const char* source = model_uses_player_colour(owner) ? "lobby"
                           : type_no_colorization_.contains(ship.object_id) ? "type" : "faction";
                       rows += (rows.empty() ? "" : ", ") + std::string("{\"entity\": ")
                           + std::to_string(ship.live_entity) + ", \"player\": " + std::to_string(owner)
+                          + ", \"controller_seat\": " + std::to_string(controller.value)
                           + ", \"type\": " + json(ship.object_id) + ", \"source\": " + json(source)
                           + ", \"rgb\": [" + std::to_string(rgb[0]) + ", " + std::to_string(rgb[1]) + ", " + std::to_string(rgb[2]) + "]}";
                   }

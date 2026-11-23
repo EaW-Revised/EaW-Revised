@@ -274,6 +274,13 @@
       "lane": "gc",
       "mode": "galactic",
       "title": "Galactic object-script host",
+      "lua_preludes": [
+        {
+          "file": "src/campaign/galactic_story_scripts.cpp",
+          "variable": "weighted_list_source",
+          "receiver": "list"
+        }
+      ],
       "bindings": [
         {
           "file": "src/campaign/galactic_story_scripts.cpp",
@@ -361,6 +368,18 @@
       "lane": "sk",
       "mode": "tactical",
       "bindings": [
+        {
+          "file": "src/script/foc/discrete_distribution.hpp",
+          "registrars": {
+            "register_binding": "global"
+          },
+          "name_lists": [
+            {
+              "variable": "lua_defined_globals",
+              "kind": "global"
+            }
+          ]
+        },
         {
           "file": "src/script/foc/tactical_ai_bindings.cpp",
           "registrars": {
@@ -484,6 +503,18 @@
       "lane": "sk",
       "mode": "tactical",
       "bindings": [
+        {
+          "file": "src/script/foc/discrete_distribution.hpp",
+          "registrars": {
+            "register_binding": "global"
+          },
+          "name_lists": [
+            {
+              "variable": "lua_defined_globals",
+              "kind": "global"
+            }
+          ]
+        },
         {
           "file": "src/script/foc/tactical_ai_bindings.cpp",
           "registrars": {

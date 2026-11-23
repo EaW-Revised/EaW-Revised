@@ -28,7 +28,7 @@ every type; no ship identity or stock value is a runtime condition.
 | WLK-06 | Presentation follows the selected projectile's authored appearance and detonation sounds. The existing target-ability response cue uses the runtime holder's `SFXEvent_Target_Ability` (the authored team container for a squadron), then the team-to-member fallback, once on activation. | debug build target-handler boundary; BA-54; project presentation routing |
 
 The stock Red Squadron container's recharge and damage multiplier are content, not constants.
-The non-speed ordinary mode-multiplier cap of 64 remains unchanged; the shot-only exemption applies
+The ordinary non-speed modifiers other than cause and take damage use the representation-derived bound in WAB-65; the cap of 64 remains for cause and take damage; the shot-only exemption applies
 only to Lucky Shot's cause-damage input. Speed uses the representation-derived bound in WAB-24.
 Projectile override selection reads the firing craft's primary ordinary ability; a secondary
 Lucky slot can still boost a qualifying normal hit without selecting that override.

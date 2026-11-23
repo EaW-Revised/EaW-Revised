@@ -72,7 +72,8 @@ void BattleDialog::present(viewer::galactic::BattleDialogView view) {
     advisor_->set_text(String(advisor_text.c_str()));
     advisor_->set_position(Vector2(16, 4));
     advisor_->set_size(Vector2(root_->get_size().x - 32, 30));
-    root_->set_visible(visible() && (view_.phase != viewer::galactic::BattleDialogPhase::choice || view_.pending_visible));
+    root_->set_visible(visible() && (view_.phase != viewer::galactic::BattleDialogPhase::choice
+        || (view_.pending_visible && !(submitted_ && !view_.pending_multiplayer))));
     root_->set_mouse_filter(view_.phase == viewer::galactic::BattleDialogPhase::choice ? Control::MOUSE_FILTER_IGNORE : Control::MOUSE_FILTER_STOP);
     if (!visible()) return;
     if (changed || (!dialog_ && !pending_) || size_ != root_->get_size()) rebuild();
@@ -114,7 +115,7 @@ void BattleDialog::caption(BuiltGadget& gadget, std::string_view value) {
         button->set_text(text); button->set_meta("battle_caption",text);
     }
 }
-void BattleDialog::activate(viewer::galactic::BattleChoice choice) {
+void BattleDialog::activate(viewer::galactic::BattleChoice choice, bool pointer_choice) {
     using namespace viewer::galactic;
     const bool allowed = view_.involved && ((view_.phase == BattleDialogPhase::choice && view_.choice_ready &&
         ((choice == BattleChoice::fight && view_.fight_allowed && view_.tactical_available) ||
@@ -128,8 +129,16 @@ void BattleDialog::activate(viewer::galactic::BattleChoice choice) {
         if (gadget.id != "IDC_ADVANCED_RESOLVE_INFO") button->set_disabled(true);
     // Copy identity before dispatch; the owner can immediately publish a new view.
     const auto id = view_.conflict;
+    const bool pending_choice = view_.phase == BattleDialogPhase::choice;
+    const bool single_player = !view_.pending_multiplayer;
+    const bool single_button = view_.single_button;
     const auto dispatch = choice_;
     if (!dispatch_battle_choice(submitted_, id, choice, dispatch)) refresh();
+    else if (pending_choice) {
+        if (pointer_choice && style_.pending_click_sound)
+            style_.pending_click_sound(single_button, choice == BattleChoice::fight);
+        if (single_player && view_.conflict == id && view_.phase == BattleDialogPhase::choice) root_->hide();
+    }
 }
 void BattleDialog::toggle_advanced() {
     advanced_ = !advanced_; listed_at_ = -1;
@@ -229,8 +238,8 @@ void BattleDialog::rebuild() {
         else if (gadget.id == "IDC_CONTINUE_BUTTON") {
             caption(gadget, style_.text("TEXT_BUTTON_RETURN_TO_GALACTIC"));
             action(gadget, [this] { activate(BattleChoice::continue_galaxy); });
-        } else if (gadget.id == "fight") action(gadget, [this] { activate(BattleChoice::fight); });
-        else if (gadget.id == "auto") action(gadget, [this] { activate(BattleChoice::auto_resolve); });
+        } else if (gadget.id == "fight") action(gadget, [this] { activate(BattleChoice::fight, true); });
+        else if (gadget.id == "auto") action(gadget, [this] { activate(BattleChoice::auto_resolve, true); });
         else if (gadget.id == "IDC_YOUR_SCROLLBAR" || gadget.id == "IDC_ENEMY_SCROLLBAR") {
             const std::size_t side = gadget.id == "IDC_YOUR_SCROLLBAR" ? 0 : 1;
             const auto position = gadget.control->get_position(); const auto size = gadget.control->get_size();

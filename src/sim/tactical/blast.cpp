@@ -127,6 +127,26 @@ core::Result<math::Fixed> blast_factor(const BlastProfile& profile, const math::
         Fixed::from_raw((static_cast<std::int64_t>(profile.tiers) + 1) * one));
 }
 
+core::Result<std::vector<EntityId>> combat_mod_recipients(const CombatWorld& world,
+    const Projectile& projectile, const math::Vec3& centre) {
+    using Result = core::Result<std::vector<EntityId>>;
+    std::vector<EntityId> recipients;
+    const auto radius = projectile.blast.radius;
+    if (!projectile.combat_mod.enabled || radius.raw() <= 0) return Result::success(std::move(recipients));
+    for (const auto& player : world.players) {
+        if (!world.hostile(projectile.owner, player.player_id)) continue;
+        for (const auto id : world.candidates(centre, radius, player.player_id)) {
+            const auto* unit = world.find(id);
+            if (unit == nullptr || unit->profile == nullptr || unit->in_limbo || !unit->profile->collision
+                || (unit->profile->category_bits & projectile.combat_mod.categories) == 0) continue;
+            const auto overlaps = collision_overlaps_sphere(*unit, centre, radius);
+            if (!overlaps) return Result::failure(overlaps.error());
+            if (overlaps.value()) recipients.push_back(id);
+        }
+    }
+    return Result::success(std::move(recipients));
+}
+
 core::Result<BlastStep> prepare_blast(const CombatWorld& world, const Projectile& projectile,
     const math::Vec3& centre, const std::optional<EntityId> direct, const bool source_available,
     const std::string_view direct_mesh) {

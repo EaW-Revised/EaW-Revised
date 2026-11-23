@@ -603,7 +603,20 @@ void MapMode::State::fill_type_names() {
     }
 }
 
+namespace {
+// Runs apply_view_only() when a sync returns, whichever way it returns.
+template <class Owner> struct ViewOnlyApply final {
+    Owner& state;
+    ~ViewOnlyApply() { state.apply_view_only(); }
+};
+} // namespace
+
+void MapMode::State::apply_view_only() {
+    if (hud && live_session && live_session->view_only()) hud->set_view_only(true);
+}
+
 void MapMode::State::sync_cards() {
+    const ViewOnlyApply<State> view_only_apply{*this};
     if (!hud || !battle) return;
     const auto* production_hover = hud->shell_shown() && hud->production()
         ? hud->production()->hovered_entry() : nullptr;
@@ -698,6 +711,7 @@ void MapMode::State::sync_cards() {
 }
 
 void MapMode::State::sync_production() {
+    const ViewOnlyApply<State> view_only_apply{*this};
     if (!hud || !live_session || hud->production() == nullptr) return;
     const LiveSessionView& live = *live_session;
     fill_type_names();
@@ -1200,6 +1214,12 @@ bool MapMode::State::apply_movie_pose() {
     space->live_camera_movie(true, pose->target);
     space->live_camera_movie_eye(pose->eye);
     space->live_camera_movie_fov(movie_fov());
+    if (options.attract) { // #8105: the attract's locked view takes the shot pose; the status reports the drawn eye
+        space->set_attract_pose(pose->eye, pose->target);
+        if (attract_camera_updates == 0) attract_first_eye = pose->eye;
+        attract_last_eye = pose->eye;
+        ++attract_camera_updates;
+    }
     return true;
 }
 
@@ -1570,6 +1590,7 @@ void MapMode::State::begin_battle() {
 }
 
 void MapMode::State::sync_battle_hud() {
+    const ViewOnlyApply<State> view_only_apply{*this};
     if (!live_session) return;
     const bool waiting = live_session->phase() == LiveSessionView::Phase::loading
         || live_session->phase() == LiveSessionView::Phase::ready;

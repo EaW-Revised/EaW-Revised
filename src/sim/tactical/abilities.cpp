@@ -75,18 +75,18 @@ constexpr std::array<KindName, 32> kind_names{{
     return true;
 }
 
-// frames x multiplier, rounded half up; the multiplier is non-negative here.
+// frames x multiplier, rounded half up, saturating at the largest frame count; the multiplier is non-negative here.
+// Split into whole and fraction so no product leaves int64: frames x whole is at most 2^32 x 2^36 / 2^24, frames x
+// fraction is below 2^32 x 2^24 (WAB-65).
 [[nodiscard]] std::uint32_t scaled_frames(const std::uint32_t frames, const Fixed multiplier) noexcept {
     if (multiplier.raw() <= 0) return 0;
-    const auto product = static_cast<std::int64_t>(frames) * multiplier.raw();
-    return static_cast<std::uint32_t>((product + one_raw / 2) / one_raw);
-}
-
-[[nodiscard]] Fixed product(const Fixed left, const Fixed right) noexcept {
-    // Both factors are validated to [-64, 64]: the exact product fits, rounded to nearest.
-    const auto raw = left.raw() * right.raw();
-    const auto half = one_raw / 2;
-    return Fixed::from_raw(raw >= 0 ? (raw + half) / one_raw : -((-raw + half) / one_raw));
+    const auto whole_part = multiplier.raw() / one_raw;
+    const auto fraction = multiplier.raw() % one_raw;
+    const auto count = static_cast<std::int64_t>(frames);
+    // frames x whole may itself pass int64 for a factor near the representable bound and a saturated frame count.
+    if (whole_part != 0 && count > std::numeric_limits<std::int64_t>::max() / whole_part) return std::numeric_limits<std::uint32_t>::max();
+    const auto scaled = count * whole_part + (count * fraction + one_raw / 2) / one_raw;
+    return static_cast<std::uint32_t>(std::min<std::int64_t>(scaled, std::numeric_limits<std::uint32_t>::max()));
 }
 
 [[nodiscard]] core::Result<Fixed> speed_product(const Fixed left, const Fixed right) {
@@ -117,6 +117,15 @@ constexpr std::array<KindName, 32> kind_names{{
 }
 
 } // namespace
+
+core::Result<Fixed> ability_product(const Fixed left, const Fixed right) {
+    // WAB-65: speed_product rounds positive ties away from zero; apply it to magnitudes so negative ties do too.
+    const auto negative = (left.raw() < 0) != (right.raw() < 0);
+    auto magnitude = speed_product(Fixed::from_raw(left.raw() < 0 ? -left.raw() : left.raw()),
+        Fixed::from_raw(right.raw() < 0 ? -right.raw() : right.raw()));
+    if (!magnitude || !negative) return magnitude;
+    return core::Result<Fixed>::success(Fixed::from_raw(-magnitude.value().raw()));
+}
 
 std::string_view to_string(const AbilityKind kind) noexcept {
     for (const auto& entry : kind_names) {
@@ -409,6 +418,11 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
         return value.raw() <= max_ability_multiplier * one_raw && value.raw() >= -max_ability_multiplier * one_raw
             && (!positive || value.raw() > 0);
     };
+    // WAB-65: the seven ordinary non-speed modifiers share the representation-derived limit.
+    const auto wide = [](const Fixed value, const bool positive) {
+        return value.raw() <= max_ability_value_raw && value.raw() >= -max_ability_value_raw
+            && (!positive || value.raw() > 0);
+    };
     const auto type = " (type " + std::to_string(profile.type_id) + ")";
     if (profile.abilities.empty() && profile.special.empty() && !profile.force_sensitive && profile.income_defaults.empty()
         && profile.default_member_abilities.empty()) {
@@ -450,6 +464,16 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
         }
     }
     auto speed_envelope = Fixed::from_raw(one_raw);
+    constexpr std::array<AbilityModifier, 7> ordinary_modifiers{AbilityModifier::weapon_delay, AbilityModifier::shield_regen,
+        AbilityModifier::shield_regen_interval, AbilityModifier::energy_regen, AbilityModifier::energy_regen_interval,
+        AbilityModifier::scatter_radius, AbilityModifier::fire_rate};
+    // The authored tag of each ordinary modifier, for the refusal messages.
+    constexpr std::array<std::string_view, 7> ordinary_tags{"WEAPON_DELAY_MULTIPLIER", "SHIELD_REGEN_MULTIPLIER",
+        "SHIELD_REGEN_INTERVAL_MULTIPLIER", "ENERGY_REGEN_MULTIPLIER", "ENERGY_REGEN_INTERVAL_MULTIPLIER",
+        "SCATTER_RADIUS_MULTIPLIER", "FIRE_RATE_MULTIPLIER"};
+    const auto limit_text = std::to_string(max_ability_value_raw / one_raw);
+    std::array<Fixed, 7> ordinary_envelope{};
+    ordinary_envelope.fill(Fixed::from_raw(one_raw));
     for (const auto& ability : profile.abilities) {
         if (ability.kind == AbilityKind::none || to_string(ability.kind) == "NONE") {
             return invalid("unknown ability kind" + type);
@@ -620,13 +644,36 @@ core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile) {
         const auto& m = ability.modifiers;
         // WLK-03: only the shot-specific cause-damage input bypasses the ordinary mode cap.
         // AB-22/AB-23: an interval multiplier of 0 is accepted (the interval then floors at one frame); negative is not.
-        if (!bounded(m.weapon_delay, true) || !bounded(m.shield_regen, false) || !bounded(m.shield_regen_interval, false)
-            || m.shield_regen_interval.raw() < 0 || !bounded(m.energy_regen, false) || !bounded(m.energy_regen_interval, false)
+        for (std::size_t kind = 0; kind < ordinary_modifiers.size(); ++kind) {
+            const auto factor = modifier_of(m, ordinary_modifiers[kind]);
+            const auto positive = ordinary_modifiers[kind] == AbilityModifier::weapon_delay
+                || ordinary_modifiers[kind] == AbilityModifier::scatter_radius;
+            if (!wide(factor, positive)) {
+                return invalid(std::string(ordinary_tags[kind]) + " value " + std::to_string(factor.raw() / one_raw)
+                    + " is outside the supported range (up to just under " + limit_text + ")" + type);
+            }
+        }
+        if (!wide(m.weapon_delay, true) || !wide(m.shield_regen, false) || !wide(m.shield_regen_interval, false)
+            || m.shield_regen_interval.raw() < 0 || !wide(m.energy_regen, false) || !wide(m.energy_regen_interval, false)
             || m.energy_regen_interval.raw() < 0 || m.speed.raw() < 0 || m.speed.raw() > speed_limit_raw
-            || !bounded(m.scatter_radius, true)
+            || !wide(m.scatter_radius, true)
             || (ability.kind != AbilityKind::lucky_shot && !bounded(m.cause_damage, false)) || !bounded(m.take_damage, false)
-            || !bounded(m.fire_rate, false) || m.cause_damage.raw() < 0 || m.take_damage.raw() < 0) {
+            || !wide(m.fire_rate, false) || m.cause_damage.raw() < 0 || m.take_damage.raw() < 0) {
             return invalid("a multiplier is out of bounds" + type);
+        }
+        // WAB-65: like speed, multiply only the magnitudes above one in authored order. This bounds every active
+        // subset and intermediate product of each ordinary modifier, so the live product never overflows.
+        if (ability.kind != AbilityKind::lucky_shot) {
+            for (std::size_t kind = 0; kind < ordinary_envelope.size(); ++kind) {
+                const auto factor = modifier_of(m, ordinary_modifiers[kind]);
+                const auto magnitude = Fixed::from_raw(factor.raw() < 0 ? -factor.raw() : factor.raw());
+                if (magnitude.raw() <= one_raw) continue;
+                const auto combined = ability_product(ordinary_envelope[kind], magnitude);
+                if (!combined || combined.value().raw() > max_ability_value_raw)
+                    return invalid(std::string(ordinary_tags[kind]) + " factors combine beyond the supported limit of just under "
+                        + limit_text + type);
+                ordinary_envelope[kind] = combined.value();
+            }
         }
         // WAB-24: omitting every factor <= 1 bounds every active subset, including intermediate
         // products before a later zero or reduction. Lucky Shot never contributes ordinary modes.
@@ -863,7 +910,7 @@ Fixed ability_multiplier(const UnitAbilityProfile& profile, const AbilityState& 
         // WAB-24: validated speed envelopes make every active subset representable. The checked
         // wide intermediate is needed even when its final Q24 value fits (e.g. 200 x 200).
         value = value.raw() == one_raw ? factor : modifier == AbilityModifier::speed
-            ? speed_product(value, factor).value() : product(value, factor);
+            ? speed_product(value, factor).value() : ability_product(value, factor).value();
     }
     return value;
 }

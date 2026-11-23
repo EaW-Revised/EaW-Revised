@@ -39,6 +39,8 @@ inline constexpr std::uint32_t script_invulnerable_block_version = 1;
 // Per-unit Lua Prevent_All_Fire flags; only while any unit holds one, so other sessions hash as before.
 inline constexpr std::array<std::uint8_t, 4> hold_fire_tag{'S', 'H', 'F', 'R'};
 inline constexpr std::uint32_t hold_fire_block_version = 1;
+inline constexpr std::array<std::uint8_t, 4> script_view_tag{'S', 'V', 'E', 'W'};
+inline constexpr std::uint32_t script_view_block_version = 1;
 // The target scans' collection trees (#469, space-targeting CO rules), once a unit with a combat
 // profile has stepped.
 inline constexpr std::array<std::uint8_t, 4> collection_tag{'C', 'U', 'L', 'L'};

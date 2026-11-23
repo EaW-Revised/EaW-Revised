@@ -406,7 +406,9 @@ void BattleAudio::update_voices(const audio::Vec3& listener, const LiveSessionVi
             || (instance->stealth_invisible && sim::tactical::players_hostile(latest->players(), live.local_player(), instance->owner)));
         const bool model_hidden = (!unit && !fogged) || (instance && instance->arrival
             && *instance->arrival < tactical::arrival_visible_frame);
-        state.hidden = audio::attached_gain(silent_sources_.contains(state.attached), model_hidden,
+        // TL-14: Hide(true) also silences the object's attached sound, as the original's attached-sound flag does.
+        const bool script_silent = instance && instance->script_hidden;
+        state.hidden = audio::attached_gain(silent_sources_.contains(state.attached) || script_silent, model_hidden,
                                              fogged, options_.admission.story_cinematic) == 0.0;
         // BA-10 presentation policy: attached updates must preserve degraded 2D admission.
         if (!spatial_audio_available_) continue;

@@ -317,10 +317,6 @@ void EawrProductionPanel::_gui_input(const Ref<InputEvent>& event) {
         pressed_ = target;
         pressed_right_ = right;
         if (target && target->kind == Hit::close && !right) queue_redraw();
-        if (target && target->kind == Hit::reinforce && !right && reinforce_enabled()) {
-            pressed_seconds_ = seconds_;
-            queue_redraw();
-        }
         // PU-68: a press on a pool slot starts placing its type (FoC drags from the press).
         if (target && target->kind == Hit::pool && !right) {
             const auto slot = std::find_if(view_.pool.begin(), view_.pool.end(),
@@ -349,7 +345,13 @@ void EawrProductionPanel::_gui_input(const Ref<InputEvent>& event) {
         // PU-63: left click leaves the queue alone; right release cancels and refunds.
         if (right) { ++cancels_; if (cancel_) cancel_(pressed->index, pressed->entry_id); }
         break;
-    case Hit::reinforce: if (!right && reinforce_enabled()) set_pane_open(!pane_open_); break;
+    case Hit::reinforce:
+        if (!right && reinforce_enabled()) {
+            pressed_seconds_ = seconds_; // PU-70: the release starts selected mode.
+            queue_redraw();
+            set_pane_open(!pane_open_);
+        }
+        break;
     case Hit::close: if (!right) set_pane_open(false); break;
     case Hit::pool: break;
     }
@@ -585,11 +587,14 @@ void EawrProductionPanel::_draw() {
             const bool enabled = reinforce_enabled();
             const bool pressed = enabled && press_level > 0.0 && press_level <= 1.0;
             const bool shifted = pressed && look.click_shift;
+            reinforce_selected_drawn_ = pressed;
+            reinforce_shifted_ = shifted;
+            reinforce_hover_drawn_ = enabled && hovered_reinforce_ && !pressed;
             const auto level = flash_level();
             show_button(0, true, 1, shifted);
             show_button(1, true, 1, shifted);
             show_button(2, !enabled, 1, shifted);
-            show_button(3, enabled && hovered_reinforce_ && !pressed, 1, shifted);
+            show_button(3, reinforce_hover_drawn_, 1, shifted);
             show_button(4, pressed, static_cast<float>(press_level), shifted);
             show_button(5, level > 0.0, static_cast<float>(level), shifted);
             reinforce_drawn_ = button_art_[1].texture.is_valid();
@@ -710,6 +715,9 @@ std::string EawrProductionPanel::report_json() const {
            << ", \"hover_publications\": " << hover_.publications()
            << ", \"reinforce_drawn\": " << (reinforce_drawn_ ? "true" : "false")
            << ", \"reinforce_enabled\": " << (reinforce_enabled() ? "true" : "false")
+           << ", \"reinforce_selected\": " << (reinforce_selected_drawn_ ? "true" : "false")
+           << ", \"reinforce_shifted\": " << (reinforce_shifted_ ? "true" : "false")
+           << ", \"reinforce_hover\": " << (reinforce_hover_drawn_ ? "true" : "false")
            << ", \"flash_drawn\": " << (flash_drawn_ ? "true" : "false")
            << ", \"flash_continuous\": true, \"flash_period_seconds\": " << pulse_seconds
            << ", \"flashes_started\": " << flashes_started_

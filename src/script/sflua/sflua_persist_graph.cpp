@@ -3,6 +3,7 @@
 #include "sflua_persist_internal.hpp"
 
 #include <algorithm>
+#include <tuple>
 
 namespace eawr::script::EAWR_SFLUA_NAMESPACE {
 namespace persist_internal {
@@ -651,12 +652,12 @@ void GraphValidator::check_identities() {
 
 void GraphValidator::check_handles() {
         const IrObject& index = graph_.objects[graph_.handles - 1];
-        ::std::set<::std::pair<::std::uint32_t, ::std::uint64_t>> seen;
+        ::std::set<::std::tuple<::std::uint32_t, ::std::uint64_t, ::std::uint32_t>> seen;
         ::std::size_t handles = 0;
         for (const IrObject& current : graph_.objects) handles += current.kind == kind_handle ? 1 : 0;
         for (const ::std::uint32_t id : index.references) {
             const IrObject& handle = graph_.objects[id - 1];
-            require(seen.emplace(handle.handle_kind, handle.handle_id).second, "handle index entry");
+            require(seen.emplace(handle.handle_kind, handle.handle_id, handle.handle_aux).second, "handle index entry");
         }
         require(seen.size() == handles, "a handle is missing from the handle index");
     }
@@ -746,7 +747,7 @@ private:
             const auto* data = static_cast<const Udata*>(object);
             if (data->uv.metatable == sandbox_.handle_metatable && data->uv.len == sizeof(HandlePayload)) {
                 const auto* handle = reinterpret_cast<const HandlePayload*>(data + 1);
-                if (handle->kind == kind_) out_.handles.push_back({handle->kind, handle->id});
+                if (handle->kind == kind_) out_.handles.push_back({handle->kind, handle->id, handle->aux});
             }
             if (data->uv.metatable != hvalue(defaultmeta(sandbox_.state))) add(data->uv.metatable, LUA_TTABLE);
             return;

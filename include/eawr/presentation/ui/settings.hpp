@@ -166,6 +166,7 @@ struct GameplaySettings final {
     bool animated_loading_background{true};
     bool fit_radar_to_galaxy{true}; // WGUI-177 / DEV-9: galactic radar expansion, on by default (the original's fixed frame is the opt-out).
     bool space_pauses_galactic{true}; // DEV-13: off restores Space as the cinematic tour.
+    int gc_battle_colours{0}; // 0: faction-coloured units, 1: participant-coloured units.
     int galactic_build_tray{-1}; // GBT-13: -1 follows the layer's default (untouched), 0 off, 1 on (a player's choice).
     int hover_owner_names{1}; // -1 retains the saved mode-dependent choice (MP on, solo off), 0 off, 1 on.
     bool right_button_scroll{false};

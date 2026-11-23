@@ -200,6 +200,39 @@ struct OfferMemo {
         return it->second;
     }
 };
+// #8161: a type authored for a build tab (Build_Tab_*) that production never offers is reported, never dropped silently.
+// "Not offered" means one of: no cost of at least 1 (rule WGEP-158/159 price clause), neither the ground nor the space
+// build-domain gate (WGEP-158..160), or no production row at all. One code (EAWR-LOAD-1240), one note per type.
+bool built_in_space_gate(const units::GalacticType& type) {
+    return type.build_cost_credits.value_or(Fixed{}).raw() >= Fixed::scale
+        && (type.required_star_base_level.value_or(0) != 0
+            || (behaves(type, "DUMMY_STAR_BASE") && type.base_level.value_or(0) == 1));
+}
+const char* unoffered_reason(const units::GalacticType& type, const bool has_row) {
+    if (type.build_cost_credits.value_or(Fixed{}).raw() < Fixed::scale) return "Build_Cost_Credits is below 1";
+    if (!units::built_on_ground(type) && !built_in_space_gate(type))
+        return "the build-domain gate refuses it (no nonzero Required_Ground_Base_Level / Required_Star_Base_Level, not a structure)";
+    if (!has_row) return "no production row was built for it";
+    return nullptr;
+}
+void note_unoffered_build_tab(const Prepared& p, OfferMemo& memo, const units::GalacticType& type, const bool has_row) {
+    const char* reason = unoffered_reason(type, has_row);
+    if (!reason) return;
+    static constexpr const char* tabs[] = {"Build_Tab_Land_Units", "Build_Tab_Space_Units", "Build_Tab_Heroes",
+        "Build_Tab_Special_Structures", "Build_Tab_Outpost", "Build_Tab_Space_Station"};
+    const auto& original = memo.original(p, type);
+    for (const auto* tab : tabs) {
+        const auto* node = data::retail::single(original, tab);
+        if (!node) continue;
+        data::tag_trace::used(node);
+        const auto flag = data::retail::boolean(node->raw_text);
+        if (!flag || !*flag) continue;
+        campaign_type_note(&p.load_buffer, "EAWR-LOAD-1240", type, node->name, node->raw_text, "not offered",
+            std::string("authored for a build tab but never offered: ") + reason,
+            core::LoadCategory::retail_accepts, core::LoadAction::skipped_object);
+        return;
+    }
+}
 #if defined(EAWR_TEST_LEGACY_OFFER)
 #include "../../tests/galactic/offer_reference.inc"
 #else
@@ -392,6 +425,7 @@ core::Result<gc::ProductionSetup> complete_production(const Prepared& p, const C
         for (const auto& name : type.squadron_units) direct_members.insert(p.identity(name));
     }
     OfferMemo memo;
+    std::set<gc::TypeId> rows_built;
     for (std::size_t i = 0; i < production.planets.size(); ++i) {
         auto& location = production.planets[i]; const auto& control = setup.control->planets[i]; const auto& state = setup.control->state[i];
         location.target_owner = state.target_player; location.starbase_owner = control.starbase.owner;
@@ -409,8 +443,14 @@ core::Result<gc::ProductionSetup> complete_production(const Prepared& p, const C
             if (direct_members.contains(binding.id) || behaves(*type, "TRANSPORT")) value.direct_build_allowed = false; // WGEP-20.
             const auto before = std::find_if(marked.begin(), marked.end(), [&](const auto& m) { return m.type == binding.id; });
             value.initially_placed = before != marked.end() && before->initially_placed;
+            rows_built.insert(binding.id);
             location.offers.push_back(std::move(value));
         }
+    }
+    // #8161: every type authored for a build tab that is not offered is reported once, whatever the reason (EAWR-LOAD-1240).
+    if (!production.planets.empty()) for (const auto& binding : p.starting.bindings) {
+        const auto* type = memo.type(p, binding);
+        if (type) note_unoffered_build_tab(p, memo, *type, rows_built.contains(binding.id));
     }
     for (auto& player : production.players) {
         const auto economy = std::find_if(setup.player_economy->players.begin(), setup.player_economy->players.end(),
@@ -1148,6 +1188,11 @@ void install_live_ability_services(CampaignSetupServices& services,
                         if (!flag) return refuse<gc::GalacticAbilitySetup>("invalid siphon ability flag");
                         if (tag == "INITIALLY_ENABLED") siphon.initially_enabled = *flag;
                         else siphon.causes_despawn = *flag;
+                    } else if (tag == "MIN_RESPAWN_TIME" || tag == "MAX_RESPAWN_TIME") {
+                        // WGCH-70/40: the absence the consumed bearer's respawn is scheduled with (seconds).
+                        data::tag_trace::used(&value); const auto parsed = number(&value);
+                        if (!parsed) return refuse<gc::GalacticAbilitySetup>("invalid siphon respawn time");
+                        (tag == "MIN_RESPAWN_TIME" ? siphon.respawn_minimum : siphon.respawn_maximum) = parsed.value();
                     } else if (tag == "MIN_SIPHON_PERCENTAGE" || tag == "MAX_SIPHON_PERCENTAGE" || tag == "SIPHON_DURATION_IN_CYCLES") {
                         data::tag_trace::used(&value); const auto parsed = number(&value);
                         if (!parsed) return refuse<gc::GalacticAbilitySetup>("invalid siphon ability number");
@@ -1161,6 +1206,8 @@ void install_live_ability_services(CampaignSetupServices& services,
                     } else if (tag == "ACTIVATION_STYLE" || tag == "SFXEVENT_ACTIVATE") data::tag_trace::used(&value); // style routes the group above; the cue is presentation
                 }
                 if (siphon.minimum > siphon.maximum) return refuse<gc::GalacticAbilitySetup>("siphon percentage range is inverted");
+                // An authored absence with only one endpoint, or an inverted pair, reads as the default hero absence.
+                if (siphon.respawn_minimum > siphon.respawn_maximum) siphon.respawn_minimum = siphon.respawn_maximum = Fixed{};
             }
             if (remover) {
                 data::tag_trace::used_attribute(*remover, "Name");

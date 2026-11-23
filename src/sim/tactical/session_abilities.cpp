@@ -971,6 +971,24 @@ const SpawnedAbilityProfile* TacticalSession::Impl::spawn_profile(const TypeId t
     return nullptr;
 }
 
+// Projectile_Combat_Mod_*: a modifier ends when its duration runs out or its target is gone.
+void TacticalSession::Impl::service_combat_mods(const std::vector<LiveUnit>& units, const std::uint64_t tick) {
+    std::vector<ConcentrateEffect> next;
+    bool changed = false;
+    for (const auto& effect : concentrate_effects) {
+        if (effect.modifier) {
+            const auto found = std::lower_bound(units.begin(), units.end(), effect.target,
+                [](const LiveUnit& unit, const EntityId id) { return unit.state.entity_id < id; });
+            if (tick >= effect.expires || found == units.end() || found->state.entity_id != effect.target) {
+                changed = true;
+                continue;
+            }
+        }
+        next.push_back(effect);
+    }
+    if (changed) commit_concentrate_effects(std::move(next));
+}
+
 core::Result<void> TacticalSession::Impl::service_weaken(std::vector<LiveUnit>& units,
     const std::uint64_t tick, const PartitionExecutor& executor) {
     if (ability_spawns.empty()) return core::Result<void>::success();
@@ -1006,7 +1024,7 @@ bool TacticalSession::Impl::accumulate_concentrate_bonus(const EntityId target,
         [](const auto& effect, const EntityId id) { return effect.target < id; });
     bool applied = false;
     for (; first != concentrate_effects.end() && first->target == target; ++first) {
-        if (units != nullptr && first->kind != AbilityKind::weaken_enemy) {
+        if (units != nullptr && first->kind != AbilityKind::weaken_enemy && !first->modifier) {
             const auto source = units->find(first->source);
             if (source == units->end() || !source->second.abilities) continue;
             const auto slot = ability_slot(*abilities.find(source->second.state.type_id), first->kind);
@@ -1019,6 +1037,7 @@ bool TacticalSession::Impl::accumulate_concentrate_bonus(const EntityId target,
         contribution[1] = first->cause;
         contribution[4] = first->defense;
         contribution[5] = first->speed;
+        if (first->modifier) contribution[first->stat] = first->amount;
         accumulate_combat_bonus(categories[static_cast<std::size_t>(category - bonus_categories.begin())], contribution);
         applied = true;
     }

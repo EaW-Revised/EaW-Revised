@@ -99,8 +99,8 @@ rule has not been recovered. A fixed `--eawr-space-camera` still takes priority.
 
 The interactive space map camera configs open further out than that. Project
 deviation (owner camera tilt and zoom decision): `coruscant-space-map-camera.xml` and
-`coruscant-live-session-camera.xml` both start at distance 1200 (zoom 0.588235 of
-200..1900) instead of FoC's `Distance_Default` 1000 (zoom 0.470588), and their
+`coruscant-live-session-camera.xml` both start at distance 1200 (zoom 0.611111 of
+100..1900) instead of FoC's `Distance_Default` 1000 (zoom 0.470588), and their
 middle-click reset returns there. See
 [tactical camera input](behaviour/tactical-camera-input.md#project-deviation-owner-337348).
 
@@ -137,7 +137,7 @@ Action/trigger/device compatibility is explicit. Activation validates a temporar
 table, swaps atomically and cancels input only on success. Failure preserves the
 prior table and held state; an adapter without a valid table stays inactive.
 
-The development defaults use WASD/arrows for pan, wheel/PageUp/PageDown for zoom,
+The live-session table drops WASD, so arrows pan and battle input keeps the letter orders. It still binds C for unit preview and Space for battlecam. The development defaults use WASD/arrows for pan, wheel/PageUp/PageDown for zoom,
 middle-drag X for rotation and Home for reset, with edge scrolling. The land and space
 map tables bind the FoC middle-button law instead: a plain middle drag binds
 `translate_x`/`translate_y` (scales 4 and -4), Ctrl + middle drag binds `rotate` on X

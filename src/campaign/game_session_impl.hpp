@@ -84,6 +84,12 @@ public:
     std::optional<CampaignSwitchRequest> campaign_switch_fresh; // the request recorded by the current step: published with its tick
     bool campaign_switch_request(galactic::story::Triggered& record);
     std::vector<std::string> entry_notes; // passengers an entry left out; same publication, never saved or hashed
+    std::vector<std::string> entry_infos; // entry facts worth an info line (the AI slots' difficulty); same publication
+    // #8171: a multiplayer battle whose entry was refused and went to the auto-resolver. The decision itself is saved state
+    // (the admission's route becomes instant_auto and every human side's vote becomes Auto-Resolve, so the per-tick route
+    // recompute agrees and a save keeps the solver); this map makes the call on the decision tick (the vote command's call and
+    // the conflict tail's) step the solver once, and skips the entry on later ticks. Never saved or hashed.
+    std::map<sim::EntityId, std::uint64_t> entry_fallback; // conflict -> the tick of the decision
     StoryRewardApplier story_rewards;
     std::shared_ptr<AiControlSwitch> ai_control_switch = std::make_shared<AiControlSwitch>();
     const sim::PartitionExecutor* executor{}; // the running step's, for rewards applied inside it
@@ -223,6 +229,8 @@ public:
     std::string child_context_hash() const;
     core::Result<std::string> base_hash();
     core::Result<std::string> hash();
+    // The inputs of hash(), named, for a refusal that reports which one differs (never called on the success path).
+    std::string hash_components();
     BattleResult result() const;
 };
 

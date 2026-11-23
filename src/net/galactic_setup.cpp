@@ -161,7 +161,7 @@ core::Result<GalacticSetupPayload> decode_galactic_setup(std::span<const std::ui
         seat.human_side_id = static_cast<gc::HumanSideId>(side);
         roster.seats.push_back(seat);
     }
-    if (!reader.word(count, 4) || count > 2) return malformed();
+    if (!reader.word(count, 4) || count > gc::galactic_max_human_sides) return malformed();
     for (std::uint64_t i = 0; i < count; ++i) {
         gc::TeamLead team;
         std::uint64_t side{}, lead{};

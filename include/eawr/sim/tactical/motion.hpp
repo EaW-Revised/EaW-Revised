@@ -120,6 +120,7 @@ struct MotionTable {
     math::Fixed nebula_disable_seconds{}; // Nebula_Ability_Disable_Time
     // PL-01: immutable content opt-in for presentation, never simulation state.
     bool prediction_paths{};
+    std::vector<TypeId> hyperspace_cancel_types{}; // TL-17: fighter and simple space locomotors, sorted
     [[nodiscard]] const MotionProfile* find(TypeId type_id) const noexcept;
     [[nodiscard]] const Footprint* footprint(TypeId type_id) const noexcept;
     friend bool operator==(const MotionTable&, const MotionTable&) = default;

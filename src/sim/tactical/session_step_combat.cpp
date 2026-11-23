@@ -357,7 +357,8 @@ core::Result<void> session_detail::Tick::projectile_inputs() {
                 return core::Result<void>::failure(std::move(*flight_errors[index]));
             }
             detonations_due = detonations_due || ((flights[index]->hit || flights[index]->expired)
-                && flights[index]->projectile.blast.enabled());
+                && (flights[index]->projectile.blast.enabled()
+                    || (flights[index]->projectile.combat_mod.enabled && flights[index]->projectile.blast.radius.raw() > 0)));
         }
         for (const auto& scratch : impl_->projectile_scratch) {
             projectile_candidates += scratch.candidate_count;
@@ -371,18 +372,31 @@ core::Result<void> session_detail::Tick::projectile_inputs() {
     std::vector<std::optional<core::Diagnostic>> blast_errors(blasts.size());
     auto& blast_detonations = flights_.value().blast_detonations.emplace(0);
     auto& blast_recipients_examined = flights_.value().blast_recipients_examined.emplace(0);
+    auto& combat_mod_recipients = flights_->combat_mod_recipients;
+    combat_mod_recipients.assign(detonations_due ? flights.size() : 0, {});
     const auto prepared_blasts = detonations_due ? executor.execute_phase("blast-recipients", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, flights.size());
         for (auto index = range.begin; index < range.end; ++index) {
             const auto& flight = *flights[index];
-            if ((!flight.hit && !flight.expired) || !flight.projectile.blast.enabled()) continue;
-            auto prepared = detail::prepare_blast(view, flight.projectile,
-                flight.hit ? flight.contact : flight.projectile.position, flight.hit, true,
-                detail::direct_blast_mesh(view, flight));
-            if (!prepared) blast_errors[index] = prepared.error();
-            else blasts[index] = std::move(prepared).value();
+            if (!flight.hit && !flight.expired) continue;
+            // WPCM-02: the modifier recipient query gates on the blast radius only, not on blast damage.
+            const bool blast_on = flight.projectile.blast.enabled();
+            if (!blast_on && !(flight.projectile.combat_mod.enabled && flight.projectile.blast.radius.raw() > 0)) continue;
+            if (blast_on) {
+                auto prepared = detail::prepare_blast(view, flight.projectile,
+                    flight.hit ? flight.contact : flight.projectile.position, flight.hit, true,
+                    detail::direct_blast_mesh(view, flight));
+                if (!prepared) blast_errors[index] = prepared.error();
+                else blasts[index] = std::move(prepared).value();
+            }
+            if (flight.projectile.combat_mod.enabled) {
+                auto found = detail::combat_mod_recipients(view, flight.projectile,
+                    flight.hit ? flight.contact : flight.projectile.position);
+                if (!found) blast_errors[index] = found.error();
+                else combat_mod_recipients[index] = std::move(found).value();
+            }
             const auto* source = view.find(flight.projectile.shooter);
-            if (source != nullptr && source->scatter_radius.raw() != math::Fixed::scale) {
+            if (blast_on && source != nullptr && source->scatter_radius.raw() != math::Fixed::scale) {
                 // WAD-10: an earlier ordered hit can remove the source before this detonation.
                 // Prepare that alternative here too; commit never runs a recipient query.
                 auto fallback = detail::prepare_blast(view, flight.projectile,
@@ -806,6 +820,20 @@ core::Result<void> session_detail::Tick::deliver_area_impact(const Projectile& p
     }
 
 
+std::uint32_t session_detail::Tick::random_delivery_route(const Projectile& source, const LiveUnit& target,
+        const std::uint32_t current) {
+    if (!source.damages_random_hardpoints || !target.durability) return current;
+    const auto* profile = impl_->health_profile(target);
+    if (profile == nullptr) return current;
+    const auto* combat = impl_->combat.find(target.state.type_id);
+    auto& streams = impacts_.value().random_hardpoint_streams;
+    const auto stream = streams.try_emplace(source.id, impl_->setup.seed, tick, source.id, random_hardpoint_slot).first;
+    return random_hardpoint_route(*profile, *target.durability,
+        combat != nullptr ? std::span<const std::string>(combat->hardpoint_meshes) : std::span<const std::string>{},
+        current, stream->second);
+}
+
+
 void session_detail::Tick::queue_delayed_impact(const Projectile& source, const detail::BlastRecipient& recipient,
         UnitStage& staged, std::vector<Impl::PendingBlastDamage>& pending_blast_damage) {
 
@@ -836,7 +864,13 @@ core::Result<void> session_detail::Tick::deliver_blast_impact(const std::size_t&
             ? *blasts_without_source[index] : *blasts[index];
         if (player >= prepared.players.size()) continue;
         const auto& group = prepared.players[player];
-        for (const auto& recipient : group.recipients) {
+        for (const auto& prepared_share : group.recipients) {
+            // WAD-27: each share redraws against the recipient's current live hardpoints, before its delay is applied.
+            auto recipient = prepared_share;
+            if (flights[index]->projectile.damages_random_hardpoints) {
+                if (const auto target = staged.find(recipient.id); target != staged.end())
+                    recipient.hardpoint = random_delivery_route(flights[index]->projectile, target->second, recipient.hardpoint);
+            }
             if (recipient.delay.raw() <= 0) {
                 auto delivered = deliver_area(flights[index]->projectile, recipient);
                 if (!delivered) return delivered;
@@ -1027,6 +1061,35 @@ core::Result<void> session_detail::Tick::commit_projectile_flight(std::size_t& f
             }
         }
     }
+    if ((flight->expired || flight->hit) && flight->projectile.combat_mod.enabled
+        && flight_index < flights_->combat_mod_recipients.size()) {
+        // Add_Combat_Modifier_To_Enemies: one live modifier per target and projectile type; a recipient that
+        // already holds one keeps it untouched and gets no new status particle.
+        const auto& mod = flight->projectile.combat_mod;
+        using Effect = std::remove_cvref_t<decltype(impl_->concentrate_effects)>::value_type;
+        std::vector<Effect> next = impl_->concentrate_effects;
+        bool added = false;
+        for (const auto id : flights_->combat_mod_recipients[flight_index]) {
+            const auto recipient = staged.find(id);
+            if (recipient == staged.end() || !recipient->second.combat) continue;
+            if (std::any_of(next.begin(), next.end(), [&](const auto& effect) {
+                    return effect.modifier && effect.target == id && effect.category == mod.key && effect.stat == mod.stat; })) continue;
+            Effect effect;
+            effect.target = id;
+            effect.source = flight->projectile.shooter;
+            effect.category = mod.key;
+            effect.kind = AbilityKind::none;
+            effect.modifier = true;
+            effect.stat = mod.stat;
+            effect.amount = mod.value;
+            effect.expires = tick + mod.duration_frames;
+            next.push_back(effect);
+            added = true;
+            combat_events.push_back(CombatEvent{tick, CombatEventKind::combat_modifier_applied, flight->projectile.shooter, 0, id,
+                no_hardpoint, {}, {}, mod.key});
+        }
+        if (added) impl_->commit_concentrate_effects(std::move(next));
+    }
     if (!flight->hit) {
         if (!flight->expired) {
             projectiles.push_back(flight->projectile);
@@ -1075,6 +1138,8 @@ core::Result<void> session_detail::Tick::commit_projectile_flight(std::size_t& f
         && damage_target_valid(profile, projectile.target_hardpoint)) {
         hardpoint = projectile.target_hardpoint;
     }
+    // WAD-27: a random-hardpoint projectile redirects its direct hit to a live destroyable hardpoint of the unit hit.
+    if (projectile.damages_random_hardpoints) hardpoint = random_delivery_route(projectile, target->second, hardpoint);
     const auto defense = craft_defense.find(*flight->hit);
     auto modifier = defense != craft_defense.end() ? defense->second : math::Fixed{};
     // #530 PU-38: an arriving unit's elevated vulnerability adds to its defense modifier.

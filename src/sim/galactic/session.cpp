@@ -368,7 +368,7 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
         const auto before = events.size();
         dispatch_ground_ability(deployment->actor, deployment->planet, command.key.seat, command.key.sequence, tick, events, true);
         // The subject names the supplied object, so the issuing seat can say which drop was refused.
-        if (events.size() == before) { event.kind = GalacticEventKind::command_rejected; event.reason = GalacticRejectReason::unknown_value; event.subject = deployment->actor; events.push_back(event); }
+        if (events.size() == before) { event.kind = GalacticEventKind::command_rejected; event.reason = GalacticRejectReason::ability_not_usable_here; event.subject = deployment->actor; events.push_back(event); }
         return;
     }
     if (std::holds_alternative<ObserverCommand>(command.payload)) {
@@ -1562,6 +1562,21 @@ core::Result<bool> GalacticSession::set_planet_faction(PlanetId planet, PlayerId
         impl_->failed = true; return core::Result<bool>::failure(changed.error());
     }
     impl_->snapshot = impl_->publish_native_snapshot(std::move(events));
+    return core::Result<bool>::success(true);
+}
+core::Result<bool> GalacticSession::grant_black_market_item(PlayerId player, std::uint32_t item) {
+    if (impl_->failed) return fail<bool>(diagnostic_codes::invalid_setup, "black-market grant requires a live session");
+    auto& state = impl_->economy_corruption;
+    if (!state || native_shadow()) return core::Result<bool>::success(false);
+    const auto holder = std::find_if(state->players.begin(), state->players.end(),
+        [&](auto& row) { return row.player == player; });
+    if (holder == state->players.end()
+        || std::none_of(state->items.begin(), state->items.end(), [&](const auto& row) { return row.id == item; }))
+        return core::Result<bool>::success(false);
+    if (holder->unlocks.insert(item).second) {
+        impl_->dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;
+        impl_->refresh_snapshot();
+    }
     return core::Result<bool>::success(true);
 }
 void GalacticSession::finish_conflict_frame_timer() {

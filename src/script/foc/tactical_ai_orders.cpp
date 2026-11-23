@@ -84,6 +84,25 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
             return bad("malformed issuer");
         return OrderResult::success({static_cast<tactical::PlayerId>(player.value()), {unit->id}, tactical::ScriptDespawnPayload{}});
     }
+    if (command.verb == verb_teleport_position) {
+        if (arguments.size() != 5) return bad("expects issuer, unit and three coordinates");
+        const auto* issuer = std::get_if<LuaNumber>(&arguments[0].data);
+        const Handle* unit = as_handle(arguments[1], handle_game_object);
+        if (issuer == nullptr || unit == nullptr) return bad("malformed issuer or unit");
+        const auto player = numeric::to_exact_integer(*issuer);
+        if (!player || player.value() < 0 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("malformed issuer");
+        sim::math::Vec3 point;
+        sim::math::Fixed* axes[] = {&point.x, &point.y, &point.z};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const auto* coordinate = std::get_if<LuaNumber>(&arguments[2 + axis].data);
+            if (coordinate == nullptr) return bad("malformed coordinate");
+            const auto fixed = numeric::to_fixed(*coordinate);
+            if (!fixed) return bad("coordinate out of range");
+            *axes[axis] = fixed.value();
+        }
+        return OrderResult::success({static_cast<tactical::PlayerId>(player.value()), {unit->id}, tactical::ScriptTeleportPositionPayload{point}});
+    }
     if (arguments.size() < 3) return bad("too few arguments");
     const auto* issuer = std::get_if<LuaNumber>(&arguments[0].data);
     const Handle* unit = as_handle(arguments[1], handle_game_object);
@@ -100,6 +119,36 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         const auto* enabled = std::get_if<bool>(&arguments[2].data);
         if (enabled == nullptr) return bad("malformed enabled flag");
         return OrderResult::success(make_order({unit->id}, tactical::ScriptInvulnerablePayload{*enabled}));
+    }
+    if (command.verb == verb_hide) {
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit and hidden");
+        const auto* hidden = std::get_if<bool>(&arguments[2].data);
+        if (hidden == nullptr) return bad("malformed hidden flag");
+        return OrderResult::success(make_order({unit->id}, tactical::ScriptHidePayload{*hidden}));
+    }
+    if (command.verb == verb_selectable) {
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit and selectable");
+        const auto* selectable = std::get_if<bool>(&arguments[2].data);
+        if (selectable == nullptr) return bad("malformed selectable flag");
+        return OrderResult::success(make_order({unit->id}, tactical::ScriptSelectablePayload{*selectable}));
+    }
+    if (command.verb == verb_cancel_hyperspace) {
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer and unit"); // the third argument is a zero placeholder
+        return OrderResult::success(make_order({unit->id}, tactical::ScriptCancelHyperspacePayload{}));
+    }
+    if (command.verb == verb_hyperspace_in) {
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit and frames");
+        const auto* frames = std::get_if<LuaNumber>(&arguments[2].data);
+        if (frames == nullptr) return bad("malformed frames");
+        // The retail wrapper rounds the delay to the nearest whole frame (truncating value + 0.5); the sim's sequence is
+        // 150 frames long, so a delay outside 0 to 150 is clamped.
+        const auto whole = static_cast<std::int32_t>(*frames + LuaNumber(1) / LuaNumber(2));
+        const auto clamped = std::clamp<std::int64_t>(whole, 0, static_cast<std::int64_t>(tactical::arrival_frames));
+        return OrderResult::success(make_order({unit->id}, tactical::ScriptHyperspaceInPayload{static_cast<std::uint32_t>(clamped)}));
     }
     if (command.verb == verb_prevent_all_fire) {
         if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
@@ -290,7 +339,9 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         if (!fixed) return bad(fixed.error().message);
         *axes[axis] = fixed.value();
     }
-    if (command.verb == verb_attack_move) {
+    if (command.verb == verb_face) {
+        return OrderResult::success(make_order({unit->id}, tactical::FacePayload{destination}));
+    } else if (command.verb == verb_attack_move) {
         return OrderResult::success(make_order({unit->id}, tactical::AttackMovePayload{destination, sim::invalid_entity_id}));
     } else if (command.verb == verb_guard) {
         return OrderResult::success(make_order({unit->id}, tactical::GuardPayload{destination, sim::invalid_entity_id}));

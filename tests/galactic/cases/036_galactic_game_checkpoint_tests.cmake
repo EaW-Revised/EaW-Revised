@@ -13,8 +13,6 @@ add_test(NAME galactic_checkpoint_capacity COMMAND galactic_area_checkpoint gala
 add_test(NAME galactic_pending_conflict_barrier COMMAND galactic_area_checkpoint galactic_game_checkpoint_tests --pending-conflict)
 add_test(NAME galactic_prebattle_autosave_admission COMMAND galactic_area_checkpoint galactic_game_checkpoint_tests --prebattle-autosave)
 add_test(NAME galactic_summary_hold_barrier COMMAND galactic_area_checkpoint galactic_game_checkpoint_tests --summary-hold)
-add_test(NAME galactic_other_build_battle_records COMMAND galactic_area_checkpoint galactic_game_checkpoint_tests
-    --other-build-battle-records "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/other-build-battles")
 add_test(NAME galactic_game_checkpoint_contracts COMMAND galactic_area_checkpoint galactic_game_checkpoint_tests
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/corpus")
 

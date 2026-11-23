@@ -3,6 +3,20 @@
 namespace eawr::sim::tactical {
 using detail::combat_detail::one_raw;
 
+namespace {
+// WAB-65: a rate above 1 can push a count past 32 bits; saturate instead of wrapping.
+[[nodiscard]] std::uint32_t saturate_u32(const std::int64_t value) noexcept {
+    return static_cast<std::uint32_t>(std::clamp<std::int64_t>(value, 0, std::numeric_limits<std::uint32_t>::max()));
+}
+
+// floor(count x rate / one_raw) without a 128-bit product: split the count at the scale.
+[[nodiscard]] std::uint32_t scaled_pulses(const std::uint32_t count, const std::int64_t rate_raw) noexcept {
+    const auto whole = static_cast<std::int64_t>(count / one_raw) * rate_raw;
+    const auto fraction = static_cast<std::int64_t>(count % one_raw) * rate_raw / one_raw;
+    return saturate_u32(whole + fraction);
+}
+} // namespace
+
 
 namespace detail {
 using namespace combat_detail;
@@ -340,11 +354,11 @@ math::Fixed UnitCombat::delay_factor(const WeaponProfile& weapon) const noexcept
     const auto first = weapon.mode_delay(unit_.mode_ability[0]);
     const auto second = weapon.mode_delay(unit_.mode_ability[1]);
     if (first.raw() == one_raw && second.raw() == one_raw) return unit_.weapon_delay;
-    // Every factor is validated to [0, 64] (negative values are refused at load): each exact product fits.
-    const auto times = [](const math::Fixed left, const math::Fixed right) noexcept {
-        const auto raw = left.raw() * right.raw();
-        const auto half = one_raw / 2;
-        return math::Fixed::from_raw(raw >= 0 ? (raw + half) / one_raw : -((-raw + half) / one_raw));
+    // WAB-65: the mode factors are validated up to max_ability_value_raw and the salvo factors to [0, 64]; the
+    // wide, checked products keep the exact half-away rounding and cannot fail for validated data.
+    const auto times = [](const math::Fixed left, const math::Fixed right) {
+        const auto product = ability_product(left, right);
+        return product ? product.value() : math::Fixed::from_raw(max_ability_value_raw);
     };
     return times(times(first, unit_.weapon_delay), second);
 }
@@ -365,9 +379,8 @@ void UnitCombat::spend_pulse(const WeaponProfile& weapon, WeaponState& state, Co
             // truncate the refilled pulse count; their jitter is drawn before scaling.
             if (weapon.hardpoint == object_weapon && object_rate.raw() != math::Fixed::scale) {
                 state.countdown = object_rate.raw() > 0
-                    ? static_cast<std::uint32_t>(static_cast<std::int64_t>(state.countdown) * one_raw / object_rate.raw()) : 0;
-                state.pulses_left = static_cast<std::uint32_t>(
-                    static_cast<std::int64_t>(weapon.pulse_count) * std::max<std::int64_t>(0, object_rate.raw()) / one_raw);
+                    ? saturate_u32(static_cast<std::int64_t>(state.countdown) * one_raw / object_rate.raw()) : 0;
+                state.pulses_left = scaled_pulses(weapon.pulse_count, std::max<std::int64_t>(0, object_rate.raw()));
             }
             if (stunned) {
                 state.countdown = fire_rate_recharge(state.countdown, unit_.fire_rate);
@@ -377,7 +390,7 @@ void UnitCombat::spend_pulse(const WeaponProfile& weapon, WeaponState& state, Co
             state.countdown = scaled_weapon_delay(weapon.pulse_delay_frames, delay_factor(weapon), false);
             if (weapon.hardpoint == object_weapon && object_rate.raw() != math::Fixed::scale) {
                 state.countdown = object_rate.raw() > 0
-                    ? static_cast<std::uint32_t>(static_cast<std::int64_t>(state.countdown) * one_raw / object_rate.raw()) : 0;
+                    ? saturate_u32(static_cast<std::int64_t>(state.countdown) * one_raw / object_rate.raw()) : 0;
                 if (object_rate.raw() <= 0) state.pulses_left = 0;
             }
             if (stunned) {

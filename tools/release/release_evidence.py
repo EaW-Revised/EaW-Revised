@@ -5,6 +5,7 @@
       --replay76 <replay76 run>/receipt.json \\
       --fresh-user-player <player run>/fresh-user-verdict.json --fresh-user-debug <debug run>/fresh-user-verdict.json
 
+A release that ships a Linux x64 player adds `--fresh-user-linux <verdict>` (platform linux-x64, same fields as the Windows verdict).
 A release that ships no Debug archive says so with `--no-debug-archive` instead of `--fresh-user-debug`; the manifest then
 records `fresh_user_debug: {"shipped": false}` and nothing else about Debug.
 
@@ -71,8 +72,27 @@ def fresh_user_item(path: Path, kind: str) -> dict:
             "archive_sha256": verdict["archive_sha256"], "result": verdict["result"], "kind": kind}
 
 
-def add(sidecar: Path, replay76: Path, player: Path, debug: Path | None, credits=full_replay76) -> dict:
-    """`debug` is the Debug fresh-user verdict, or None for a release that ships no Debug archive."""
+LINUX_PLATFORM = "linux-x64"
+
+
+def fresh_user_linux_item(path: Path) -> dict:
+    """The Linux x64 player gate (tools/release/fresh_user/fresh_user_linux.py): same verdict fields as the Windows one,
+    plus platform linux-x64 and the image it ran in. The Linux zip is its own archive (it is not the manifest's delivered
+    zip), so the item records the archive hash the verdict names and nothing is compared with `finish`."""
+    verdict = read_json(path)
+    if verdict.get("platform") != LINUX_PLATFORM:
+        raise EvidenceError(f"{path} is a {verdict.get('platform')!r} verdict, expected {LINUX_PLATFORM!r}")
+    item = fresh_user_item(path, "player")
+    if not str(verdict.get("image", "")).strip():
+        raise EvidenceError(f"{path} names no container image")
+    item.update({"platform": LINUX_PLATFORM, "image": verdict["image"], "rendering": verdict.get("rendering", "")})
+    return item
+
+
+def add(sidecar: Path, replay76: Path, player: Path, debug: Path | None, credits=full_replay76,
+        linux: Path | None = None) -> dict:
+    """`debug` is the Debug fresh-user verdict, or None for a release that ships no Debug archive.
+    `linux` is the optional Linux x64 player verdict (recorded as `fresh_user_linux_player`)."""
     manifest = kit_manifest.read(sidecar)
     if manifest.get("mode") != "release" or "finish" not in manifest:
         raise EvidenceError("evidence is added to a finished release manifest")
@@ -81,6 +101,8 @@ def add(sidecar: Path, replay76: Path, player: Path, debug: Path | None, credits
     items = {"replay76": replay76_item(replay76, credits),
              "fresh_user_player": fresh_user_item(player, "player"),
              "fresh_user_debug": fresh_user_item(debug, "debug") if debug is not None else {"shipped": False}}
+    if linux is not None:
+        items["fresh_user_linux_player"] = fresh_user_linux_item(linux)
     if items["fresh_user_player"]["archive_sha256"] != manifest["finish"]["delivered"]["sha256"]:
         raise EvidenceError("the player verdict names another archive than the one this manifest delivered")
     kit_manifest.add_evidence(manifest, items)
@@ -105,9 +127,11 @@ def main(argv=None) -> int:
     debug = one.add_mutually_exclusive_group(required=True)
     debug.add_argument("--fresh-user-debug", type=Path)
     debug.add_argument("--no-debug-archive", action="store_true", help="this release ships no Debug archive")
+    one.add_argument("--fresh-user-linux", type=Path, help="the Linux x64 player verdict (fresh_user_linux.py), when a Linux player ships")
     args = parser.parse_args(argv)
     try:
-        manifest = add(args.sidecar, args.replay76, args.fresh_user_player, None if args.no_debug_archive else args.fresh_user_debug)
+        manifest = add(args.sidecar, args.replay76, args.fresh_user_player, None if args.no_debug_archive else args.fresh_user_debug,
+                       linux=args.fresh_user_linux)
     except (EvidenceError, kit_manifest.ManifestError, OSError) as error:
         print(f"release-evidence: {error}", file=sys.stderr)
         return 1

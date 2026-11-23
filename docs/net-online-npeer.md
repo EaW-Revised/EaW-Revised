@@ -653,7 +653,7 @@ qualification still needs the deployed-service cases in the test plan; loopback 
 | Per-edge queues | `queue_bytes` 8 MiB, `queue_frames` 4,096 (shared TCP defaults) | worst case 64 MiB inbound across 8 edges |
 | GNS send buffer | `SendBufferSize` = `queue_bytes` per connection today | 8 x 8 MiB = 64 MiB worst case; the slice sets it per connection to 2 MiB (still above the 1 MiB default frame), 16 MiB total |
 | Poll work | 64 data calls + 32 signalling receives per poll, total | rotated across links |
-| Desync monitor | `max_retained_bytes` 64 MiB, hash exchange every 30 ticks to 8 peers | unchanged |
+| Desync monitor | `max_retained_bytes` 64 MiB, hash exchange every 150 ticks to 8 peers | `net::default_hash_exchange_every` in `include/eawr/net/desync_monitor.hpp` |
 
 ### Service
 
@@ -674,8 +674,9 @@ and the adapter's 8-byte fragment header: 34 bytes of GNS payload. Assumed overh
 be measured in slice N2: about 40 bytes of GNS packet header and encryption tag, 28
 bytes IPv4 + UDP, 4 bytes TURN ChannelData: about **106 bytes per packet, 30 packets per
 second** (about 3.2 KB/s). The rest of the 3.6 KB/s below is an allowance of about
-400 B/s: one hash exchange per second (every 30 ticks, about 100 B), one keepalive per
-second (about 100 B on the wire) and about 200 B/s of commands in busy play. ACKs mostly
+400 B/s: one hash exchange every five seconds (150 ticks, about 100 B), one keepalive per
+second (about 100 B on the wire) and about 200 B/s of commands in busy play, with room
+for overhead. ACKs mostly
 ride on the reverse stream's packets.
 
 | Scope | Rate | Per match-hour |

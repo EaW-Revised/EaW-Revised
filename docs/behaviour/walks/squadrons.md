@@ -68,8 +68,10 @@
   a dead stop (WSQ-38); directed combat sets it to 0 (WSQ-13).
 - **WSQ-05** (debug build, EWSQ-03) A craft outside any squadron idles by itself: no turn, pitch
   back to level, speed toward the GameConstants `Space_Idle_Movement_Speed` (the FoC data does not
-  set it; the code default was not read), or 0 where its position is not a legal space position.
-  No M2 craft flies outside a squadron.
+  set it; the debug build's initializer is 1), or 0 where its position is not a legal space position.
+  A type with the fighter locomotor that is no Squadron (a solo craft, e.g. a modded carrier hull) is
+  such a craft; it never circles a hold point (legacy EAWR-8117). The remake models the straight idle at speed 1;
+  the legal-position test is not modelled.
 - **WSQ-06** (debug build, EWSQ-03; space-fighters FM-20) A squadron craft idles around the
   squadron's hold point, which is the leader's desired position (after WSQ-50, the centre of the
   squadron's idle cell). With `d_self` the craft's planar distance to the hold point and `d_lead`
@@ -494,7 +496,7 @@ Our code: `src/sim/tactical/fighters_motion.cpp` and `src/sim/tactical/fighters_
 | --- | --- | --- |
 | WSQ-01 to WSQ-03 | `Locomotor::run`: the mode is chosen per squadron (attacking, moving, idle) | same in effect; the dead-stop state is missing (not needed in M2) |
 | WSQ-04 | `CraftStep` out-of-combat defense | same |
-| WSQ-05 | none | missing, not needed (no teamless craft in M2) |
+| WSQ-05 | tests/replay/fighter_spawner_tests.cpp test_teamless_idle | implemented (legacy EAWR-8117), legal-position zero speed missing |
 | WSQ-06, WSQ-07 | `Locomotor::idle` | same |
 | **WSQ-08, WSQ-09, WSQ-50** | none: an idle squadron holds `SquadronState::anchor`, the exact point it was given | **missing** (overlapping squadron craft (legacy EAWR-674): escorts of one carrier and squadrons ending one move stack) |
 | WSQ-10, WSQ-11 | `Locomotor::move`, `squadron_move_arrived` | same, except the idle cell claim (WSQ-09) |

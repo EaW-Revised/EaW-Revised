@@ -12,6 +12,30 @@
         "Godot_v4.7.2-stable_win64_console.exe": "4dac692f4db14f55eb1090b64939e4f2b7744f2773206194eeaee9b730614e8d"
       }
     },
+    "eawr-5b733a90f-linux-x64": {
+      "commit": "5b733a90f6516916dc19d530ecdd433fdd0bc4ee",
+      "build": "gcc 13.3 (Ubuntu 24.04 container) platform=linuxbsd target=editor production=yes lto=full (EAWR-HETZNER-1, 2026-11-21, tools/offload/godot_linux_build.py); glibc floor 2.38",
+      "role": "player (Linux x64): the editor binary shipped in the Linux x64 player zip (tools/release/package_release.py --platform linux-x64); smoke-tested headless and with software rendering; not yet published as a fork release asset",
+      "files": {
+        "godot.linuxbsd.editor.x86_64": "3faca5ebc469ee3c2bcee1da59337233660df0c2a644699f04c139da891f0c50"
+      }
+    },
+    "eawr-5b733a90f-linux-arm64": {
+      "commit": "5b733a90f6516916dc19d530ecdd433fdd0bc4ee",
+      "build": "aarch64-linux-gnu-gcc 13.3 cross on x86_64 (Ubuntu 24.04 container) platform=linuxbsd arch=arm64 target=editor production=yes lto=full, stripped (EAWR-HETZNER-1, 2026-11-21); glibc floor 2.38",
+      "role": "Linux arm64 editor, cross-built, NOT smoke-tested (no arm64 host) and NOT shipped or published",
+      "files": {
+        "godot.linuxbsd.editor.arm64": "bca3f78546488af3b62851772f7d12a998054e8d69da0f1413aeeb479d0b87df"
+      }
+    },
+    "eawr-5b733a90f-macos-universal": {
+      "commit": "5b733a90f6516916dc19d530ecdd433fdd0bc4ee",
+      "build": "Apple clang 17 (Xcode 16.4), GitHub-hosted macos-15, platform=macos target=editor production=yes lto=thin (arm64 + x86_64 lipo'd), vulkan=yes (MoltenVK) angle=yes accesskit=yes; fork run 44840057048, 2026-11-21. lto=full does not finish on that runner (240 min timeout)",
+      "role": "macOS universal editor, UNSIGNED, NOT smoke-tested (no Mac), NOT shipped or published. The per-arch thin slices are in out/mm/engine-1121/macos/manifest.json",
+      "files": {
+        "godot.macos.editor.universal": "8bb66ecb051180aec755dcb4d80e9c82cf589d569fe43a2887924658b3f33208"
+      }
+    },
     "eawr-fad06b579-ltofull": {
       "commit": "fad06b57944fbf17833fe3c65dc9ff1d7446c639",
       "build": "MSVC target=editor production=yes lto=full (example-host-1 2026-10-25)",

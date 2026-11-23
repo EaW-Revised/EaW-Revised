@@ -61,6 +61,18 @@ core::Result<bool> flag(const data::XmlNode* n) {
     auto value = data::retail::boolean(n->raw_text); return value ? core::Result<bool>::success(*value) : fail<bool>("invalid " + n->name);
 }
 } // namespace
+core::Result<std::vector<std::string>> load_black_market_item_names(const vfs::Vfs& vfs) {
+    auto market = data::load_document(vfs, "Data/XML/BlackMarketItems.xml");
+    if (!market) return core::Result<std::vector<std::string>>::failure(market.error());
+    std::vector<std::string> names;
+    for (const auto& node : market.value().root.children) {
+        if (key(node.name) != "ITEM") continue;
+        std::string name;
+        for (const auto& attribute : node.attributes) if (key(attribute.name) == "NAME") name = attribute.value;
+        names.push_back(std::move(name));
+    }
+    return core::Result<std::vector<std::string>>::success(std::move(names));
+}
 core::Result<gc::EconomyCorruptionState> prepare_corruption_economy(const vfs::Vfs& vfs,
     const data::Catalog& catalog, const CampaignSetupPlan& plan, const gc::GalacticSetup& setup, core::LoadNoteBuffer* notes) {
     auto constants = data::load_document(vfs, "Data/XML/GameConstants.xml");

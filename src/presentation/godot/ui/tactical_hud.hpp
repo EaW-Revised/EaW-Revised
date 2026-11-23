@@ -280,6 +280,10 @@ public:
     void set_options_handler(std::function<void()> handler);
     void set_gift_handler(std::function<void(sim::SeatId)> handler);
     void set_gift(bool policy, bool enabled, const std::vector<presentation::ui::ObserverOwner>& recipients);
+    // #8182: the battle view commands nothing (a spectating seat): the order, ability, build, card, hero, special-weapon,
+    // retreat, beacon, superweapon and gift controls are hidden. The caller repeats it every sync, as layout can show them.
+    void set_view_only(bool on);
+    [[nodiscard]] bool view_only() const noexcept;
     // Re-docks the Gift control when the hero tray, the production pane or the order row moved under it.
     void refresh_gift_layout();
     void set_beacon_handler(std::function<void()> handler);

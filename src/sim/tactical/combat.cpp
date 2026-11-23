@@ -453,6 +453,7 @@ std::string_view to_string(const CombatEventKind kind) noexcept {
     case CombatEventKind::projectile_expired: return "projectile_expired";
     case CombatEventKind::point_defence_zap: return "point_defence_zap";
     case CombatEventKind::heal_pulse: return "heal_pulse";
+    case CombatEventKind::combat_modifier_applied: return "combat_modifier_applied";
     }
     return "unknown";
 }

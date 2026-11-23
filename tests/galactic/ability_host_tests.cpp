@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 #include "../support/result.hpp"
@@ -210,14 +211,80 @@ void representations(const eawr::sim::PartitionExecutor& pool, std::vector<std::
     }
 }
 
+// #8157: a human's drop of a market hero onto its own planet opens the black market (the market ability is not
+// ground-activated in stock data, so only the drop dispatch's explicit-use rule reaches it), an AI seat's drop does not, and
+// every refusal of a market preparation names its own cause instead of a generic one.
+std::optional<gc::GalacticRejectReason> refusal_reason(eawr::campaign::GameSession& game) {
+    const auto snapshot = game.galaxy().snapshot();
+    for (const auto& event : snapshot->events())
+        if (event.kind == gc::GalacticEventKind::command_rejected) return event.reason;
+    return std::nullopt;
+}
+void market_drop_and_refusals(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    const auto step = [&](eawr::campaign::GameSession& game) { hashes.push_back(take(game.step(pool)).state_hash.get()); };
+    {
+        const auto config = setup(false);
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::DeployGroundAbility{buyer(config), config.planets[0].id}); step(game);
+        expect(!refusal_reason(game) && game.galaxy().ability_state()->preparations.size() == 1
+            && game.galaxy().ability_state()->preparations[0].kind == gc::AbilityKind::black_market,
+            "a human's drop of a market hero onto its planet opens the black market");
+    }
+    {
+        auto config = setup(false);
+        config.economy_corruption->players[1].human = false;
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::DeployGroundAbility{buyer(config), config.planets[0].id}); step(game);
+        expect(game.galaxy().ability_state()->preparations.empty()
+            && refusal_reason(game) == gc::GalacticRejectReason::ability_not_usable_here,
+            "an AI seat's drop does not open the market and is refused for the seat with its own reason");
+    }
+    // The owner's drag (kit 5): the hero's drop onto a planet that carries another corruption or none reaches the market and
+    // is refused there, with the cause, not with the generic line.
+    for (const auto corruption : {gc::corruption_fixture::Type::none, gc::corruption_fixture::Type::racketeering}) {
+        auto config = setup(false);
+        config.economy_corruption->planets[0].corruption = corruption;
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::DeployGroundAbility{buyer(config), config.planets[0].id}); step(game);
+        expect(refusal_reason(game) == gc::GalacticRejectReason::market_cannot_host && game.galaxy().ability_state()->preparations.empty(),
+            "a market hero's drop onto a planet without the market corruption is refused with its cause");
+    }
+    const auto prepare = [](const gc::GalacticSetup& config, gc::AbilityKind kind) {
+        return gc::PrepareGalacticAbility{buyer(config), config.planets[0].id, kind};
+    };
+    for (const bool cancelled : {false, true}) {
+        const auto config = setup(false);
+        auto game = take(eawr::campaign::GameSession::create(config));
+        take(game.set_ability_lifecycle(buyer(config), false, cancelled));
+        order(game, 1, prepare(config, gc::AbilityKind::black_market)); step(game);
+        expect(refusal_reason(game) == gc::GalacticRejectReason::ability_disabled && game.galaxy().ability_state()->preparations.empty(),
+            cancelled ? "a cancelled market ability refuses as switched off" : "a disabled market ability refuses as switched off");
+    }
+    {
+        const auto config = setup(false);
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, prepare(config, gc::AbilityKind::corruption)); step(game);
+        expect(refusal_reason(game) == gc::GalacticRejectReason::ability_unavailable,
+            "a hero without that ability refuses as having no such ability");
+    }
+    {
+        const auto config = setup(false);
+        auto game = take(eawr::campaign::GameSession::create(config));
+        take(game.submit({{game.completed_tick(), {1}, 1}, prepare(config, gc::AbilityKind::black_market)})); step(game);
+        expect(refusal_reason(game) == gc::GalacticRejectReason::not_authorized, "another seat's hero refuses as not its to command");
+        auto missing = prepare(config, gc::AbilityKind::black_market); missing.actor = 987654321;
+        order(game, 2, missing); step(game);
+        expect(refusal_reason(game) == gc::GalacticRejectReason::unknown_subject, "a vanished hero refuses as no longer there");
+    }
+}
 }
 int case_galactic_ability_host_tests() {
     try {
         std::vector<std::string> baseline;
-        eawr::platform::ThreadWorkerAdapter one(1); contracts(one, &baseline); representations(one, baseline); multiplayer_service_views(one);
+        eawr::platform::ThreadWorkerAdapter one(1); contracts(one, &baseline); representations(one, baseline); multiplayer_service_views(one); market_drop_and_refusals(one, baseline);
         for (std::size_t workers : {2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter pool(workers); std::vector<std::string> hashes;
-            contracts(pool, &hashes); representations(pool, hashes); multiplayer_service_views(pool); expect(hashes == baseline, "market/restore hashes equal on 1/2/4/8 workers");
+            contracts(pool, &hashes); representations(pool, hashes); multiplayer_service_views(pool); market_drop_and_refusals(pool, hashes); expect(hashes == baseline, "market/restore hashes equal on 1/2/4/8 workers");
         }
         cancellation_and_stale(); lifecycle(); unrelated_actor_write();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -754,6 +754,7 @@ core::Result<void> session_detail::Tick::systems() {
     if (auto serviced = impl_->service_healing(inputs, arrivals, tick, executor, targets_->combat_events.value()); !serviced) return serviced;
     if (auto serviced = impl_->service_beams(inputs, tick, executor, true); !serviced) return serviced;
     if (auto serviced = impl_->service_weaken(inputs, tick, executor); !serviced) return serviced;
+    impl_->service_combat_mods(inputs, tick);
     if (inputs.size() != impl_->concentrate_service_census
         || (!inputs.empty() && inputs.back().state.entity_id != impl_->concentrate_service_last_id)) {
         if (auto serviced = impl_->service_concentrate(inputs, tick, executor); !serviced) return serviced;

@@ -53,6 +53,9 @@
 #include "eawr/presentation/ui/fleet_cells.hpp"
 #include "clock_input.hpp"
 #include "eawr/data/ui/command_bar.hpp"
+#include "eawr/presentation/ui/hud_shell.hpp"
+#include <godot_cpp/classes/shader.hpp>
+#include <godot_cpp/classes/texture2d.hpp>
 #include "ui/font_provider.hpp"
 #include "ui/perf_overlay_view.hpp"
 #include "eawr/presentation/ui/net_perf.hpp"
@@ -150,6 +153,11 @@ struct ModelUpload final {
     std::string cause;
     float x_extent{};
     std::optional<std::array<float, 6>> model_bounds;
+    // The drawn planet body: half extents (model axes) of the physical planet surfaces, without the additive glow shell, and the
+    // largest of them. The body is a sphere, so the largest half extent is its radius on every screen axis (#8158). Zero when the
+    // model has no finite bounds.
+    std::array<float, 3> body_half_extents{};
+    float body_radius{};
     std::optional<galactic_view::Vec3> station_anchor;
     std::optional<animation::Player> authored_idle_probe;
     std::vector<sim::AssetId> effect_clock_assets;
@@ -441,9 +449,12 @@ struct GalacticMode::State final {
     std::vector<galactic_view::ObjectId> planet_ui_order;
     std::vector<galactic_view::ObjectId> planet_ui_occluded;
     godot::Ref<godot::Shader> planet_ui_occluder_shader;
+    float planet_ui_body_scale{}; // published for the GPU contract only when it changes
     [[nodiscard]] godot::Control* planet_ui_group(galactic_view::ObjectId planet);
     void add_planet_overlay(galactic_view::ObjectId planet, godot::Control* control);
     void stack_planet_ui(const galactic_view::PlanetUiDepthPlan& plan);
+    // #8158: the world radius of the planet's drawn body (what hides the controls of planets behind it).
+    [[nodiscard]] float planet_body_radius(const galactic_view::PlanetView& planet) const;
     std::vector<std::size_t> hud_planet_indices;
     std::vector<galactic_view::ObjectId> visible_planet_labels;
     std::map<galactic_view::ObjectId, std::pair<std::uint64_t, std::uint32_t>> hud_label_content_versions;
@@ -564,7 +575,13 @@ struct GalacticMode::State final {
     void close_weapon_action();
     void write_weapon_action_report(std::ostream&) const;
     godot::Control* hero_map_bar{};
-    std::array<EawrHudButton*, 6> hero_map_buttons{};
+    // One button per hero shown, grown on demand: no count is a ceiling. The authored slots of the good hero frame
+    // (hero_slot_good00..) place the first heroes, the rows below them take the rest.
+    std::vector<EawrHudButton*> hero_map_buttons;
+    presentation::ui::HudHeroFrame hero_map_frame;
+    godot::Ref<godot::Shader> hero_map_circle;
+    godot::Ref<godot::Texture2D> hero_map_build, hero_map_ring;
+    void ensure_hero_map_buttons(std::size_t count);
     std::vector<galactic_view::HeroMapEntry> hero_map_entries;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> hero_map_publication;
     std::shared_ptr<const std::vector<sim::galactic::HeroReturnView>> published_hero_returns, hero_map_returns;

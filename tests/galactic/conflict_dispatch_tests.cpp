@@ -3,6 +3,9 @@
 #include "eawr/checkpoint/game.hpp"
 
 #include <array>
+#include <cstdint>
+#include <span>
+#include <vector>
 
 namespace {
 using namespace eawr;
@@ -412,6 +415,156 @@ void land_vote_route() {
         expect(land_calls.entry == 0 && land_calls.content == 0 && !game.battle(), "no land child starts before the vote ends");
     }
 }
+// #8171: a multiplayer battle whose entry fails (an AI player type, content or staging refusal) is reported and settles through
+// the auto-resolver on every peer; the galactic game keeps stepping. A solo game keeps its refusal.
+core::Diagnostic refusal(std::string code, std::string message) {
+    core::Diagnostic out; out.code = std::move(code); out.message = std::move(message);
+    return out;
+}
+void entry_failure_falls_back() {
+    const sim::InlineExecutor executor;
+    for (const bool multiplayer : {true, false}) for (const bool staging_failure : {false, true}) {
+        auto setup = gc::synthetic_galaxy({7, 2, 2, 1, 1, false});
+        // Multiplayer: two human sides vote, as in a lobby game; solo: the second side is the AI.
+        setup.seats[1].kind = multiplayer ? gc::SeatKind::human : gc::SeatKind::ai;
+        setup.seats[1].human_side_id = multiplayer ? 2 : 0;
+        setup.networked_transport = multiplayer;
+        std::array<std::string, 2> hashes;
+        std::array<unsigned, 2> resolved{};
+        std::array<bool, 2> kept_running{};
+        std::array<std::string, 2> notes;
+        std::array<unsigned, 2> note_lines{}, entry_calls{};
+        for (unsigned peer = 0; peer < 2; ++peer) {
+            auto game = take(Game::create(setup));
+            // The canonical lobby policy: the humans' missing votes default to Begin after the 30-tick timeout.
+            if (multiplayer) check(game.configure_multiplayer_votes(30));
+            Calls calls;
+            auto layer = provider(Layer::space, calls);
+            if (staging_failure) layer.scripts = [](const auto&) {
+                return core::Result<script::authoritative::ScriptScheduler>::failure(refusal("EAWR-TEST-0001", "scripts are unavailable"));
+            };
+            else layer.entry = [&](const auto&, const auto&, auto) {
+                ++calls.entry;
+                return core::Result<campaign::ResolvedConflictEntry>::failure(refusal("EAWR-TEST-0002", "missing MP tactical AI difficulty"));
+            };
+            check(game.install_conflict_layer(Layer::space, std::move(layer)));
+            game.set_auto_resolver([&, peer](const auto&, const auto&, const auto&) {
+                ++resolved[peer];
+                return core::Result<std::optional<campaign::AutoResolveOutcomeApplication>>::success({});
+            });
+            check(game.queue_conflict(conflict(setup, Layer::space),
+                {multiplayer ? campaign::ConflictRoute::pending_tactical : campaign::ConflictRoute::tactical, false, false}));
+            bool failed = false;
+            for (unsigned i = 0; i < 70; ++i) {
+                auto stepped = game.step(executor);
+                if (!stepped) { failed = true; break; }
+                for (const auto& line : stepped.value().diagnostics)
+                    if (line.code == "EAWR-ENTRY-0001") { notes[peer] = line.message; ++note_lines[peer]; }
+            }
+            kept_running[peer] = !failed;
+            expect(!game.battle(), "a refused battle entry never opens a child");
+            hashes[peer] = game.state_sha256();
+            entry_calls[peer] = calls.entry;
+        }
+        if (multiplayer) {
+            expect(kept_running[0] && kept_running[1] && resolved[0] >= 1 && resolved[1] >= 1,
+                "a multiplayer entry failure settles through the auto-resolver and the game keeps stepping");
+            expect(notes[0].find("could not be entered") != std::string::npos && notes[0] == notes[1],
+                "the entry failure is reported once per peer with the same text");
+            expect(hashes[0] == hashes[1], "every peer takes the same fallback and reaches the same state");
+            // The vote route is recomputed every tick while the (stub) solver stays in progress: the entry is attempted once,
+            // the failure reported once.
+            expect(note_lines[0] == 1 && note_lines[1] == 1 && (staging_failure || (entry_calls[0] == 1 && entry_calls[1] == 1)),
+                "the fallback is latched: one entry attempt and one report across every tick of the auto-resolve");
+        } else {
+            expect(!kept_running[0] && resolved[0] == 0, "a solo entry failure keeps its refusal and never reaches the resolver");
+        }
+    }
+}
+// #8171: a checkpoint taken while the refused battle is being auto-resolved keeps the fallback and the solver's state; the
+// restored game resumes it identically and never re-enters the battle.
+void entry_failure_checkpoint(const bool churn) {
+    const sim::InlineExecutor executor;
+    auto setup = gc::synthetic_galaxy({7, 2, 2, 1, 1, false});
+    setup.seats[1].kind = gc::SeatKind::human; setup.seats[1].human_side_id = 2;
+    setup.networked_transport = true;
+    if (churn) {
+        // Two human sides with seat control, so the seats can leave and rejoin.
+        setup.seats[0].human_side_id = 1; setup.seats[1].human_side_id = 2;
+        setup.seat_control.emplace();
+        setup.seat_control->teams.push_back({1, {1}, false});
+        setup.seat_control->teams.push_back({2, {2}, false});
+        for (std::uint32_t player = 1; player <= 2; ++player)
+            setup.seat_control->controllers.push_back({player, gc::FactionControl::human, gc::FactionControl::ai, {}, {}});
+    }
+    struct Peer { Calls calls; std::uint32_t solves{}; };
+    const auto configure = [](Game& game, Peer& peer) {
+        auto layer = provider(Layer::space, peer.calls);
+        layer.entry = [&peer](const auto&, const auto&, auto) {
+            ++peer.calls.entry;
+            return core::Result<campaign::ResolvedConflictEntry>::failure(refusal("EAWR-TEST-0002", "missing MP tactical AI difficulty"));
+        };
+        check(game.install_conflict_layer(Layer::space, std::move(layer)));
+        game.set_auto_resolver([&peer](const auto&, const auto&, const auto&) {
+            ++peer.solves;
+            return core::Result<std::optional<campaign::AutoResolveOutcomeApplication>>::success({});
+        });
+        // The solver's own state: how many ticks it has run.
+        game.set_auto_resolve_checkpoint_services([&peer] {
+            std::vector<std::uint8_t> bytes;
+            for (unsigned i = 0; i < 4; ++i) bytes.push_back(static_cast<std::uint8_t>(peer.solves >> (i * 8U)));
+            return core::Result<std::vector<std::uint8_t>>::success(std::move(bytes));
+        }, [&peer](std::span<const std::uint8_t> bytes, const auto&, const auto&) {
+            if (bytes.size() != 4) return core::Result<void>::failure(refusal("EAWR-TEST-0003", "bad solver state"));
+            peer.solves = 0;
+            for (unsigned i = 0; i < 4; ++i) peer.solves |= static_cast<std::uint32_t>(bytes[i]) << (i * 8U);
+            return core::Result<void>::success();
+        });
+    };
+    Peer straight, resumed;
+    auto game = take(Game::create(setup));
+    check(game.configure_multiplayer_votes(30)); // the canonical policy: missing votes default to Begin after 30 ticks
+    configure(game, straight);
+    std::uint64_t sequence[3]{};
+    const auto seat_command = [&](Game& owner, const std::uint32_t seat, gc::CommandPayload payload) {
+        check(owner.submit({{owner.completed_tick(), {seat}, ++sequence[seat]}, std::move(payload)}));
+    };
+    if (churn) { // the second human side is away before the entry is refused
+        take(game.step(executor));
+        seat_command(game, 2, gc::SeatLeave{});
+        take(game.step(executor));
+    }
+    check(game.queue_conflict(conflict(setup, Layer::space), {campaign::ConflictRoute::pending_tactical, false, false}));
+    for (unsigned i = 0; i < 80 && straight.solves < (churn ? 1U : 3U); ++i) take(game.step(executor));
+    if (churn) { // the present side leaves, then the absent side comes back, while the solve runs
+        seat_command(game, 1, gc::SeatLeave{});
+        take(game.step(executor));
+        seat_command(game, 2, gc::SeatRejoin{});
+        for (unsigned i = 0; i < 3; ++i) take(game.step(executor));
+    }
+    expect(straight.solves >= 1 && straight.calls.entry == 1, "the refused entry went to the solver after one attempt");
+    const auto view = game.pending_conflict_view(gc::SeatId{1});
+    expect(view && view->arbitration.route == campaign::ConflictRoute::instant_auto,
+        "the fallback is the conflict's saved route, not a recomputed battle route");
+    const auto identities = checkpoint::game_identities(setup);
+    const auto saved = take(checkpoint::save_game_checkpoint(game, identities));
+    checkpoint::GameLoadOptions options;
+    options.content = [](const auto& record) { return core::Result<tt::TacticalContent>::success(content(record)); };
+    options.configure_session = [&](Game& restored) { configure(restored, resumed); return core::Result<void>::success(); };
+    auto restored = take(checkpoint::load_game_checkpoint(saved, identities, options, executor)).session;
+    expect(resumed.calls.entry == 0, "restoring never calls the refused entry");
+    expect(resumed.solves == straight.solves, "the checkpoint saved the solver's state");
+    const auto restored_view = restored.pending_conflict_view(gc::SeatId{1});
+    expect(restored_view && restored_view->arbitration.route == campaign::ConflictRoute::instant_auto,
+        "the restored conflict resumes on the auto-resolve route");
+    expect(restored.state_sha256() == game.state_sha256(), "the restored game equals the saved one");
+    for (unsigned i = 0; i < 4; ++i) {
+        take(game.step(executor)); take(restored.step(executor));
+        expect(game.state_sha256() == restored.state_sha256(), "the resumed solve stays equal to the uninterrupted one");
+    }
+    expect(resumed.solves == straight.solves && resumed.calls.entry == 0 && straight.calls.entry == 1,
+        "the resumed solve runs on, and neither game re-enters the refused battle");
+}
 // A networked SP-rules campaign must override solo instant-auto admission for a human side.
 void coop_vote_route() {
     const sim::InlineExecutor executor;
@@ -432,7 +585,7 @@ void coop_vote_route() {
 }
 }
 int case_galactic_conflict_dispatch_tests() {
-    try { layer_hooks(); land_fallback(); land_admission_refusal(); land_recording(); land_vote_route(); coop_vote_route(); automatic_persistence(); child_persistence(); }
+    try { layer_hooks(); land_fallback(); land_admission_refusal(); land_recording(); land_vote_route(); coop_vote_route(); entry_failure_falls_back(); entry_failure_checkpoint(false); entry_failure_checkpoint(true); automatic_persistence(); child_persistence(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

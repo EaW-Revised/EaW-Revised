@@ -1,4 +1,5 @@
 #include "tactical_hud_internal.hpp"
+#include "tactical_texture_lookup.hpp"
 #include "eawr/presentation/ui/world_encyclopedia.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
 
@@ -14,7 +15,7 @@ const std::string& TacticalHud::ability_button_icon(const std::string& type, con
         if (found != type_found->second.end()) return found->second;
     }
     auto icon = model::resolved_ability_icon(type, ability, state.objects, [&state](const std::string_view name) {
-        return state.command_texture(std::string(name), "ability button", true).is_valid();
+        return state.command_texture(std::string(name), "ability button", true, TacticalAssetRequirement::optional).is_valid();
     });
     return state.ability_icons[type].emplace(ability, std::move(icon)).first->second;
 }
@@ -99,13 +100,16 @@ const std::pair<std::string, String>& TacticalHud::State::card_type(const std::s
 }
 
 
-Ref<Texture2D> TacticalHud::State::command_texture(const std::string& name, const std::string& use, const bool quiet) {
-    const auto found = card_textures.find(name);
-    if (found != card_textures.end()) return found->second;
-    const model::ThemeTexture slot = model::resolve_ui_texture(name, atlas ? &atlas->directory : nullptr, standalone);
+Ref<Texture2D> TacticalHud::State::command_texture(const std::string& name, const std::string& use, const bool quiet,
+                                                   const TacticalAssetRequirement requirement) {
+    auto& cache = requirement == TacticalAssetRequirement::optional ? optional_card_textures : card_textures;
+    const auto found = cache.find(name);
+    if (found != cache.end()) return found->second;
+    const model::ThemeTexture slot = tactical_texture_lookup(name, atlas ? &atlas->directory : nullptr,
+                                                             standalone, quiet_standalone, requirement);
     Ref<Texture2D> result = textures ? textures->texture(slot, 1.0, 1.0) : Ref<Texture2D>();
     if (result.is_null() && !quiet) warn("EAWR-UI-0322", use + " texture " + name + " cannot be drawn", name);
-    card_textures.emplace(name, result);
+    cache.emplace(name, result);
     return result;
 }
 

@@ -62,6 +62,10 @@ struct GalacticStoryPlayers {
     std::map<sim::galactic::TypeId, sim::math::Fixed> type_build_costs{};
     // GA-12: Type.Get_Combat_Rating, the type's combat power metric (the AI's force estimate reads the same value).
     std::map<sim::galactic::TypeId, script::numeric::LuaNumber> type_combat_ratings{};
+    // Every other game-object type the catalog defines (structures, upgrades, markers a script names before any exists in the
+    // galaxy), with identities above every placed type's. A script can look such a type up by name and count its objects (none);
+    // build costs and combat ratings stay unavailable for it. Filled by assign_unplaced_object_types.
+    std::vector<std::pair<std::string, sim::galactic::TypeId>> unplaced_types{};
     // GA-13: the story scripts' EvaluatePerception. The mounted equations and the campaign facts they read that the
     // completed world does not hold (each planet's normalized authored base income); null equations refuse the call.
     std::shared_ptr<const GalacticObjectPerception> perception{};
@@ -89,7 +93,14 @@ struct GalacticObjectFilter {
 // mod-specific names. Missing loaded types keep their identity but their
 // category/property flags remain unavailable.
 [[nodiscard]] core::Result<GalacticObjectQueryCatalog> make_galactic_object_query_catalog(
-    const units::UnitTables&, std::span<const std::pair<std::string, sim::galactic::TypeId>>);
+    const units::UnitTables&, std::span<const std::pair<std::string, sim::galactic::TypeId>>,
+    std::span<const std::pair<std::string, sim::galactic::TypeId>> unplaced = {});
+// Give every active game-object type of the catalog that `players.types` does not name an identity above the placed ones
+// (sorted by upper-case name, so every peer derives the same table) and store it in `players.unplaced_types`.
+// `id_floor` is the highest type identity any source (plan bindings, planet types, selection content) has handed out; the
+// unplaced identities start above both it and every type in `players.types`.
+void assign_unplaced_object_types(std::span<const std::string> names, sim::galactic::TypeId id_floor, GalacticStoryPlayers& players);
+void assign_unplaced_object_types(const data::Catalog& catalog, sim::galactic::TypeId id_floor, GalacticStoryPlayers& players);
 // RGC-112: parse in authored argument order; the world owner applies this
 // immutable filter to its current actor view, including staged births.
 [[nodiscard]] core::Result<GalacticObjectFilter> parse_galactic_object_filter(

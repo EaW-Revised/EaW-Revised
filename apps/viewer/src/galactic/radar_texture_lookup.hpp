@@ -15,7 +15,7 @@ auto radar_texture_lookup(const vfs::Vfs* filesystem, const assets::MegaTextureA
                           Original&& original, Materialize&& materialize) {
     if (!filesystem || !effective || name.empty()) return original();
     const auto slot = presentation::ui::resolve_ui_texture(name, &effective->directory,
-        presentation::ui::vfs_standalone_textures(*filesystem));
+        presentation::ui::vfs_standalone_textures(*filesystem, false));
     if (slot.origin != presentation::ui::TextureOrigin::missing) return original();
     auto fallback = assets::load_shadowed_atlas_entry(*filesystem, atlas_path, name);
     if (!fallback || !fallback.value()) return original();

@@ -102,6 +102,7 @@ struct IrObject {
     ::std::vector<IrFrame> frames;
     ::std::uint32_t handle_kind{};
     ::std::uint64_t handle_id{};
+    ::std::uint32_t handle_aux{};
     bool flag{}; // main thread, open upvalue
     ::std::uint8_t hookmask{};
     ::std::uint8_t allowhook{};

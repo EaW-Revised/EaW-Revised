@@ -68,6 +68,28 @@ struct Arithmetic {
     return std::min(std::max(value, low), high);
 }
 
+// A pool plus a refresh, saturating instead of failing: the caller clamps the sum to the pool maximum, so the saturated
+// value gives the same result as the exact one (WAB-65: the refresh times the ability factor can reach 2^63 raw).
+[[nodiscard]] Fixed saturating_sum(const Fixed pool, const Fixed refresh) noexcept {
+    constexpr auto top = std::numeric_limits<std::int64_t>::max();
+    constexpr auto bottom = std::numeric_limits<std::int64_t>::min();
+    if (refresh.raw() > 0 && pool.raw() > top - refresh.raw()) return Fixed::from_raw(top);
+    if (refresh.raw() < 0 && pool.raw() < bottom - refresh.raw()) return Fixed::from_raw(bottom);
+    return Fixed::from_raw(pool.raw() + refresh.raw());
+}
+
+// DG-14: amount x alive / total, rounded to nearest like the checked path; when that path overflows (a refresh near
+// the representable bound) the same share is taken from the split quotient and remainder, which cannot overflow
+// because alive <= total.
+[[nodiscard]] Fixed generator_share(const Fixed amount, const std::int64_t alive, const std::int64_t total) {
+    Arithmetic probe;
+    const auto shared = probe.div(probe.mul(amount, whole(alive)), whole(total));
+    if (!probe.error) return shared;
+    const auto quotient = amount.raw() / total;
+    const auto remainder = amount.raw() % total;
+    return Fixed::from_raw(quotient * alive + (remainder * alive + (remainder < 0 ? -total / 2 : total / 2)) / total);
+}
+
 // Set_Shields (DG-08): clamped to [0, max]; reaching zero starts the depletion effect unless it
 // already runs, and a positive value outside the effect clears it.
 void set_shields(const DurabilityProfile& profile, const DamageRules& rules, DurabilityState& state, const Fixed value,
@@ -559,6 +581,14 @@ std::uint32_t random_destroyable_hardpoint(const DurabilityProfile& profile, con
     return hull_target;
 }
 
+std::uint32_t random_hardpoint_route(const DurabilityProfile& profile, const DurabilityState& state,
+    const std::span<const std::string> selectors, const std::uint32_t current, CombatRandom& random) noexcept {
+    const auto selected = random_destroyable_hardpoint(profile, state, random);
+    if (selected == hull_target) return current;
+    const auto route = damage_mesh_route(selectors, selected);
+    return route != hull_target && damage_target_valid(profile, route) ? route : current;
+}
+
 std::uint32_t damage_mesh_route(const std::span<const std::string> selectors, const std::uint32_t selected) noexcept {
     if (selected >= selectors.size() || selectors[selected].empty()) return hull_target;
     const auto fold = [](const unsigned char c) { return c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c; };
@@ -589,9 +619,9 @@ core::Result<void> recharge_shields(const DurabilityProfile& profile, const Dama
     }
     // DG-14: scaled by the fraction of shield generators still standing.
     if (total > 0) {
-        amount = q.div(q.mul(amount, whole(alive)), whole(total));
+        amount = generator_share(amount, alive, total);
     }
-    auto raised = clamp(q.add(state.shields, amount), Fixed{}, profile.max_shields);
+    auto raised = clamp(saturating_sum(state.shields, amount), Fixed{}, profile.max_shields);
     // DG-15: while the depletion effect runs the shield recharges only up to the cap.
     if (shield_depleted(rules, state, frame) && raised > rules.depleted_regen_cap) {
         raised = rules.depleted_regen_cap;
@@ -615,7 +645,7 @@ core::Result<void> recharge_energy(
     if (!has_energy_pool(profile, rules)) return core::Result<void>::success();
     Arithmetic q;
     const auto refresh = multiplier.raw() == one_raw ? profile.energy_refresh : q.mul(profile.energy_refresh, multiplier);
-    const auto raised = clamp(q.add(state.energy, refresh), Fixed{}, profile.max_energy);
+    const auto raised = clamp(saturating_sum(state.energy, refresh), Fixed{}, profile.max_energy);
     if (q.error) return core::Result<void>::failure(*q.error);
     state.energy = raised;
     return core::Result<void>::success();

@@ -1,4 +1,5 @@
-"""#7809: the galaxy map stacks each planet's controls by camera depth and hides them behind nearer planet bodies."""
+"""#7809: the galaxy map stacks each planet's controls by camera depth and hides them behind nearer planet bodies.
+#8158: what hides them is the nearer planet's drawn body, never its larger click radius."""
 import json
 import os
 import pathlib
@@ -23,7 +24,11 @@ var facts = {}
 var plan = [["pan_right", "pan", KEY_RIGHT, 50], ["pan_up", "pan", KEY_UP, 60], ["pan_left", "pan", KEY_LEFT, 120],
     ["pan_down", "pan", KEY_DOWN, 120], ["pan_up_2", "pan", KEY_UP, 160], ["drag_tilt", "drag", Vector2(0, 200), 8],
     ["drag_turn_1", "drag", Vector2(240, 0), 8], ["drag_turn_2", "drag", Vector2(240, 0), 8],
-    ["pan_right_2", "pan", KEY_RIGHT, 100]]
+    ["pan_right_2", "pan", KEY_RIGHT, 100],
+    # #8158: a map seen nearly edge on (the last stop tilts it right down) lines planets up, so bodies sit over the controls of planets behind them.
+    ["drag_tilt_2", "drag", Vector2(0, 200), 8],
+    ["drag_turn_3", "drag", Vector2(300, 0), 8], ["drag_turn_4", "drag", Vector2(300, 0), 8],
+    ["drag_tilt_4", "drag", Vector2(0, -400), 8]]
 var slot = 0
 var slot_start = 0
 var held_key = 0
@@ -77,11 +82,19 @@ func capture(label):
     var order = []
     var shown = []
     var occluded = []
+    var discs_by_group = {}
     var visible_controls = 0
     if layer != null:
         for group in layer.get_children():
             order.append(str(group.name))
-            if group.material != null: occluded.append(str(group.name))
+            if group.material != null:
+                occluded.append(str(group.name))
+                var count = int(group.material.get_shader_parameter("disc_count"))
+                var discs = group.material.get_shader_parameter("discs")
+                var rows = []
+                for slot_index in range(count):
+                    rows.append({"id": int(discs[slot_index].w), "x": discs[slot_index].x, "y": discs[slot_index].y, "radius": discs[slot_index].z})
+                discs_by_group[str(group.name)] = rows
             var any = false
             for control in group.get_children():
                 if control is Control and control.is_visible_in_tree():
@@ -93,11 +106,11 @@ func capture(label):
     if layer != null and layer.has_meta("camera_eye"):
         var eye = layer.get_meta("camera_eye")
         var forward = layer.get_meta("camera_forward")
-        pose = {"eye": [eye.x, eye.y, eye.z], "forward": [forward.x, forward.y, forward.z]}
+        pose = {"eye": [eye.x, eye.y, eye.z], "forward": [forward.x, forward.y, forward.z], "body_scale": float(layer.get_meta("body_scale"))}
     var rows = []
     loose(root, rows, false)
     if layer != null: plan_probes(label, layer)
-    facts[label] = {"probes": [], "layer": layer != null, "order": order, "shown": shown, "occluded": occluded, "camera": pose, "visible": visible_controls, "loose": rows}
+    facts[label] = {"probes": [], "layer": layer != null, "order": order, "shown": shown, "occluded": occluded, "discs": discs_by_group, "camera": pose, "visible": visible_controls, "loose": rows}
     root.get_texture().get_image().save_png(output + "/" + label + ".png")
     pending = label
     probe_start = frame
@@ -242,6 +255,7 @@ class GalacticPlanetUiDepthRuntime(unittest.TestCase):
         self.assertIsNotNone(start["camera"], f"no 3D camera: {directory}")
         start_png = (directory / "start.png").read_bytes()
         overlaps = []
+        narrower = []
         previous = start
         for label, stage in stages.items():
             where = f"{directory}/{label}"
@@ -268,8 +282,26 @@ class GalacticPlanetUiDepthRuntime(unittest.TestCase):
                     self.assertTrue(any(depth(other) < depth(name) - 1e-3 for other in planets if other != name),
                                     f"{name} is occluded but no nearer planet exists: {where}")
                     overlaps.append(label)
+                    # #8158: every disc is the drawn body of the planet it stands for, measured from the model's own bounds
+                    # (the planet surfaces' largest half extent x the planet's scale, in pixels at that planet's depth),
+                    # never wider than the whole model (glow shell included) and never the click radius.
+                    for disc in stage["discs"][name]:
+                        body = planets[f"planet_ui_{disc['id']}"]
+                        depth_of_body = depth(f"planet_ui_{disc['id']}")
+                        world = max(body["body_half_extents"]) * body["scale"]
+                        self.assertAlmostEqual(body["body_radius"], world, delta=1e-3, msg=f"reported body radius: {body} {where}")
+                        self.assertAlmostEqual(disc["radius"], world * pose["body_scale"] / depth_of_body, delta=0.75,
+                                               msg=f"disc is not the drawn body: {disc} {where}")
+                        self.assertLessEqual(world, max(body["model_half_extents"]) * body["scale"] + 1e-3,
+                                             f"body wider than its whole model: {body} {where}")
+                        if world < body["pick_radius"] * 0.98:
+                            narrower.append(label)
+                            self.assertLess(disc["radius"], body["pick_radius"] * pose["body_scale"] / depth_of_body - 1.0,
+                                            f"disc follows the click radius: {disc} {where}")
         # The #7809 case: somewhere in the turn a nearer planet covers a farther planet's controls.
         self.assertTrue(overlaps, f"no stop shows a nearer planet over a farther planet's controls: {directory}")
+        # The #8158 case: a covering body whose click radius is wider than the body itself was checked.
+        self.assertTrue(narrower, f"no covering planet has a click radius wider than its body: {directory}")
         # Turning the map changes which planet is in front: the stack follows the camera.
         self.assertGreater(len({tuple(stage["order"]) for stage in stages.values()}), 1,
                            f"the group order never changed while the camera moved: {directory}")

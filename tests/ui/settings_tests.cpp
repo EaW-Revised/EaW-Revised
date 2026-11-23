@@ -907,6 +907,7 @@ void test_round_trip() {
     changed.gameplay.absolute_scrolling = false;
     changed.gameplay.abilities_autofire = false;
     changed.gameplay.delay_tooltips = true;
+    changed.gameplay.gc_battle_colours = 1;
     changed.network.port = 4000;
     changed.network.allow_upnp = false;
     changed.network.quickmatch_default = 2;

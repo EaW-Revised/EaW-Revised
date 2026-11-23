@@ -154,6 +154,33 @@ core::Result<void> parse_commands(
                 return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-hold-fire payload" + at, logical_path);
             hold.enabled = enabled != 0;
             command.payload = hold;
+        } else if (opcode == detail::opcode_script_teleport_position) {
+            ScriptTeleportPositionPayload to_point;
+            if (!read_vec3(reader, to_point.position))
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-teleport-position payload" + at, logical_path);
+            command.payload = to_point;
+        } else if (opcode == detail::opcode_script_hide) {
+            std::uint32_t hidden{}, hide_reserved{};
+            if (!reader.read_u32(hidden) || !reader.read_u32(hide_reserved) || hidden > 1 || hide_reserved != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-hide payload" + at, logical_path);
+            command.payload = ScriptHidePayload{hidden != 0};
+        } else if (opcode == detail::opcode_script_hyperspace_in) {
+            ScriptHyperspaceInPayload hyperspace;
+            std::uint32_t hyperspace_reserved{};
+            if (!reader.read_u32(hyperspace.frames) || !reader.read_u32(hyperspace_reserved) || hyperspace_reserved != 0
+                || hyperspace.frames > arrival_frames)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-hyperspace-in payload" + at, logical_path);
+            command.payload = hyperspace;
+        } else if (opcode == detail::opcode_script_selectable) {
+            std::uint32_t selectable{}, selectable_reserved{};
+            if (!reader.read_u32(selectable) || !reader.read_u32(selectable_reserved) || selectable > 1 || selectable_reserved != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-selectable payload" + at, logical_path);
+            command.payload = ScriptSelectablePayload{selectable != 0};
+        } else if (opcode == detail::opcode_script_cancel_hyperspace) {
+            std::uint32_t first{}, second{};
+            if (!reader.read_u32(first) || !reader.read_u32(second) || first != 0 || second != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-cancel-hyperspace payload" + at, logical_path);
+            command.payload = ScriptCancelHyperspacePayload{};
         } else if (opcode == detail::opcode_gift) {
             GiftPayload gift;
             std::uint32_t gift_reserved{};

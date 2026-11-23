@@ -128,7 +128,7 @@ replay data. It changes the snapshot digest and never the state hash, so a repla
 which binds no sensor table, has the same state hash and a different snapshot digest.
 
 `tests/skirmish/fixtures/m2-start.eawr-replay` is that replay with 30 ticks. Its tick-zero state
-hash is `8ff4383deccd149a71778692845b1e2ed01f24f3dd693aa55b702a3c7ee09b10`. The CLI test
+hash is `d30c942cb05891b660281cec73af52f573aa3ec5a0cf0ab593099fcf19bcf474`. The CLI test
 recomputes it from the header and setup bytes with the frozen `EAWRTST` encoding; with
 `EAWR_EAW_GAME_ROOT` the start is rebuilt from FoC data and must write the same bytes.
 The recording adds SKSU setup metadata and MTID content domains to the header. These preserve

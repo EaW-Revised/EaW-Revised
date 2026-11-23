@@ -99,6 +99,29 @@ class RealHostTableTests(unittest.TestCase):
         self.assertFalse(story.stubs & set(story.globals), "a name cannot be both bound and stubbed")
         self.assertTrue(story.infrastructure, "scheduler infrastructure names are read from the host table")
 
+    def test_object_host_reads_weighted_list_prelude(self):
+        config = scan.load_config(CONFIG)
+        hosts = bindings.read_all(ROOT, config["hosts"], config["follow"])
+        self.assertTrue(hosts["galactic_object"].knows_member("Parse"))
+        self.assertTrue(any("galactic_story_scripts.cpp" in site
+                            for site in hosts["galactic_object"].members["Parse"]))
+
+    def test_prelude_reads_only_function_assignments_on_the_configured_receiver(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "host.cpp").write_text("""const char* prelude = R"lua(
+-- list.Commented = function() end
+list.Parse = function() end
+other.Wrong = function() end
+list.Value = 1
+)lua";""", encoding="utf-8")
+            host = {"id": "fixture", "lua_preludes": [{"file": "host.cpp", "variable": "prelude", "receiver": "list"}]}
+            found = bindings.read_host(root, host)
+            self.assertEqual(found.problems, [])
+            self.assertEqual(set(found.members), {"Parse"})
+            (root / "host.cpp").write_text('const char* different = R"lua()lua";', encoding="utf-8")
+            self.assertTrue(bindings.read_host(root, host).problems)
+
     def test_config_profiles_resolve_to_layers(self):
         from tools.lua_api_scan import collect
         rows = collect.load_profiles(ROOT, scan.load_config(CONFIG))

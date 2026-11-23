@@ -19,6 +19,7 @@ public:
         std::function<BuiltPendingBattleHud(godot::Vector2, bool)> pending;
         std::function<std::string(std::string_view)> text;
         std::function<godot::Ref<godot::Texture2D>(std::string_view)> texture;
+        std::function<void(bool, bool)> pending_click_sound;
     };
     BattleDialog(godot::Control& parent, Style style,
         std::function<bool(std::uint64_t, viewer::galactic::BattleChoice)> choice);
@@ -31,7 +32,7 @@ public:
     [[nodiscard]] std::string report_json() const;
     void scroll(std::size_t side, double value);
     // Keyboard and acceptance drivers share the button's permission/latch.
-    void activate(viewer::galactic::BattleChoice choice);
+    void activate(viewer::galactic::BattleChoice choice, bool pointer_choice = false);
 private:
     void rebuild();
     std::vector<BuiltGadget>& gadgets();

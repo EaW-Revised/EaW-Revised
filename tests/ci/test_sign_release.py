@@ -552,7 +552,9 @@ class SignReleaseTests(unittest.TestCase):
         # the expected signer is always passed to the release verify
         self.assertIn('--subject "$SIGNING_SUBJECT"', text)
         self.assertIn("id-token: write", text)
-        self.assertNotIn("secrets.", text)
+        self.assertEqual(text.count("secrets."), 1)
+        self.assertIn("${{ secrets.SIGNING_DROP_ROOT }}", text)
+        self.assertIn("::add-mask::%s", text)
         for line in text.splitlines():
             if line.strip().startswith("uses:"):
                 self.assertRegex(line, r"@[0-9a-f]{40}")

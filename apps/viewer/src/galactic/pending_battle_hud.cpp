@@ -5,6 +5,7 @@
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 #include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/classes/canvas_item_material.hpp>
 #include <godot_cpp/classes/texture_button.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/variant/packed_string_array.hpp>
@@ -95,11 +96,32 @@ BuiltPendingBattleHud build_pending_battle_hud(const vfs::Vfs& filesystem,
         const std::string id = begin ? "fight" : resolve ? "auto" : "pending_title";
         if (begin || resolve) {
             auto* button = memnew(EawrHudButton);
-            button->set_sounds(*component, sound);
+            // The accepted-choice callback owns click feedback; hover still
+            // uses this component's authored event.
+            button->set_sounds({}, std::string(component->text(data::ui::Field::mouse_over_sfx)), sound);
             button->set_action([] {});
             button->set_focus_mode(Control::FOCUS_NONE); button->set_mouse_filter(Control::MOUSE_FILTER_STOP);
             const auto hover = component->list(data::ui::Field::mouse_over_texture_name);
-            if (!hover.empty()) button->set_texture_hover(texture(hover.front()));
+            if (!hover.empty()) {
+                const auto source = texture(hover.front());
+                if (source.is_valid()) {
+                    if (component->flag(data::ui::Field::swap_texture)) {
+                        button->set_texture_hover(source);
+                    } else {
+                        // HCB-76 / GCF-01: add rollover RGB over the shell,
+                        // independently of alpha, without modifying shared art.
+                        auto image = source->get_image();
+                        if (image.is_valid()) {
+                            image->convert(Image::FORMAT_RGB8);
+                            button->set_texture_hover(ImageTexture::create_from_image(image));
+                            Ref<CanvasItemMaterial> additive;
+                            additive.instantiate();
+                            additive->set_blend_mode(CanvasItemMaterial::BLEND_MODE_ADD);
+                            button->set_material(additive);
+                        }
+                    }
+                }
+            }
             button->set_meta("battle_caption", String::utf8(text(begin ? "TEXT_BUTTON_BEGIN" : "TEXT_BUTTON_RESOLVE_BATTLE").c_str()));
             add(id, *anchor, button, "button");
         }

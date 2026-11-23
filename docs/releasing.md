@@ -187,17 +187,18 @@ modders and testers. Every game download needs your own Forces of Corruption ins
 | `eaw-revised-<version>-windows-x64-debug.zip` | **Crash and bug reports.** The game with Debug checks, symbols and debug menu entries, plus the command-line tools in Debug mode. It is much slower: use the player zip to play or measure performance. Players in one match should use the same kind of build. See `DEBUG-BUILD.md` inside. |
 | `eaw-revised-<version>-windows-x64-tools.zip` | **Modders and testers.** Eleven command-line simulation, asset/XML/scene/unit/sky scan, script check, HUD movie preparation and benchmark programs. See the archive's `README.md` for each program. Windows may need the Microsoft Visual C++ runtime. |
 | `eaw-revised-<version>-windows-x64-viewer.zip` | **Testers with their own engine.** Bare game project for standard Godot 4.7.2 and Python 3.8+. Developer/tester route on a stock Godot engine, Safe render thread (the stock engine cannot do Separate); not a supported way to play or to measure performance; use the player zip. Start with `play-demo.cmd`; Safe render thread only. The player zip already includes the game and engine. |
+| `eaw-revised-<version>-linux-x64-player.zip` | **Everyone who wants to play on Linux x64.** Extract with `unzip` (it keeps the executable bits) and run `./play.sh`. Includes the bundled patched Godot 4.7.2 engine and the game; no launcher or mod manager yet. Needs glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39 or newer), OpenSSL 3, a Vulkan driver (or Mesa software rendering) and your own copy of the game. Tested with software rendering on Ubuntu 24.04; hardware reports welcome. |
 | `eaw-revised-<version>-linux-x64-tools.zip` | **Linux modders and testers.** The same eleven command-line tools built for Linux x64. See `README.md` inside. |
 | `eaw-revised-<version>-linux-x64-viewer.zip` | **Linux testers with their own engine.** Bare game project for standard Godot 4.7.2 and Python 3.8+. Developer/tester route on a stock Godot engine, Safe render thread (the stock engine cannot do Separate); not a supported way to play or to measure performance; use the player zip. Start with `sh ./play-demo.sh`; Safe render thread only. No bundled Linux player runtime. |
 | `update-manifest.json` | **Launcher updater.** Metadata and hashes for the Windows player download; keep it beside the other release assets. |
 | `SHA256SUMS.txt` | Checksums of the Windows player, tools and viewer zips. |
 | `SHA256SUMS-debug.txt` | Checksum of the Windows Debug zip. |
-| `SHA256SUMS-linux-x64.txt` | Checksums of the Linux x64 tools and viewer zips. |
+| `SHA256SUMS-linux-x64.txt` | Checksums of the Linux x64 player, tools and viewer zips. |
 
 To check a Windows download, open PowerShell in its folder and run
 `Get-FileHash .\eaw-revised-<version>-windows-x64-player.zip` (use your downloaded file's name).
 The Hash must match that file's line in the appropriate checksum file; ignore letter case.
-For Linux, run `sha256sum -c SHA256SUMS-linux-x64.txt` beside both downloaded Linux archives.
+For Linux, run `sha256sum -c SHA256SUMS-linux-x64.txt` beside the downloaded Linux archives.
 
 ## What a release contains
 
@@ -209,6 +210,7 @@ macOS support remains experimental; these release archives do not provide a macO
 |---|---|
 | `eaw-revised-<version>-<platform>-tools.zip` | The headless tools: `sim_headless`, `sim_bench`, `path_bench`, the asset, XML, scene, sky and unit scanners, `asset_validate`, `script_smoke`, `hud_movie_prepare` |
 | `eaw-revised-<version>-windows-x64-player.zip` | The portable player folder for players (below) |
+| `eaw-revised-<version>-linux-x64-player.zip` | The Linux x64 player folder: the patched Linux engine (`godot/godot.linuxbsd.editor.x86_64`, pinned in `tools/engine_pins.json`), `play.sh`, the viewer project with the Linux extension, `runtime.json`, `SHA256SUMS`, licences and the player guide. Written by `package_release.py --platform linux-x64 --godot <engine> --linux-viewer <extension.so>`: the extension comes from the native Linux viewer build (the cross route builds only the Windows one), the engine and `play.sh` get mode 0755 in the zip, no launcher, symbols or mods manager are involved, and the project metadata is imported with the shipped Linux engine. `package_cross.py --linux-player` is the same step on the packaging host. |
 | `eaw-revised-<version>-windows-x64-debug.zip` | The same folder built in the Debug configuration, with PDBs, asserts and the debug tools (below) |
 | `eaw-revised-<version>-<platform>-viewer.zip` | The Godot viewer project with its built GDExtension, `play-demo.cmd` / `play-demo.sh`, and the Python launcher and font extractor (testers and developers with their own Godot) |
 | `SHA256SUMS.txt` | The SHA-256 of every archive |
@@ -274,9 +276,9 @@ and Debug builds cannot overwrite each other. For a single-worktree fallback, pa
 archives first, then build and package Debug; never run both viewer builds concurrently in one worktree. It is laid out like the player folder with the viewer extension and the headless tools built in the
 Debug configuration and their PDBs (`tools/`), plus `DEBUG-BUILD.md` ([the debug build guide](debug-build.md)). The
 pool build uses: `cmake --preset windows-clang-ninja -B out/build/release-clang-debug
--DCMAKE_BUILD_TYPE=Debug -DCMAKE_LINKER=lld-link -DEAWR_DEBUG_SYMBOLS=ON -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF`, the tool targets in
-Debug, then `apps/viewer` with clang-cl, lld-link and `--config Debug` (see `Build-DebugOnHost.ps1`). The static debug C runtime keeps the programs runnable on a PC without
-Visual Studio. The Debug archive is not performance-representative. Fresh-user 10/10 on BOTH the player
+-DCMAKE_BUILD_TYPE=Debug -DCMAKE_LINKER=lld-link -DEAWR_DEBUG_SYMBOLS=ON -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DEAWR_DEBUG_CRT=OFF -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF`, the tool targets in
+Debug, then `apps/viewer` with clang-cl, lld-link and `--config Debug` (see `Build-DebugOnHost.ps1`). The static C runtime keeps the programs runnable on a PC without
+Visual Studio. It is the release runtime (`EAWR_DEBUG_CRT=OFF`, iterator debug level 0), so asserts and full PDBs stay on while no Microsoft Debug runtime library is linked or shipped. The Debug archive is not performance-representative. Fresh-user 10/10 on BOTH the player
 and Debug archives is a publication gate.
 
 Each archive carries `LICENSE`, `THIRD_PARTY_NOTICES.md` and `README.md`. Tools and viewer archives use
@@ -298,6 +300,43 @@ host GPU evidence, and exits non-zero otherwise (`Invoke-RigSuite` itself report
 packaged Godot is launched by the suite, not by the runner). The suite redirects the registered renderer helpers' `subprocess.run` and
 `subprocess.Popen` launches to the extracted archive's own Godot and project, and gives the Debug archive a longer
 per-case budget (the Debug build is not performance-representative). The worktree must sit at the release commit. `Run-FreshUser.ps1` closes its rig sessions and removes the staged archive and its checkout on every exit.
+
+### Linux x64 player gate
+
+The Linux player zip is checked on a clean Ubuntu 24.04 box as a plain user (no sudo, an empty HOME, a read-only package
+folder, software rendering). From a maintainer workstation:
+
+```
+python tools/release/fresh_user/fresh_user_linux_remote.py --package <linux-x64-player.zip> --out <local dir> \
+    --game-root <FoC folder ON THE BOX>
+```
+
+The runner hashes the local zip and always hands that hash to the gate on the box; the verdict's `receipt_matches_archive` is
+true only when the box's copy, a fresh hash taken after the run and the receipt file all equal it. The game folder may contain
+spaces (for example `Star Wars Empire at War`).
+
+The box is reached through environment variables only (nothing host-specific is committed): `EAWR_LINUX_FRESH_HOST`,
+`EAWR_LINUX_FRESH_USER` (plain user), `EAWR_LINUX_FRESH_IDENTITY` (ssh key), optional `EAWR_LINUX_FRESH_KNOWN_HOSTS`, and
+`EAWR_LINUX_FRESH_GAME` (default for `--game-root`). `--game-root` is required: without the game folder the run exits 2 with a
+message, because a gate that skips the game cases must never pass.
+
+The box needs `xvfb` (a virtual display) and `mesa-vulkan-drivers` (the lavapipe software Vulkan driver) as the gate's own
+tooling. They are not player dependencies; a player brings a real display and GPU driver. If either is missing the
+`gate_tooling` case fails and names it. Nothing else may be installed: a library the player needs but does not ship shows up
+as a failed case.
+
+`PASS 17/17` means every one of these passed: `zip_modes` (exec bits inside the archive), `sums`, `exec_bits`,
+`runtime_engine_hash`, `ldd_complete`, `glibc_floor`, `engine_version`, `gate_tooling`, `play_check` (`play.sh --check` prints
+"checks passed"), `foc_missing` (exit 3 and the "cannot find your Empire at War" message, with an empty folder and with no
+argument in an empty HOME), `start_reaches_screen` (`play.sh` reaches the main menu), `clean_quit` (the Escape helper reported a window and exit 0, the game exits 0 by itself, and under load the helper waits for the front-end-ready line and re-sends Escape every 15 s for up to 720 s; and
+`last-run.json` says `clean_quit`; a kill by the timeout or another exit reason is a failure), `online_lib_runtime` (the Online route reports its lobby source as exactly `online` at runtime in the engine log; a `lan`
+fallback fails; not just a clean `ldd`), `logs_written` (`last-run.json` and the engine log appear in the empty HOME), `skirmish_runs` (900 ticks against the AI
+under software rendering, sim hashes equal), `user_dir_only` (HOME gets only the game's state, engine data and caches and
+`/tmp` gains nothing) and `package_unchanged`. It says nothing about hardware GPU rendering or other distributions.
+
+The verdict (`fresh-user-verdict.json`, platform `linux-x64`) goes into the release manifest with
+`release_evidence.py ... --fresh-user-player <windows verdict> --fresh-user-linux <this verdict>`, next to the Windows player
+and Debug verdicts, whenever the release ships a Linux player.
 
 `tools/release/pool_host/Package-OnHost.ps1` packages a finished pool build on the build host that holds it (a staged copy of
 the slot tree, so later jobs cannot disturb it) with `package_release.py --with-mods-manager`, the pinned patched Godot and
@@ -375,9 +414,8 @@ PE/PDB identity checks and symbol-store creation themselves are portable. The ex
 uses the Windows build environment and `Package-OnHost.ps1` uses `robocopy`; the cross route does not invoke either. Both
 routes check their inputs with the same `host_package.py`.
 
-For a cross-built Debug archive, the host's `release-debug-crt` directory under its base must contain the matching
-x64 Debug CRT and UCRT libraries, including `libcmtd.lib`, `libcpmtd.lib`, `libvcruntimed.lib` and `libucrtd.lib`.
-The build fails if a required library is missing and records the library hashes in `debug-runtime.log`. Pass
+A cross-built Debug archive links the static release runtime (`EAWR_DEBUG_CRT=OFF`), so the host needs no Debug CRT
+or UCRT libraries (no `release-debug-crt` directory). Pass
 `--kit-debug --no-test --package-on-host <config.json>`; set `debug` to `true` in that config and add
 `local_inputs.release_dir` containing `EAWR.exe`, `EAWR Mods.exe`, `eawr_mods_service.exe` and
 `eawr_loadcheck.exe` from the same commit's Release build. The packager checks the embedded identities and retains

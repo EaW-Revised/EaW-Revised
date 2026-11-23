@@ -248,7 +248,9 @@ core::Result<Projectile> launch_projectile(const CombatEvent& shot, const ShotPr
     projectile.turn_rate = profile.turn_rate;
     projectile.damage = profile.damage;
     projectile.blast = profile.blast;
+    projectile.combat_mod = profile.combat_mod;
     projectile.damage_delay = profile.damage_delay;
+    projectile.damages_random_hardpoints = profile.damages_random_hardpoints;
     projectile.damage_type = profile.damage_type;
     projectile.shield_damage = profile.shield_damage;
     projectile.hitpoint_damage = profile.hitpoint_damage;
@@ -714,7 +716,9 @@ void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& proje
             | (projectile.damage_delay.raw() > 0 ? 8192U : 0U)
             | (!projectile.homing && projectile.turn_rate.raw() != 0 ? 16384U : 0U)
             | (projectile.flight && projectile.flight->shield_redirected ? 32768U : 0U)
-            | (retained_profile ? 65536U : 0U)); // reserved bit16, WRB-10
+            | (retained_profile ? 65536U : 0U) // reserved bit16, WRB-10
+            | (projectile.damages_random_hardpoints ? 131072U : 0U) // bit17, WAD-27
+            | (projectile.combat_mod.enabled ? 262144U : 0U)); // bit18: a combat modifier follows the damage delay
     sim::detail::append_u32(bytes, 0);
     for (const auto& point : {projectile.position, projectile.step}) {
         sim::detail::append_i64(bytes, point.x.raw());
@@ -777,6 +781,12 @@ void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& proje
     }
     if (projectile.muzzle_delay_until != 0) sim::detail::append_u64(bytes, projectile.muzzle_delay_until);
     if (projectile.damage_delay.raw() > 0) sim::detail::append_i64(bytes, projectile.damage_delay.raw());
+    if (projectile.combat_mod.enabled) {
+        const auto& mod = projectile.combat_mod;
+        sim::detail::append_u32(bytes, mod.stat); sim::detail::append_i64(bytes, mod.value.raw());
+        sim::detail::append_u32(bytes, mod.duration_frames); sim::detail::append_u64(bytes, mod.categories);
+        sim::detail::append_u32(bytes, mod.key);
+    }
     if (!projectile.homing && projectile.turn_rate.raw() != 0) {
         for (const auto value : {projectile.turn_rate, projectile.yaw, projectile.pitch}) sim::detail::append_i64(bytes, value.raw());
     }

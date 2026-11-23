@@ -20,7 +20,7 @@
 // child-state without re-simulating, then restores the host into a fresh scheduler.
 namespace eawr::checkpoint {
 
-inline constexpr std::uint16_t tactical_host_section_version = 1;
+inline constexpr std::uint16_t tactical_host_section_version = 2;
 
 // Section 20: the encoding of a campaign child host's script part (the same field order and
 // framing), without the campaign-only timeline, cursors and attribution.

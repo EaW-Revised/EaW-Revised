@@ -81,6 +81,10 @@ public:
     [[nodiscard]] std::optional<core::Diagnostic> load_error() const;
     void set_adapter_factory(AdapterFactory factory) { adapter_factory_ = std::move(factory); }
     void set_mounted_mods(std::vector<std::uint8_t> value) { mounted_mods_ = std::move(value); }
+    // The host's staging dialog: how many player rows it draws (0: not known yet, no limit). A room never plans more human rows than
+    // the dialog can draw (net::galactic_lobby_human_row_limit), so no player sits on a row nobody sees.
+    void set_dialog_rows(const std::size_t rows) noexcept { dialog_rows_.store(rows, std::memory_order_relaxed); }
+    [[nodiscard]] std::size_t dialog_rows() const noexcept { return dialog_rows_.load(std::memory_order_relaxed); }
     [[nodiscard]] const std::vector<std::uint8_t>& mounted_mods() const noexcept { return mounted_mods_; }
     // Whether a campaign match can be built here (the GCMP-03 driver installed its adapter factory).
     [[nodiscard]] bool can_start() const noexcept { return static_cast<bool>(adapter_factory_); }
@@ -216,6 +220,7 @@ private:
     std::atomic<bool> prefetching_{};
     AdapterFactory adapter_factory_;
     std::vector<std::uint8_t> mounted_mods_;
+    std::atomic<std::size_t> dialog_rows_{0};
     std::uint64_t acceptance_final_tick_{};
     // One local preparation for an exact frozen attempt. Content and callbacks are immutable for this backend.
     struct Preparation {

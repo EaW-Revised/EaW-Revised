@@ -89,8 +89,7 @@ void validate_chain(const mods::Profile& profile) {
     mods::DiscoveryInput discovery; discovery.walk_trees = false;
     std::vector<std::string> keys;
     for (const auto& layer : profile.layers) { discovery.manual_folders.push_back(mods::steam::path_from_utf8(layer.root)); keys.push_back(layer.key); }
-    auto catalog = mods::discover(discovery);
-    mods::read_mod_metadata(catalog);
+    auto catalog = mods::discover(discovery);   // discover() already reads the modinfo files
     for (auto& record : catalog.records) for (const auto& layer : profile.layers) {
         std::error_code ec;
         if (!fs::equivalent(mods::steam::path_from_utf8(record.root), mods::steam::path_from_utf8(layer.root), ec) || ec) continue;
@@ -234,13 +233,13 @@ std::optional<Reply> Records::start(std::uint64_t id, std::string method, const 
             if (!(fresh && fresh->boolean)) {
                 std::lock_guard lock(state_->mutex);
                 const auto found_reuse = state_->reuse.find(profile.id);
-                if (found_reuse != state_->reuse.end() && std::chrono::steady_clock::now() - found_reuse->second.at < kFingerprintReuse
+                if (found_reuse != state_->reuse.end() && now() - found_reuse->second.at < kFingerprintReuse
                     && found_reuse->second.layers == profile.layers && state_->helpers.contains(profile.id + ':' + found_reuse->second.key))
                     key = found_reuse->second.key;
             }
             const bool reused = !key.empty();
             if (!reused) {
-                const auto taken = std::chrono::steady_clock::now();
+                const auto taken = now();
                 std::uint64_t generation; { std::lock_guard lock(state_->mutex); generation = state_->reuse_generation; }
                 key = mods::loadcheck_chain_fingerprint(profile, game, build);
                 if (!key.empty()) { std::lock_guard lock(state_->mutex); if (state_->reuse_generation == generation) state_->reuse[profile.id] = {key, taken, profile.layers}; }

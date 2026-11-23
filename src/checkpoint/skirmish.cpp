@@ -45,7 +45,7 @@ void script_value(detail::Writer& out, const auth::Value& value, int depth = 0) 
         if constexpr (std::is_same_v<T, bool>) out.u8(item ? 1 : 0);
         else if constexpr (std::is_same_v<T, script::numeric::LuaNumber>) out.u64(item.repr);
         else if constexpr (std::is_same_v<T, std::string>) text(out, item);
-        else if constexpr (std::is_same_v<T, auth::Handle>) { out.u32(item.kind); out.u64(item.id); }
+        else if constexpr (std::is_same_v<T, auth::Handle>) { out.u32(item.kind); out.u64(item.id); out.u32(item.aux); }
         else if constexpr (std::is_same_v<T, auth::ValueList>) {
             out.u64(item.size());
             for (const auto& child : item) script_value(out, child, depth + 1);
@@ -60,7 +60,7 @@ auth::Value script_value(detail::Reader& in, int depth = 0) {
     case 1: { const auto flag = in.u8(); if (flag > 1) return reject(); return auth::Value{flag != 0}; }
     case 2: return auth::Value::number(script::numeric::LuaNumber::from_repr(in.u64()));
     case 3: return auth::Value::text(text(in));
-    case 4: { const auto kind = in.u32(); return auth::Value{auth::Handle{kind, in.u64()}}; }
+    case 4: { const auto kind = in.u32(); const auto id = in.u64(); return auth::Value{auth::Handle{kind, id, in.u32()}}; }
     case 5: {
         const auto count = in.u64();
         if (count > in.remaining()) return reject();

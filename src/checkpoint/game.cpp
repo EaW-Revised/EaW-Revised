@@ -45,7 +45,7 @@ void script_value(detail::Writer& out, const auth::Value& value, int depth = 0) 
         if constexpr (std::is_same_v<T, bool>) out.u8(item ? 1 : 0);
         else if constexpr (std::is_same_v<T, script::numeric::LuaNumber>) out.u64(item.repr);
         else if constexpr (std::is_same_v<T, std::string>) text(out, item);
-        else if constexpr (std::is_same_v<T, auth::Handle>) { out.u32(item.kind); out.u64(item.id); }
+        else if constexpr (std::is_same_v<T, auth::Handle>) { out.u32(item.kind); out.u64(item.id); out.u32(item.aux); }
         else if constexpr (std::is_same_v<T, auth::ValueList>) {
             out.u64(item.size()); for (const auto& child : item) script_value(out, child, depth + 1);
         }
@@ -59,7 +59,7 @@ auth::Value script_value(detail::Reader& in, int depth = 0) {
     case 1: { const auto flag = in.u8(); if (flag > 1) return reject(); return auth::Value{flag != 0}; }
     case 2: return auth::Value::number(script::numeric::LuaNumber::from_repr(in.u64()));
     case 3: return auth::Value::text(text(in));
-    case 4: { const auto kind = in.u32(); return auth::Value{auth::Handle{kind, in.u64()}}; }
+    case 4: { const auto kind = in.u32(); const auto id = in.u64(); return auth::Value{auth::Handle{kind, id, in.u32()}}; }
     case 5: {
         const auto count = in.u64(); if (count > in.remaining()) return reject();
         auth::ValueList list;
@@ -135,7 +135,7 @@ core::Result<std::optional<auth::GalacticScriptSave>> decode_scripts(std::span<c
 // Coordinator-reserved: optional child-host tail in unreleased galaxy section 9 v1.
 // With no child the AI/story section keeps its original bytes exactly.
 core::Result<Bytes> encode_child_host(const campaign::BattleCheckpoint& saved) {
-    detail::Writer out; out.u32(4); out.u32(static_cast<std::uint32_t>(saved.timeline)); out.u64(saved.timeline_tick);
+    detail::Writer out; out.u32(5); out.u32(static_cast<std::uint32_t>(saved.timeline)); out.u64(saved.timeline_tick);
     out.u64(saved.scripts.completed_tick); text(out, saved.scripts.scheduler);
     out.u32(saved.scripts.native ? 1 : 0);
     if (saved.scripts.native) {
@@ -171,7 +171,7 @@ core::Result<std::optional<campaign::BattleCheckpoint>> decode_child_host(std::s
     using Save = std::optional<campaign::BattleCheckpoint>;
     if (bytes.empty()) return core::Result<Save>::success({});
     detail::Reader in(bytes); campaign::BattleCheckpoint saved;
-    if (in.u32() != 4) return fail<Save>("section scripts: invalid child host version", path);
+    if (in.u32() != 5) return fail<Save>("section scripts: invalid child host version", path);
     const auto timeline = in.u32();
     if (timeline > 5) return fail<Save>("section scripts: invalid child timeline", path);
     saved.timeline = static_cast<std::int32_t>(timeline);
@@ -1129,6 +1129,9 @@ core::Result<void> validate_checkpoint_reconstruction(campaign::GameSession& ses
                     + std::to_string(section.bytes.size()) + "/" + std::to_string(other->bytes.size()) + ")";
             }
         }
+        // The restored session's hash inputs, named: the saved side has only the combined digest, so the message carries the
+        // restored components next to the saved total; a test compares them with hash_components() taken at save time.
+        detail_text += " restored{" + session.hash_components() + " }; saved total=" + detail::hex(expected_hash).substr(0, 12);
         return fail<void>("reconstructed game state differs" + (detail_text.empty() ? std::string{} : ";" + detail_text),
             path, diagnostic_codes::restore_failed);
     }

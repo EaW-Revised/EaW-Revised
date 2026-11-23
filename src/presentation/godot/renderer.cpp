@@ -661,6 +661,10 @@ void GodotRenderer::set_unit_colorization(const sim::EntityId entity_id, const s
     impl_->set_unit_colorization(entity_id, rgb);
 }
 
+void GodotRenderer::clear_unit_colorization(const sim::EntityId entity_id) {
+    impl_->clear_unit_colorization(entity_id);
+}
+
 void GodotRenderer::set_unit_opacity(const sim::EntityId entity_id, const float alpha) {
     impl_->set_unit_opacity(entity_id, alpha);
 }

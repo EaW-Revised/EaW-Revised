@@ -907,7 +907,7 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
     shot.start_enabled = impl.start_enabled;
     shot.host = impl.host;
     if (const auto room = match_->lobby_state()) {
-        shot.room_revision = room->snapshot.revision; shot.local_ready = room->local_ready; shot.preparing = room->preparing;
+        shot.room_revision = room->snapshot.revision; shot.room_capacity = room->snapshot.capacity; shot.local_ready = room->local_ready; shot.preparing = room->preparing;
         shot.ready_seats = static_cast<std::size_t>(std::count_if(room->snapshot.seats.begin(), room->snapshot.seats.end(), [](const auto& seat) { return seat.ready; }));
     }
     shot.dialog_rows = state_ ? state_->dialog_rows : 0;

@@ -18,6 +18,7 @@
 #include "eawr/presentation/ui/net_perf.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
+#include "../../apps/viewer/src/galactic/battle_seat_view.hpp"
 #include "../../apps/viewer/src/galactic/live_battle_dialog_view.hpp"
 
 #include <algorithm>
@@ -37,6 +38,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -64,12 +66,13 @@ template <class T> T require(eawr::core::Result<T> result) {
     return std::move(result).value();
 }
 
-galactic::GalacticSetup versus_setup(const std::uint32_t players = 3) {
+galactic::GalacticSetup versus_setup(const std::uint32_t players = 3, const std::uint32_t human_sides = 2) {
     eawr::campaign::SyntheticCampaign campaign;
     campaign.name = "net-galactic-live-versus";
     campaign.galaxy.seed = 31;
     campaign.galaxy.planets = 24;
     campaign.galaxy.players = players;
+    campaign.galaxy.human_sides = human_sides;
     campaign.galaxy.fleets_per_player = 2;
     campaign.galaxy.members_per_fleet = 3;
     campaign.galaxy.debug_commands = true;
@@ -654,10 +657,11 @@ void closed_link_applies_fallback() {
     }), "the disconnected human stays inactive");
 }
 
-void install_observer(galactic::GalacticSetup& setup) {
-    auto& observer = setup.observer.emplace(); observer.human_observers = {1, 2};
+void install_observer(galactic::GalacticSetup& setup, const std::uint32_t human_sides = 2) {
+    auto& observer = setup.observer.emplace();
+    for (std::uint32_t player = 1; player <= human_sides; ++player) observer.human_observers.push_back(player);
     for (const auto& player : setup.players) {
-        galactic::ObserverPlayer facts; facts.player = player.player_id; facts.ai = player.player_id > 2;
+        galactic::ObserverPlayer facts; facts.player = player.player_id; facts.ai = player.player_id > human_sides;
         facts.minimum_visible_base_level = 100; observer.players.push_back(facts);
     }
     for (const auto& planet : setup.planets) {
@@ -700,9 +704,9 @@ void private_views_and_digests(const std::array<std::size_t, 2> workers) {
         "different live view players produce identical replay bytes");
 }
 
-galactic::GalacticSetup multiplayer_child_setup(const std::uint32_t players = 3) {
-    auto setup = versus_setup(players);
-    install_observer(setup);
+galactic::GalacticSetup multiplayer_child_setup(const std::uint32_t players = 3, const std::uint32_t human_sides = 2) {
+    auto setup = versus_setup(players, human_sides);
+    install_observer(setup, human_sides);
     setup.victory.emplace();
     auto& context = setup.victory->context;
     context.multiplayer = true;
@@ -710,7 +714,7 @@ galactic::GalacticSetup multiplayer_child_setup(const std::uint32_t players = 3)
     for (const auto& player : setup.players) {
         galactic::VictoryPlayer row;
         row.player = player.player_id; row.faction = "Faction" + std::to_string(player.player_id);
-        row.playable = true; row.human = player.player_id <= 2; row.ai = !row.human;
+        row.playable = true; row.human = player.player_id <= human_sides; row.ai = !row.human;
         context.players.push_back(std::move(row));
         for (const auto& other : setup.players)
             context.relations.push_back({player.player_id, other.player_id, player.player_id == other.player_id});
@@ -774,7 +778,7 @@ bool conflict_human(const galactic::GalacticSetup& initial, const eawr::campaign
 // Synthetic assets use production session arbitration and the real tactical AI host.
 std::shared_ptr<eawr::platform::CampaignServiceConfiguration> child_services(
     const galactic::GalacticSetup& initial, const bool automatic, const bool multiplayer_votes = false,
-    const std::uint64_t timeout_ticks = 450, const bool tactical_ai = false) {
+    const std::uint64_t timeout_ticks = 450, const bool tactical_ai = false, const bool timed_votes = true) {
     namespace cp = eawr::campaign;
     namespace tactical = eawr::sim::tactical;
     auto services = std::make_shared<eawr::platform::CampaignServiceConfiguration>();
@@ -786,7 +790,7 @@ std::shared_ptr<eawr::platform::CampaignServiceConfiguration> child_services(
         return eawr::core::Result<tactical::TacticalContent>::success(std::move(rules));
     };
     services->restore.content = content;
-    services->configure = [initial, automatic, multiplayer_votes, timeout_ticks, tactical_ai, content](cp::GameSession& game) {
+    services->configure = [initial, automatic, multiplayer_votes, timeout_ticks, tactical_ai, timed_votes, content](cp::GameSession& game) {
         cp::ConflictRecord entry;
         entry.id = game.galaxy().next_entity_id();
         entry.planet = initial.planets.front().id; entry.invader = 1; entry.defender = 2;
@@ -809,9 +813,25 @@ std::shared_ptr<eawr::platform::CampaignServiceConfiguration> child_services(
             return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({});
         }, content, {}, cp::ScriptRequirement::none);
         game.set_vote_progress(child_vote_progress());
-        if (multiplayer_votes) {
+        if (multiplayer_votes && timed_votes) {
             auto configured = game.configure_multiplayer_votes(timeout_ticks);
             if (!configured) return configured;
+        } else if (multiplayer_votes) {
+            // A vote timeout that is OFF (a LAN game): the same policy as the timed vote, with no timeout and so no default
+            // spectate role for the side that stays out of the battle. Every human side that fights votes.
+            game.set_vote_progress([initial](const cp::ConflictRecord& conflict, const auto& votes) {
+                std::optional<bool> selected{true};
+                for (const auto owner : {conflict.invader, conflict.defender}) {
+                    const bool human = std::any_of(initial.seats.begin(), initial.seats.end(), [&](const auto& seat) {
+                        return seat.active && seat.kind == galactic::SeatKind::human && seat.player == owner;
+                    });
+                    if (!human) continue;
+                    const auto vote = votes.find(owner);
+                    if (vote != votes.end() && !vote->second) return eawr::core::Result<std::optional<bool>>::success(std::optional<bool>{false});
+                    if (vote == votes.end()) selected.reset();
+                }
+                return eawr::core::Result<std::optional<bool>>::success(selected);
+            });
         }
         if (tactical_ai) {
             // The same skirmish player selection and prepared tactical host used by
@@ -3086,25 +3106,29 @@ void multiplayer_coop_battle() {
     expect(pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(), "co-op battle has equal digests every tick");
 }
 
-// Three live peers over one setup (the Pair fixture's shape, one more peer). Transports and matches are declared first: they
-// must outlive the live sessions.
-struct Trio {
-    Trio(galactic::GalacticSetup initial, const std::array<std::size_t, 3> workers)
-        : setup(std::move(initial)), humans(human_seats(setup)), pipes(3), worker_counts(workers) {
-        if (humans.size() != 3) throw std::runtime_error("the fixture needs exactly three human seats");
+// N live peers over one setup (the Pair fixture's shape, any peer count; one human seat per peer, one worker count per peer).
+// Transports and matches are declared first: they must outlive the live sessions.
+struct Peers {
+    Peers(galactic::GalacticSetup initial, std::vector<std::size_t> workers)
+        : setup(std::move(initial)), humans(human_seats(setup)), pipes(static_cast<std::uint32_t>(workers.size())),
+          worker_counts(std::move(workers)) {
+        if (humans.size() != worker_counts.size()) throw std::runtime_error("the fixture needs one human seat per peer");
         viewer::GalacticLanOptions options;
         options.clock_policy = net::GalacticClockPolicy::limited;
         for (const auto human : humans) options.seats.push_back({human, true});
         options.exchange_every = 10;
         options.waiting_notice_ms = 3000;
         options.final_tick_count = net::max_session_ticks;
-        for (net::PeerIndex peer = 0; peer < 3; ++peer) {
+        transports.resize(humans.size());
+        matches.resize(humans.size());
+        lives.resize(humans.size());
+        for (net::PeerIndex peer = 0; peer < humans.size(); ++peer) {
             transports[peer] = std::make_unique<PipeTransport>(pipes, peer);
             auto local_options = options;
             matches[peer] = std::make_unique<viewer::GalacticLanMatch>(*transports[peer], std::move(local_options));
         }
     }
-    ~Trio() {
+    ~Peers() {
         for (auto& live : lives) if (live) live->stop();
     }
     void start(const net::PeerIndex peer, const std::function<void(LiveGameSession::Options&)>& tweak = {}) {
@@ -3122,7 +3146,8 @@ struct Trio {
         for (auto& live : lives) live->advance_to(tick);
         bool reached = true;
         for (auto& live : lives) reached = live->wait_for(tick, 30s) && reached;
-        return reached && !lives[0]->failure() && !lives[1]->failure() && !lives[2]->failure();
+        for (const auto& live : lives) reached = reached && !live->failure();
+        return reached;
     }
     [[nodiscard]] std::uint64_t galaxy_frame(const net::PeerIndex peer) const {
         return static_cast<std::uint64_t>(lives[peer]->frame().latest->clock().galactic_frame);
@@ -3130,10 +3155,10 @@ struct Trio {
     galactic::GalacticSetup setup;
     std::vector<eawr::sim::SeatId> humans;
     Pipes pipes;
-    std::array<std::size_t, 3> worker_counts;
-    std::array<std::unique_ptr<PipeTransport>, 3> transports;
-    std::array<std::unique_ptr<viewer::GalacticLanMatch>, 3> matches;
-    std::array<std::unique_ptr<LiveGameSession>, 3> lives;
+    std::vector<std::size_t> worker_counts;
+    std::vector<std::unique_ptr<PipeTransport>> transports;
+    std::vector<std::unique_ptr<viewer::GalacticLanMatch>> matches;
+    std::vector<std::unique_ptr<LiveGameSession>> lives;
 };
 
 // #8082: two teammates of one faction fight an AI faction while a third human, of another faction, is in neither fighting
@@ -3158,52 +3183,194 @@ void multiplayer_battle_bystander_watches(const std::array<std::size_t, 3> worke
     for (const auto& player : initial.players)
         initial.seat_control->controllers.push_back({player.player_id,
             player.player_id != 2 ? galactic::FactionControl::human : galactic::FactionControl::ai, galactic::FactionControl::ai, {}, {}});
-    Trio trio(initial, workers);
+    Peers peers(initial, std::vector<std::size_t>(workers.begin(), workers.end()));
     const auto services = child_services(initial, false, true, 450, true);
     const auto configure = [services](auto& options) { options.services = services; };
-    for (net::PeerIndex peer = 0; peer < 3; ++peer) trio.start(peer, configure);
-    expect(trio.run_to(10), label + "three peers reach the conflict boundary");
-    const auto pending = trio.lives[0]->frame().pending_conflict;
-    expect(pending && trio.lives[1]->frame().pending_conflict && trio.lives[2]->frame().pending_conflict,
+    for (net::PeerIndex peer = 0; peer < 3; ++peer) peers.start(peer, configure);
+    expect(peers.run_to(10), label + "three peers reach the conflict boundary");
+    const auto pending = peers.lives[0]->frame().pending_conflict;
+    expect(pending && peers.lives[1]->frame().pending_conflict && peers.lives[2]->frame().pending_conflict,
         label + "the team's conflict with the AI is pending on all three peers");
     if (!pending) return;
     const auto conflict = pending->conflict.id;
-    trio.order(0, galactic::BattleChoice{conflict, true});
-    expect(trio.run_to(30), label + "the team's Begin settles the vote");
+    peers.order(0, galactic::BattleChoice{conflict, true});
+    expect(peers.run_to(30), label + "the team's Begin settles the vote");
     for (net::PeerIndex peer = 0; peer < 3; ++peer) {
-        const auto frame = trio.lives[peer]->frame(trio.humans[peer]);
+        const auto frame = peers.lives[peer]->frame(peers.humans[peer]);
         expect(frame.battle && frame.conflict && !frame.pending_conflict, label + "the tactical child runs on every peer, bystander included");
         if (!frame.conflict) continue;
         std::size_t team{}, idle{};
         for (const auto& binding : frame.conflict->seats) {
             team += binding.player == 1 ? 1 : 0;
-            idle += binding.seat == trio.humans[2] && binding.player == 0 ? 1 : 0;
+            idle += binding.seat == peers.humans[2] && binding.player == 0 ? 1 : 0;
         }
         expect(team == 2 && idle == 1, label + "the teammates are bound to the team's player, the bystander has no battle player");
-        expect(frame.battle_spectators.size() == 1 && frame.battle_spectators.front().seat == trio.humans[2]
+        expect(frame.battle_spectators.size() == 1 && frame.battle_spectators.front().seat == peers.humans[2]
             && frame.battle_spectators.front().observer == 1,
             label + "the bystander's seat is published as a spectator of the player team's perspective");
     }
-    const auto watcher = trio.lives[2]->battle_feed(conflict, trio.humans[2]);
-    const auto player_feed = trio.lives[0]->battle_feed(conflict, trio.humans[0]);
+    const auto watcher = peers.lives[2]->battle_feed(conflict, peers.humans[2]);
+    const auto player_feed = peers.lives[0]->battle_feed(conflict, peers.humans[0]);
     expect(watcher && player_feed, label + "the spectating seat gets a battle feed like the playing seat");
-    expect(!trio.lives[2]->battle_feed(conflict + 1000, trio.humans[2]) && !trio.lives[0]->battle_feed(conflict, eawr::sim::SeatId{99}),
+    expect(!peers.lives[2]->battle_feed(conflict + 1000, peers.humans[2]) && !peers.lives[0]->battle_feed(conflict, eawr::sim::SeatId{99}),
         label + "a stale conflict or an unknown seat gets no feed");
-    for (std::uint64_t tick = 31; tick <= 100; ++tick) expect(trio.run_to(tick), label + "the battle advances through agreed ticks");
+    for (std::uint64_t tick = 31; tick <= 100; ++tick) expect(peers.run_to(tick), label + "the battle advances through agreed ticks");
     expect(watcher && watcher->completed_tick() > 0, label + "the spectator's feed follows the battle");
-    expect(!trio.lives[0]->frame().conflict && !trio.lives[1]->frame().conflict && !trio.lives[2]->frame().conflict,
+    expect(!peers.lives[0]->frame().conflict && !peers.lives[1]->frame().conflict && !peers.lives[2]->frame().conflict,
         label + "all three peers return from the battle");
-    expect(trio.run_to(120) && trio.galaxy_frame(0) == trio.galaxy_frame(1) && trio.galaxy_frame(1) == trio.galaxy_frame(2),
+    expect(peers.run_to(120) && peers.galaxy_frame(0) == peers.galaxy_frame(1) && peers.galaxy_frame(1) == peers.galaxy_frame(2),
         label + "the campaign resumes equally on all three peers");
-    for (auto& live : trio.lives) live->stop();
-    expect(!trio.lives[0]->failure() && !trio.lives[1]->failure() && !trio.lives[2]->failure(),
+    for (auto& live : peers.lives) live->stop();
+    expect(!peers.lives[0]->failure() && !peers.lives[1]->failure() && !peers.lives[2]->failure(),
         label + "a bystander in the battle never fails a peer");
-    expect(trio.lives[0]->tick_hashes() == trio.lives[1]->tick_hashes() && trio.lives[1]->tick_hashes() == trio.lives[2]->tick_hashes(),
+    expect(peers.lives[0]->tick_hashes() == peers.lives[1]->tick_hashes() && peers.lives[1]->tick_hashes() == peers.lives[2]->tick_hashes(),
         label + "the bystander compares equal digests every tick");
-    const auto commands = trio.lives[2]->record().commands;
+    const auto commands = peers.lives[2]->record().commands;
     expect(std::none_of(commands.begin(), commands.end(), [&](const auto& command) {
-        return command.key.seat == trio.humans[2] && std::holds_alternative<galactic::TacticalLayerCommand>(command.payload);
+        return command.key.seat == peers.humans[2] && std::holds_alternative<galactic::TacticalLayerCommand>(command.payload);
     }), label + "the spectator issued no battle command");
+}
+
+// #8182: the viewer's battle entry of a seat (battle_seat_view): a seat with a battle player commands, a spectator watches
+// read-only, and a seat with neither (a role that is still pending, an unknown seat, no battle) gets no battle view at all.
+void battle_seat_view_contracts() {
+    using eawr::viewer::galactic::BattleSeatView;
+    using eawr::viewer::galactic::battle_seat_view;
+    auto record = std::make_shared<eawr::campaign::ConflictRecord>();
+    record->seats = {{eawr::sim::SeatId{1}, 1}, {eawr::sim::SeatId{2}, 0}, {eawr::sim::SeatId{3}, 0}};
+    eawr::platform::LiveGameFrame frame;
+    expect(battle_seat_view(frame, eawr::sim::SeatId{1}) == BattleSeatView{}, "no battle, no battle view");
+    frame.conflict = record;
+    frame.battle_spectators.push_back({eawr::sim::SeatId{3}, 1});
+    expect(battle_seat_view(frame, eawr::sim::SeatId{1}) == BattleSeatView({true, 1, true}), "a seat with a battle player commands its side");
+    expect(battle_seat_view(frame, eawr::sim::SeatId{3}) == BattleSeatView({true, 1, false}), "a spectator watches the observer perspective, read-only");
+    expect(battle_seat_view(frame, eawr::sim::SeatId{2}) == BattleSeatView{}, "a seat with no battle player and no spectate role (pending) has no battle view");
+    expect(battle_seat_view(frame, eawr::sim::SeatId{9}) == BattleSeatView{}, "an unknown seat has no battle view");
+    frame.battle_spectators.front().observer = 0;
+    expect(battle_seat_view(frame, eawr::sim::SeatId{3}) == BattleSeatView{}, "a spectator without an agreed perspective has no battle view");
+}
+
+// #8182: a human faction that is in neither fighting faction (the bystander side B) must never command a unit of the player
+// side A, whichever way its role of the battle was reached: the online default (a vote timeout, role = spectate) or a LAN game
+// with no timeout (the role stays pending, nothing ever picks one). Side A is one human or a co-op pair; it fights an AI.
+// The bystander seat forges a battle order of side A's own unit (valid bytes, the other seat's provenance dropped when side A
+// has no co-op policy): the simulation refuses it on every peer, nothing enters any record, and the digests stay equal.
+void multiplayer_battle_bystander_orders_refused(const bool timed_votes, const bool coop_side, const std::vector<std::size_t>& workers) {
+    std::string label = std::string(timed_votes ? "vote timeout on" : "vote timeout off") + (coop_side ? ", co-op side" : ", single human side")
+        + ", workers";
+    for (const auto count : workers) label += "/" + std::to_string(count);
+    label += ": ";
+    auto initial = multiplayer_child_setup(3);
+    if (!coop_side) std::erase_if(initial.seats, [](const auto& seat) { return seat.seat_id.value == 2; });
+    for (auto& seat : initial.seats) {
+        if (seat.seat_id.value == 1 || seat.seat_id.value == 2) { seat.player = 1; seat.human_side_id = 1; }
+        else if (seat.seat_id.value == 3) seat.player = 2;
+    }
+    initial.seats.push_back({eawr::sim::SeatId{4}, 3, eawr::sim::SeatKind::human, 3, true, 2});
+    initial.observer->human_observers = {1, 3};
+    for (auto& player : initial.observer->players) player.ai = player.player == 2;
+    for (auto& player : initial.victory->context.players) { player.human = player.player != 2; player.ai = !player.human; }
+    initial.seat_control.emplace();
+    initial.seat_control->teams = {{1, {1}, false}, {2, {4}, false}};
+    for (const auto& player : initial.players)
+        initial.seat_control->controllers.push_back({player.player_id,
+            player.player_id != 2 ? galactic::FactionControl::human : galactic::FactionControl::ai, galactic::FactionControl::ai, {}, {}});
+    Peers peers(initial, workers);
+    const net::PeerIndex bystander = static_cast<net::PeerIndex>(peers.humans.size() - 1);
+    expect(peers.humans[bystander] == eawr::sim::SeatId{4}, label + "the last peer is the bystander side's seat");
+    const auto services = child_services(initial, false, true, 450, true, timed_votes);
+    const auto configure = [services](auto& options) { options.services = services; };
+    for (net::PeerIndex peer = 0; peer < peers.humans.size(); ++peer) peers.start(peer, configure);
+    expect(peers.run_to(10), label + "the peers reach the conflict boundary");
+    const auto pending = peers.lives[0]->frame().pending_conflict;
+    if (!pending) { expect(false, label + "the player side's conflict with the AI is pending"); return; }
+    const auto conflict = pending->conflict.id;
+    peers.order(0, galactic::BattleChoice{conflict, true});
+    expect(peers.run_to(30), label + "the player side's Begin settles the vote");
+    const auto frame = peers.lives[bystander]->frame(peers.humans[bystander]);
+    if (!frame.conflict || !frame.latest) { expect(false, label + "the tactical child exists on the bystander peer"); return; }
+    const auto role = [&](const net::PeerIndex peer) {
+        const auto latest = peers.lives[peer]->frame().latest;
+        return latest && latest->seat_control() && latest->seat_control()->battle
+            ? std::optional(latest->seat_control()->battle->role) : std::nullopt;
+    };
+    // No choice dialog exists yet, so a role is never left pending: the bystander side spectates with or without a timeout.
+    const auto expected_role = galactic::BattleTeamRole::spectate;
+    for (net::PeerIndex peer = 0; peer < peers.humans.size(); ++peer)
+        expect(role(peer) == std::optional(expected_role), label + "every peer agrees on the bystander side's role");
+    // The bystander seat is never bound to a battle player, whatever the role (a pending role never gives a commandable view).
+    std::size_t bystander_bound{};
+    for (const auto& binding : frame.conflict->seats) bystander_bound += binding.seat == peers.humans[bystander] && binding.player != 0 ? 1 : 0;
+    expect(bystander_bound == 0, label + "the bystander seat has no battle player");
+    expect(frame.battle_spectators.size() == 1U, label + "the bystander is published as a spectator");
+    // The viewer's battle entry for each seat: the players command their own side; the spectator enters read-only (no
+    // selection, no orders, no order controls); a pending role never yields a view at all.
+    for (net::PeerIndex peer = 0; peer + 1 < peers.humans.size(); ++peer)
+        expect(eawr::viewer::galactic::battle_seat_view(peers.lives[peer]->frame(peers.humans[peer]), peers.humans[peer])
+            == eawr::viewer::galactic::BattleSeatView{true, 1, true}, label + "a player seat enters the battle and commands its side");
+    const auto seat_view = eawr::viewer::galactic::battle_seat_view(frame, peers.humans[bystander]);
+    expect(!seat_view.commandable, label + "the bystander seat never gets a commandable battle view");
+    expect(seat_view == eawr::viewer::galactic::BattleSeatView{true, 1, false}, label + "the bystander watches read-only");
+    // Valid bytes of an order of side A's unit, sent from the bystander seat.
+    const auto own = std::find_if(frame.conflict->forces.begin(), frame.conflict->forces.end(), [](const auto& row) { return row.owner == 1; });
+    const auto target = std::find_if(frame.conflict->forces.begin(), frame.conflict->forces.end(), [](const auto& row) { return row.owner == 2; });
+    if (own == frame.conflict->forces.end() || target == frame.conflict->forces.end()) { expect(false, label + "both forces exist"); return; }
+    eawr::sim::tactical::PlayerCommand forged{{0, 1, 1}, {own->id}, eawr::sim::tactical::AttackPayload{target->id}};
+    if (frame.conflict->tactical.controllers) { forged.origin = eawr::sim::tactical::CommandOrigin::seat; forged.issuing_seat = peers.humans[0]; }
+    const auto body = require(eawr::sim::tactical::encode_command_body(forged, frame.conflict->tactical));
+    peers.order(bystander, galactic::TacticalLayerCommand{conflict, eawr::sim::tactical::command_body_opcode(forged), body});
+    for (std::uint64_t tick = 31; tick <= 100; ++tick) expect(peers.run_to(tick), label + "the peers advance through agreed ticks");
+    const auto after = peers.lives[0]->frame();
+    expect(!after.conflict, label + "the battle reaches its end on every peer (a role never holds it)");
+    for (auto& live : peers.lives) live->stop();
+    for (net::PeerIndex peer = 0; peer < peers.humans.size(); ++peer) {
+        expect(!peers.lives[peer]->failure(), label + "a bystander order never fails a peer");
+        const auto commands = peers.lives[peer]->record().commands;
+        expect(std::none_of(commands.begin(), commands.end(), [&](const auto& command) {
+            return command.key.seat == peers.humans[bystander] && std::holds_alternative<galactic::TacticalLayerCommand>(command.payload);
+        }), label + "no battle order of the bystander seat enters the record of peer " + std::to_string(peer));
+        expect(peers.lives[peer]->tick_hashes() == peers.lives[0]->tick_hashes(), label + "equal digests on peer " + std::to_string(peer));
+    }
+    expect(!peers.lives[bystander]->rejected_orders().empty(), label + "the bystander's order is refused with a diagnostic");
+}
+
+// #8071: N human versus sides, one faction each, and one AI faction, on the made-up synthetic campaign: every human issues a
+// galaxy order in the same tick. All peers (worker counts differ per peer) keep equal digests, produce identical replay bytes,
+// and the recorded stream re-simulated without any network reproduces the digests. Galaxy only, no battle.
+void multiplayer_n_sides_galaxy(const std::vector<std::size_t>& workers) {
+    const auto sides = static_cast<std::uint32_t>(workers.size());
+    std::string label = std::to_string(sides) + " sides, workers";
+    for (const auto count : workers) label += "/" + std::to_string(count);
+    label += ": ";
+    Peers peers(multiplayer_child_setup(sides + 1, sides), workers);
+    expect(peers.humans.size() == sides, label + "the setup seats one human per side");
+    for (net::PeerIndex peer = 0; peer < sides; ++peer) peers.start(peer);
+    expect(peers.run_to(20), label + "every peer reaches tick 20 on the agreed frontier");
+    // Each human moves its own first fleet to another planet it owns (planets are dealt round robin over the factions), so
+    // the orders change state without starting a conflict.
+    for (net::PeerIndex peer = 0; peer < sides; ++peer)
+        peers.order(peer, galactic::DebugSetFleetOrbit{peers.setup.fleets[std::size_t{peer} * 2].id,
+            peers.setup.planets[std::size_t{peer} + sides + 1].id});
+    expect(peers.run_to(60), label + "the same-tick orders of every human side advance the agreed frontier");
+    for (auto& live : peers.lives) live->stop();
+    for (net::PeerIndex peer = 0; peer < sides; ++peer) {
+        expect(!peers.lives[peer]->failure(), label + "no peer fails");
+        expect(peers.lives[peer]->rejected_orders().empty(), label + "no order is refused");
+    }
+    const auto first = peers.lives[0]->tick_hashes();
+    expect(first.size() == 60, label + "each peer completed exactly the demanded ticks");
+    const auto first_replay = require(galactic::write_replay(peers.lives[0]->record()));
+    for (net::PeerIndex peer = 1; peer < sides; ++peer) {
+        expect(peers.lives[peer]->tick_hashes() == first, label + "equal per-tick digests on peer " + std::to_string(peer));
+        expect(require(galactic::write_replay(peers.lives[peer]->record())) == first_replay,
+            label + "identical replay bytes on peer " + std::to_string(peer));
+    }
+    const auto commands = peers.lives[0]->record().commands;
+    std::set<eawr::sim::SeatId> issuers;
+    for (const auto& command : commands)
+        if (std::holds_alternative<galactic::DebugSetFleetOrbit>(command.payload)) issuers.insert(command.key.seat);
+    expect(issuers.size() == sides, label + "every human side's order was executed");
+    expect(reference(peers.setup, commands, first.size()) == first, label + "the unnetworked replay of the record agrees");
 }
 
 // The lone human of a human-versus-AI vote leaves before choosing: no human side remains, so the same live seat policy that
@@ -3907,7 +4074,16 @@ int main(int argc, char** argv) {
             multiplayer_coop_battle();
             const std::array<std::array<std::size_t, 3>, 2> bystander_workers{{{1, 4, 2}, {8, 1, 4}}};
             for (const auto& workers : bystander_workers) multiplayer_battle_bystander_watches(workers);
+            battle_seat_view_contracts();
+            // #8182: a bystander side never commands the player side's units: vote timeout on and off, one human or a co-op pair.
+            for (const bool timed : {true, false}) {
+                multiplayer_battle_bystander_orders_refused(timed, true, {1, 4, 2});
+                multiplayer_battle_bystander_orders_refused(timed, false, {4, 2});
+            }
             multiplayer_ai_vote_human_leaves();
+            // #8071: three, four and eight human sides (worker counts mixed per peer).
+            const std::array<std::vector<std::size_t>, 3> side_workers{{{1, 4, 8}, {1, 2, 4, 8}, {1, 2, 4, 8, 1, 2, 4, 8}}};
+            for (const auto& workers : side_workers) multiplayer_n_sides_galaxy(workers);
             return galactic_test::checker.finish();
         }
         if (argc == 2 && std::string_view(argv[1]) == "--adaptive") {

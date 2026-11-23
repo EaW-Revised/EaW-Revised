@@ -12,6 +12,7 @@
 #include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/types.hpp"
+#include "eawr/sim/galactic/types.hpp"
 #include "eawr/sim/tactical/victory.hpp"
 
 #include <array>
@@ -95,7 +96,12 @@ struct Options final {
     bool tactical_production{true};
     bool observer_multiplayer{};
     sim::SeatId controller_seat{};
+    // #8182: a battle view of a seat that commands nothing (a spectator of the player team's perspective): it sees the battle
+    // and never selects a unit or issues an order, and its HUD shows no order controls.
+    bool view_only{};
     std::vector<std::pair<sim::SeatId, std::string>> controller_names;
+    std::vector<sim::galactic::Seat> colour_seats{};
+    std::vector<sim::galactic::TeamLead> colour_teams{};
     std::filesystem::path land_bindings;
     bool land_vehicles_only{}; // --eawr-land-vehicles-only: human land slots start with stock vehicle companies
     // #5130: names belong to the observer, outside deterministic battle content.

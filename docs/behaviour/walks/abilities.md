@@ -128,8 +128,7 @@ field effects of recursively visited children remain owned by their field loader
 | WAB-21 | While the ion shot is on, the Y-wing craft fire only the override projectile, only at the target (AB-66 and AB-67). | debug build; AB-66, AB-67 |
 | WAB-24 | **Large speed modifiers.** `Mod_Multiplier` parses a floating-point value without a 64 ceiling. The ordinary active-mode product has no upper clamp and scales maximum speed, acceleration and deceleration (AB-24). The remake accepts nonnegative speed modifiers whose aggregate fits the Q24 motion-input envelope: raw factor at most `INT64_MAX / max(max_motion_rate, max_motion_coordinate)`. This covers ordinary motion rates and formation-member deceleration, whose admitted input reaches the coordinate bound and whose preceding speed ratio is at most one. Validation multiplies only factors above one, in authored order, excluding Lucky Shot; this bounds every active subset and intermediate, including combinations where an inactive reduction or zero would otherwise hide an overflow. Speed composition uses checked wide intermediates and preserves positive half-away rounding. This is a project representation bound, not an original-game limit; later upgrade/combat factors retain their own checked arithmetic and the planner retains its existing rate support bound. | debug build EAMC-01; project numeric support |
 
-The remaining shared ceiling of 64 is a separate numeric-support gap: non-speed ordinary
-modifiers, `BLAST` damage, the shield-leech damage contribution, concentrate-fire's target
+The remaining shared ceiling of 64 is a separate numeric-support gap: cause and take damage, `BLAST` damage, the shield-leech damage contribution, concentrate-fire's target
 damage contribution, signed weaken-effect cause-damage reduction, and
 `Full_Salvo_Weapon_Delay_Multiplier` retain it. The debug-build
 ordinary parser and getter impose no such ceiling; the checked nested damage validators
@@ -293,6 +292,7 @@ planet-destroying ability is a separate galactic handler and is not covered here
 | WAB-62 | Losing the last engine hardpoint ends `TURBO` and `SPOILER_LOCK` early (AB-16, HD-11). | debug build; AB-16 |
 | WAB-63 | A new order ends `ION_CANNON_SHOT` (WAB-40) and `HUNT` (WAB-51). It never ends a power mode: a moving corvette keeps `TURBO` (AB-10). | debug build EAB-06; AB-10 |
 | WAB-64 | Out of M2: a nebula cancels abilities (`Nebula_Ability_Disable_Time`), and an ion storm blocks `DEFEND`. No M2 map has either. | debug build; AB-14, AB-64 |
+| WAB-65 | **Large ordinary modifiers.** Like speed, the other seven ordinary `Mod_Multiplier` modifiers (weapon delay, shield and energy regeneration and their intervals, scatter radius, fire rate) parse a floating-point value with no 64 ceiling and multiply per kind (AB-20). The remake accepts any value whose aggregate stays exact in its widest consumer: a regeneration refresh reaches the 2^28 health bound and its product must stay in int64 Q24, so the raw factor is at most `INT64_MAX / 2^28` (2048 whole units). Validation multiplies the magnitudes above one in authored order, per modifier and excluding Lucky Shot, and refuses a profile whose running product passes the limit; this bounds every active subset and intermediate product. The live product is a checked wide product with half-away-from-zero rounding (negative ties included). The full-salvo delay product is a checked wide product that cannot fail for validated data. Frame scaling (saturating at the largest frame count), object-weapon rate scaling, the refilled pulse count, the generator share of a recharge and the pool sums (clamped to the pool maximum afterwards) saturate instead of wrapping or failing. Cause and take damage keep the 64 ceiling here. | data; debug build AB-20 to AB-24 |
 
 ### BUZZ_DROIDS: Underworld StarViper squadrons, missing Underworld space abilities (legacy EAWR-1876)
 
@@ -537,6 +537,7 @@ WAB-56, WAB-60 to WAB-64: 31 rules):
 | WAB-60, WAB-61, WAB-62 | `session_abilities.cpp` `end_depleted_defend`, `ion_stun_unit`, the engine loss | same |
 | WAB-63 | `session_step.cpp` (power modes survive orders) | same for power modes; the ion shot differs (G-2), `HUNT` now ends on accepted move, attack, attack-move and guard orders |
 | WAB-64 | not modelled (no nebula or ion storm in M2) | same for M2 |
+| WAB-65 | `abilities.cpp` (`validate_ability_profile`, `ability_product`, `ability_multiplier`), `combat_fire.cpp` (`delay_factor`, `scaled_pulses`) | **applied**: per-modifier limit and combination envelope; cause and take damage keep 64 |
 
 The patrol core now covers WAB-04 and WAB-50 to WAB-56. Its remaining boundaries are listed in G-1;
 the ion-shot verdict above describes the original audit and is maintained by its own fix.

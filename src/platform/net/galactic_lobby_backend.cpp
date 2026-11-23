@@ -317,7 +317,7 @@ core::Result<void> GalacticLobbyBackend::validate(const net::LobbySnapshot& snap
     // Start checks the same eligible catalog or a fully restored selection.
     if (!starting) {
         const auto staging_campaigns = campaign::list_all_lobby_campaigns(*local_.data, local_.ai_levels);
-        return net::validate_galactic_lobby(snapshot, false, staging_campaigns);
+        return net::validate_galactic_lobby(snapshot, false, staging_campaigns, dialog_rows());
     }
     if (starting && transfer_->manifest() && !resume_)
         return core::Result<void>::failure(net::lobby_diagnostic(net::LobbyReason::not_ready, "checkpoint_restore_pending"));
@@ -330,7 +330,7 @@ core::Result<void> GalacticLobbyBackend::validate(const net::LobbySnapshot& snap
             return core::Result<void>::failure(net::lobby_diagnostic(net::LobbyReason::not_ready, "checkpoint_restore_pending"));
         return core::Result<void>::success();
     }
-    return net::validate_galactic_lobby(snapshot, starting, campaigns_);
+    return net::validate_galactic_lobby(snapshot, starting, campaigns_, dialog_rows());
 }
 
 core::Result<net::SetupOffer> GalacticLobbyBackend::offer(const net::LobbySnapshot& snapshot,

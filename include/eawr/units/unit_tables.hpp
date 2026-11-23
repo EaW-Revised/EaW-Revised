@@ -111,6 +111,7 @@ struct UnitType final {
     bool mouse_sensitive{}; // WSU-13: behaviour, impassable asteroid or living-collidable valid target
     bool bar_admitted{}; // WSU-50: selectable, hero, construction or indigenous-spawner admission
     bool locomotion{};
+    bool cancels_hyperspace{}; // TL-17: fighter or simple space locomotor
     bool movie_object{true}; // BCAM-06: presentation eligibility, excluded from content identity.
     std::vector<std::string> glory_cinematics; // BCAM-13: presentation-only authored paths.
     bool decoration{};

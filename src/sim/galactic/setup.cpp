@@ -160,8 +160,8 @@ core::Result<void> validate_setup(const GalacticSetup& setup) {
                 return invalid("a galaxy has at most " + std::to_string(galactic_max_human_seats) + " human seats");
             }
             human_sides.insert(seat.human_side_id);
-            if (human_sides.size() > 2) {
-                return invalid("human seats must share one coop side or exactly two versus sides");
+            if (human_sides.size() > galactic_max_human_sides) {
+                return invalid("human seats form at most " + std::to_string(galactic_max_human_sides) + " sides");
             }
         } else if (seat.human_side_id != 0) {
             return invalid("a system issuer has no human side");
@@ -398,6 +398,16 @@ std::string_view to_string(const GalacticRejectReason reason) noexcept {
     case GalacticRejectReason::neutralize_allied_hero: return "neutralize_allied_hero";
     case GalacticRejectReason::neutralize_not_targetable: return "neutralize_not_targetable";
     case GalacticRejectReason::ability_target_undiscovered: return "ability_target_undiscovered";
+    case GalacticRejectReason::market_not_opposing_planet: return "market_not_opposing_planet";
+    case GalacticRejectReason::market_owner_not_playable: return "market_owner_not_playable";
+    case GalacticRejectReason::market_cannot_host: return "market_cannot_host";
+    case GalacticRejectReason::market_other_corruption: return "market_other_corruption";
+    case GalacticRejectReason::market_not_established: return "market_not_established";
+    case GalacticRejectReason::market_nothing_to_offer: return "market_nothing_to_offer";
+    case GalacticRejectReason::ability_not_usable_here: return "ability_not_usable_here";
+    case GalacticRejectReason::ability_unavailable: return "ability_unavailable";
+    case GalacticRejectReason::ability_disabled: return "ability_disabled";
+    case GalacticRejectReason::market_cannot_price: return "market_cannot_price";
     case GalacticRejectReason::insufficient_credits: return "insufficient_credits";
     case GalacticRejectReason::production_admission: return "production_admission";
     }

@@ -58,7 +58,7 @@ inline constexpr ::std::uint64_t prototype_upvalue_name = 8;
 
 struct HandlePayload {
     ::std::uint32_t kind;
-    ::std::uint32_t reserved;
+    ::std::uint32_t aux;
     ::std::uint64_t id;
 };
 
@@ -156,7 +156,8 @@ inline bool key_less(const Sandbox::Impl& sandbox, const TObject* left, const TO
     case 3: {
         const HandlePayload& a = handle_payload(left);
         const HandlePayload& b = handle_payload(right);
-        return a.kind != b.kind ? a.kind < b.kind : a.id < b.id;
+        if (a.kind != b.kind) return a.kind < b.kind;
+        return a.id != b.id ? a.id < b.id : a.aux < b.aux;
     }
     default:
         return find_identity(sandbox, left) < find_identity(sandbox, right);

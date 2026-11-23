@@ -580,11 +580,17 @@ void encode_core_table_rows(Encoder& out, const UnitTables& tables) {
         if (projectile.damage_delay.raw() > 0) {
             out.text("projectile-damage-delay-v1"); out.fixed(projectile.damage_delay);
         }
+        if (projectile.damages_random_hardpoints) out.text("projectile-random-hardpoints-v1");
         if (projectile.weaken.on_detonation) {
             const auto& weaken = projectile.weaken;
             out.text("hero-weaken-v1"); out.fixed(weaken.radius); out.fixed(weaken.take_damage_increase);
             out.fixed(weaken.cause_damage_reduction); out.u32(weaken.duration_frames); out.u64(weaken.categories);
             out.text(weaken.status_effect);
+        }
+        if (projectile.combat_mod.enabled) {
+            const auto& mod = projectile.combat_mod;
+            out.text("projectile-combat-mod-v1"); out.u32(mod.stat); out.fixed(mod.value);
+            out.u32(mod.duration_frames); out.u64(mod.categories); out.u32(mod.key); out.text(projectile.combat_mod_effect);
         }
         // RFL-01..08: conditional extension leaves tables without flight inputs byte-identical.
         if (projectile.max_lifetime || projectile.explode_at_target_radius.value_or(false)

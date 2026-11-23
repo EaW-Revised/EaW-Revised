@@ -234,6 +234,35 @@
   screen or more) ends it, the click consumed. Space acts on its release and no longer pauses (the debug build has no pause key; the
   pause control is the clock panel's button, HCB-73); the Options > Tweaks switch "Space pauses the galactic game" (default on, owner decision 2026-11-17, DEV-13) gives Space back to pausing, and then Space does not start the tour (the camera button still does). The button was inert
   with a diagnostic before. **Unverified:** the speed profile and distances, the selected planet, Escape, the pointer, the Tab hold.
+- **HCB-76 (legacy EAWR-8107):** A released command-bar button's selected mode, `Click_Shift`, and the pending battle prompt's choice
+  buttons. **Evidence:** debug build (the generic button's release, per-frame update and draw, the text button's draw, the hover
+  entry, and the release actions of the two prompt buttons); no capture of the original (the pending battle could not be staged on
+  the rig). **Rule.** Releasing a button that is not a tab, not a drag-select source and not disabled puts it in its selected mode
+  for 0.2 s (one literal in the debug build, no XML tag) and then runs its release action, after its authored `Click_SFX`, if any.
+  The press (mouse-down) changes no mode: a held button looks as it does hovered. In the selected mode no rollover is drawn, because
+  the rollover draws only in the hover mode and the hover mode starts only from the normal mode; the authored
+  `Selected_Texture_Name` art is drawn instead when there is one; and `Click_Shift` moves every quad the component itself draws in
+  that mode (base, effect, overlay, selected, disabled layers) one shell unit to the right and down. It never moves the shell mesh
+  behind the component, and never the caption of a text button, which is placed from the shell bone and `Text_Offset` alone. When the
+  0.2 s end the button is hovered if the pointer is still over it, otherwise normal. **Pending battle prompt.**
+  `choice_button_left` (`Click_Shift` True), `choice_button_right` (True) and `attack_button_single` (none) are text buttons whose
+  only authored art is a rollover texture and rollover sound (stock FoC and Remake 4.0 agree; no pressed, selected, disabled or base
+  texture, no `Click_SFX`). Their release actions begin the battle or auto-resolve it and, in a single-player game, hide the prompt in
+  the same event, so the selected mode is never seen there: the player sees the authored rollover while hovering, nothing different
+  while holding, no click sound, and the prompt gone at once. Only in multiplayer does the prompt stay (the choice waits for the host),
+  and then the 0.2 s show no rollover and nothing moves, after which the rollover returns while the pointer stays on the button
+  (walk only, not verified on a capture). **Project implementation:** the pending prompt uses the authored rollover
+  texture over the shell, using alpha blending when `Swap_Texture` is set and additive RGB otherwise (GCF-01, debug-build
+  button draw), and retains it while held. This matters for mod art
+  with low texture alpha: ordinary alpha blending nearly hides the Remake 4.0 rollover. A locally accepted choice hides
+  the prompt at once in single player; multiplayer keeps its existing disabled waiting state. As an owner-approved
+  usability deviation (2026-11-23), an accepted pointer choice plays the button's authored `Click_SFX` when present,
+  otherwise the authored options-button `Click_SFX`; the original plays no click sound here. No pressed look or starting
+  cue is added. The real-click runtime test checks hover, sound and prompt dismissal; `Click_Shift` remains unapplied.
+  **Reconciling PU-70:** the same generic
+  rule governs the reinforcement button, whose selected overlay and shift start at the release; the remake's `production_view.cpp`
+  starts them at the press, a known deviation (legacy EAWR-8181). **Unverified:** a side-by-side capture of the original's prompt; the
+  multiplayer window.
 
 Audit dated 2026-10-09, against `f58f8f3d6b09f71f74de1c0a4305800f2f8a815c`.
 The effective `CommandBarComponents.xml` contains 846 named components. This is an

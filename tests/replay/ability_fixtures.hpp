@@ -95,7 +95,9 @@ inline constexpr tactical::TypeId plain_type = 13;
         decimal("1.5"), units(2), decimal("0.24"), units(15)};
     const tactical::MotionProfile frigate{frigate_type, decimal("2.64"), decimal("0.048"), decimal("0.048"),
         decimal("0.84"), units(3), decimal("0.24"), units(5)};
-    return {{units(15), units(300)}, {corvette, frigate}, std::nullopt, {}, {}};
+    tactical::MotionTable table{{units(15), units(300)}, {corvette, frigate}, std::nullopt, {}, {}};
+    table.hyperspace_cancel_types = {frigate_type};
+    return table;
 }
 
 

@@ -326,6 +326,7 @@ int sandbox_tostring(lua_State* state) {
         append_hex(out, handle.kind, 8);
         *out++ = ':';
         append_hex(out, handle.id);
+        if (handle.aux != 0) { *out++ = ':'; append_hex(out, handle.aux, 8); }
     } else {
         append_hex(out, ensure_identity(sandbox, state, state->base));
     }

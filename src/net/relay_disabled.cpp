@@ -60,6 +60,7 @@ core::Result<std::shared_ptr<NetworkGnsRoom>> NetworkGnsRoom::reattach(NetworkIn
     return core::Result<std::shared_ptr<NetworkGnsRoom>>::failure(relay_disabled());
 }
 std::uint64_t NetworkGnsRoom::dropped_signals() const { return 0; }
+std::size_t NetworkGnsRoom::queued_signals() const { return 0; }
 std::string NetworkGnsRoom::last_refusal() const { return {}; }
 std::string NetworkGnsRoom::alias() const { return {}; }
 std::string NetworkGnsRoom::capability() const { return {}; }

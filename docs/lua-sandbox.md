@@ -141,6 +141,9 @@ a table key the way FoC's per-script wrapper cache does. Ids are below 2^37.
   `for k, v in t do` uses it, as upstream does.
 - `table.foreach` iterates the same snapshot as `pairs`. `ipairs` is upstream.
 
+Fidelity: String-key traversal order in the original game is not verified. This sandbox uses
+bytewise canonical order for lockstep; scripts that depend on the order may behave differently.
+
 **Costs.** `pairs` and `foreach` charge n × (⌈log2(n+1)⌉ + 1) instructions for sorting n
 keys; `next` charges the n entries it scans, so a `next` loop costs O(n²).
 `table.sort` charges the same as `pairs` for its n elements before it copies them, plus the
@@ -514,6 +517,7 @@ camera and HUD state cannot resume a script or draw from its random stream.
 | `EAWR-SCRIPT-0210` | invalid host request (binding name, event, timer duration) |
 | `EAWR-SCRIPT-0211` | script error in a thread, handler or timer (rolled back) |
 | `EAWR-SCRIPT-0214` | script command not routable: no translator, failed translation or refused by the world |
+| `EAWR-SCRIPT-0215` | missing or unbound host API; the call faults with a named diagnostic |
 
 ## Load
 

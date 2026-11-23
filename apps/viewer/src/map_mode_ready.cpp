@@ -481,12 +481,15 @@ bool MapMode::State::configure_ready_options(std::string& lighting_argument, std
     state.live_options.observer_multiplayer = state.options.observer_multiplayer;
     if (state.options.controller_seat.value != 0) state.live_options.controller_seat = state.options.controller_seat;
     if (!state.options.controller_names.empty()) state.live_options.controller_names = state.options.controller_names;
+    state.live_options.colour_seats = state.options.colour_seats;
+    state.live_options.colour_teams = state.options.colour_teams;
     if (state.options.borrowed_battle && state.options.borrowed_feed) {
         state.live_options.fixture = "replay";
         state.live_options.borrowed_battle = state.options.borrowed_battle;
         state.live_options.borrowed_feed = state.options.borrowed_feed;
         state.live_options.tactical_production = false;
         state.live_options.player = state.options.borrowed_player;
+        state.live_options.view_only = state.options.borrowed_view_only;
         state.live_options.begin_barrier = false;
     }
     // #2927: a player's view paces the battle at the saved tactical speed unless a flag chose one.

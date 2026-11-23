@@ -243,44 +243,92 @@ core::Result<void> GameSession::select_pending_battle(bool fight, const sim::Par
     auto& impl = *impl_;
     if (!impl.admission) return fail<void>("no pending conflict");
     const auto& entry = *impl.admission;
-    auto selection = impl.tactical_selection(entry.conflict, fight,
-        entry.arbitration.forced_tactical || impl.replay_selected.contains(entry.conflict.id));
-    if (!selection) return core::Result<void>::failure(selection.error());
-    fight = selection.value();
+    // #8171: in a multiplayer game a battle that cannot be entered (its provider refuses, its content cannot be built or
+    // staged) never ends the match: the conflict settles through the shared auto-resolver on every peer. The branch is
+    // decided only from the agreed session state and the entry's own result, which is computed from frozen preparation data
+    // (the prepared identity is compared across peers); no filesystem, clock or local configuration enters it. A multiplayer
+    // game is set up with its resolver (live start and restore refuse without it). The decision is saved state (the route
+    // and the votes, below), so the route recompute keeps it; the per-conflict latch only covers a second call on the
+    // decision tick. A recorded selection (replay or restore) is never re-decided: it already entered once.
+    const auto latch = impl.entry_fallback.find(entry.conflict.id);
+    const bool latched = latch != impl.entry_fallback.end();
+    // The call that decided the fallback this tick already stepped the solver; the tail's second call must not step it again.
+    if (latched && latch->second == impl.tick) return core::Result<void>::success();
+    const bool may_fall_back = impl.world().multiplayer() && static_cast<bool>(impl.auto_resolver)
+        && !impl.replay_selected.contains(entry.conflict.id);
+    std::optional<core::Diagnostic> entry_refusal;
+    if (latched) fight = false;
+    else {
+        auto selection = impl.tactical_selection(entry.conflict, fight,
+            entry.arbitration.forced_tactical || impl.replay_selected.contains(entry.conflict.id));
+        if (!selection) {
+            if (!may_fall_back) return core::Result<void>::failure(selection.error());
+            entry_refusal = selection.error();
+            fight = false;
+        } else fight = selection.value();
+    }
     if (fight) {
-        auto conflict = entry.conflict;
-        const auto selected = impl.replay_selected.find(conflict.id);
-        const bool recorded_selection = selected != impl.replay_selected.end();
-        if (recorded_selection) {
-            if (selected->second.entry_tick != impl.tick) return fail<void>("recorded child selection tick differs");
-            conflict = selected->second.conflict;
-        }
-        if (!recorded_selection) conflict.structure_markers = impl.return_state.structure_markers;
-        if (!recorded_selection) {
-            conflict.upgrades.clear();
-            for (const auto& row : impl.return_state.upgrades) if (row.planet == conflict.planet) conflict.upgrades.push_back(row.upgrade);
-        }
-        auto prepared = [&]() -> core::Result<ResolvedConflictEntry> {
-            if (!recorded_selection && !conflict.tactical.skirmish && impl.services(conflict).entry)
-                return impl.services(conflict).entry(conflict, *impl.world().snapshot(), impl.world().next_entity_id());
-            if (!impl.services(conflict).content) return fail<ResolvedConflictEntry>("tactical content provider is unavailable");
-            auto content = impl.services(conflict).content(conflict);
-            if (!content) return core::Result<ResolvedConflictEntry>::failure(content.error());
-            return core::Result<ResolvedConflictEntry>::success({conflict, std::move(content).value()});
+        const auto entered = [&]() -> core::Result<void> {
+            auto conflict = entry.conflict;
+            const auto selected = impl.replay_selected.find(conflict.id);
+            const bool recorded_selection = selected != impl.replay_selected.end();
+            if (recorded_selection) {
+                if (selected->second.entry_tick != impl.tick) return fail<void>("recorded child selection tick differs");
+                conflict = selected->second.conflict;
+            }
+            if (!recorded_selection) conflict.structure_markers = impl.return_state.structure_markers;
+            if (!recorded_selection) {
+                conflict.upgrades.clear();
+                for (const auto& row : impl.return_state.upgrades) if (row.planet == conflict.planet) conflict.upgrades.push_back(row.upgrade);
+            }
+            auto prepared = [&]() -> core::Result<ResolvedConflictEntry> {
+                if (!recorded_selection && !conflict.tactical.skirmish && impl.services(conflict).entry)
+                    return impl.services(conflict).entry(conflict, *impl.world().snapshot(), impl.world().next_entity_id());
+                if (!impl.services(conflict).content) return fail<ResolvedConflictEntry>("tactical content provider is unavailable");
+                auto content = impl.services(conflict).content(conflict);
+                if (!content) return core::Result<ResolvedConflictEntry>::failure(content.error());
+                return core::Result<ResolvedConflictEntry>::success({conflict, std::move(content).value()});
+            }();
+            if (!prepared) return core::Result<void>::failure(prepared.error());
+            conflict = std::move(prepared.value().conflict);
+            if (conflict.id != entry.conflict.id || conflict.layer != entry.conflict.layer
+                || conflict.planet != entry.conflict.planet || conflict.invader != entry.conflict.invader
+                || conflict.defender != entry.conflict.defender || conflict.seats != entry.conflict.seats)
+                return fail<void>("entry resolver changed the admitted conflict identity or seats");
+            auto staged = stage_battle(conflict, prepared.value().content);
+            if (!staged) return staged;
+            // Published only for an entry that staged: a failed staging must not leak notes into the next step.
+            impl.entry_notes.insert(impl.entry_notes.end(), std::make_move_iterator(prepared.value().notes.begin()),
+                std::make_move_iterator(prepared.value().notes.end()));
+            impl.entry_infos.insert(impl.entry_infos.end(), std::make_move_iterator(prepared.value().info.begin()),
+                std::make_move_iterator(prepared.value().info.end()));
+            if (recorded_selection) impl.replay_selected.erase(selected);
+            return core::Result<void>::success();
         }();
-        if (!prepared) return core::Result<void>::failure(prepared.error());
-        conflict = std::move(prepared.value().conflict);
-        if (conflict.id != entry.conflict.id || conflict.layer != entry.conflict.layer
-            || conflict.planet != entry.conflict.planet || conflict.invader != entry.conflict.invader
-            || conflict.defender != entry.conflict.defender || conflict.seats != entry.conflict.seats)
-            return fail<void>("entry resolver changed the admitted conflict identity or seats");
-        auto staged = stage_battle(conflict, prepared.value().content);
-        if (!staged) return staged;
-        // Published only for an entry that staged: a failed staging must not leak notes into the next step.
-        impl.entry_notes.insert(impl.entry_notes.end(), std::make_move_iterator(prepared.value().notes.begin()),
-            std::make_move_iterator(prepared.value().notes.end()));
-        if (recorded_selection) impl.replay_selected.erase(selected);
-    } else {
+        if (!entered) {
+            if (!may_fall_back) return entered;
+            entry_refusal = entered.error();
+            fight = false;
+        }
+    }
+    if (entry_refusal) {
+        impl.entry_fallback[entry.conflict.id] = impl.tick;
+        // Saved state carries the decision: the auto-resolve route, and a human side's vote of Auto-Resolve, so the route
+        // recompute in the conflict tail keeps it and a checkpoint taken during the solve saves and resumes the solver.
+        impl.admission->arbitration.route = ConflictRoute::instant_auto;
+        // Every side with a human-kind seat, active or not: a side that rejoins later must already carry the Auto-Resolve
+        // vote, or the route recompute would turn the fallback back into a vote.
+        for (const auto owner : {entry.conflict.invader, entry.conflict.defender}) {
+            const auto& seats = impl.world().seats();
+            if (std::any_of(seats.begin(), seats.end(), [&](const auto& seat) {
+                    return seat.kind == galactic::SeatKind::human && seat.player == owner; }))
+                impl.votes[owner] = false;
+        }
+        // Reported once per peer through the tick's diagnostics (a warning in the log and the session notices).
+        impl.entry_notes.push_back("the battle for conflict " + std::to_string(entry.conflict.id) + " could not be entered ("
+            + entry_refusal->code + ": " + entry_refusal->message + "); it is resolved automatically and the game continues");
+    }
+    if (!fight) {
         if (!impl.auto_resolver) return core::Result<void>::success(); // #2023/2024 solver/return seam
         auto result = impl.auto_resolver(entry.conflict, *impl.world().snapshot(), executor);
         if (!result) return core::Result<void>::failure(result.error());
@@ -304,6 +352,7 @@ core::Result<void> GameSession::select_pending_battle(bool fight, const sim::Par
         if (impl.conflict_pause) { auto resumed = impl.world().adjust_conflict_pause(false); if (!resumed) return resumed; }
         impl.conflict_pause = false;
     }
+    impl.entry_fallback.erase(entry.conflict.id);
     impl.admission.reset(); impl.votes.clear(); impl.vote_started.reset(); impl.withdrawing_player = 0;
     impl.refresh_system_hold();
     return core::Result<void>::success();
@@ -1154,8 +1203,11 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
         }
         if (impl.conflict_pause) out.conflict_events.push_back({impl.tick, galactic::GalacticEventKind::child_battle_selected,
             {}, impl.child->conflict.id, 0, impl.child->conflict.planet, galactic::GalacticRejectReason::none});
+        // #8182: a network game never leaves the role pending. The choice dialog (#8082 part B) does not exist yet, so nothing
+        // could ever assign it and the battle would stay held for every peer. With or without a vote timeout, the side that
+        // is not in the battle spectates by default: decided here from agreed session state, the same tick on every peer.
         auto role = impl.world().begin_battle_roles(impl.child->conflict.id, impl.child->conflict.invader, impl.child->conflict.defender,
-            impl.multiplayer_vote_timeout.has_value());
+            impl.multiplayer_vote_timeout.has_value() || impl.world().multiplayer());
         if (!role) { impl.failure = role.error(); return core::Result<void>::failure(*impl.failure); }
         if (auto refreshed = impl.refresh_battle_seats(); !refreshed) { impl.failure = refreshed.error(); return core::Result<void>::failure(*impl.failure); }
         impl.child->galaxy_hash = impl.galaxy_hash().value();
@@ -1328,6 +1380,10 @@ core::Result<GameTick> GameSession::finish_step(StepContext& tick_context) {
     }
     for (auto& note : std::exchange(impl.story_notes, {})) { // the plot loader's report, once (WST-02/04)
         core::Diagnostic line; line.code = "EAWR-STORY-0001"; line.severity = core::Severity::info; line.message = "story: " + std::move(note);
+        out.diagnostics.push_back(std::move(line));
+    }
+    for (auto& note : std::exchange(impl.entry_infos, {})) { // the AI slots' difficulty at entry (#8171)
+        core::Diagnostic line; line.code = "EAWR-ENTRY-0002"; line.severity = core::Severity::info; line.message = "space entry: " + std::move(note);
         out.diagnostics.push_back(std::move(line));
     }
     for (auto& note : std::exchange(impl.entry_notes, {})) { // a passenger left out of a space entry (#4563)

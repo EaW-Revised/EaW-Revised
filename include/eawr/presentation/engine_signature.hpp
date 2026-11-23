@@ -22,8 +22,17 @@ namespace eawr::presentation {
 inline constexpr std::array<std::string_view, 2> patched_engine_commits{"5b733a90f", "fad06b579"};
 inline constexpr std::string_view patched_engine_build = "eawr";
 // The shipped player exe (tools/engine_pins.json default, GUI file): the hash an unpatched run is told it should have.
-inline constexpr std::string_view pinned_player_engine_sha256 =
+inline constexpr std::string_view pinned_player_engine_sha256_windows_x64 =
     "96c03783011f197aff146e92c1e33e0000e8975b3a873fbfcc52cd86dff12b7f";
+// The shipped Linux x64 player engine (tools/engine_pins.json eawr-5b733a90f-linux-x64, godot.linuxbsd.editor.x86_64).
+inline constexpr std::string_view pinned_player_engine_sha256_linux_x64 =
+    "3faca5ebc469ee3c2bcee1da59337233660df0c2a644699f04c139da891f0c50";
+// The hash for the platform this viewer runs on (a Linux player never prints the Windows hash as "expected").
+#if defined(__linux__)
+inline constexpr std::string_view pinned_player_engine_sha256 = pinned_player_engine_sha256_linux_x64;
+#else
+inline constexpr std::string_view pinned_player_engine_sha256 = pinned_player_engine_sha256_windows_x64;
+#endif
 // The viewer's exit code for an automation run on an unpatched engine (1-3 are other startup failures).
 inline constexpr int unpatched_engine_exit_code = 7;
 inline constexpr std::string_view unpatched_engine_marker = "EAWR-ENGINE-UNPATCHED";

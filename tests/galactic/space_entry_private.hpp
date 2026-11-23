@@ -49,6 +49,7 @@ void garrison_contracts();
 void station_ship_spawn_contracts();
 void commander_contracts();
 void ai_retreat_completion();
+void mp_ai_difficulty_contracts();
 void gateway_route(const vfs::Vfs& files, const data::Catalog& catalog,
     const data::galactic::GalacticData& authored, const units::GalacticTypeTable& types);
 void installed_reserve_order(const std::shared_ptr<const campaign::StockSpaceEntry>& provider,

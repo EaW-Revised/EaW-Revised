@@ -63,8 +63,8 @@ template<class T> core::Result<T> refuse(std::string message) {
 }
 } // namespace mp_roster_detail
 
-// Human seats: up to eight sharing one faction against AI, or exactly two human sides, each side one faction.
-// A third side, a duplicate or unlisted seat, a human seat on a faction another side holds, a lead outside its
+// Human seats: up to eight sharing one faction against AI, or up to galactic_max_human_sides human sides, each side
+// one faction. A side beyond that cap, a duplicate or unlisted seat, a human seat on a faction another side holds, a lead outside its
 // side and an AI configuration on a human faction are refused. The galaxy's own validate_setup runs again on
 // the derived setup; these rules need no content. A host sealing its own roster passes require_claims = false
 // before the AI configurations are filled in.
@@ -113,7 +113,8 @@ template<class T> core::Result<T> refuse(std::string message) {
             if (++humans > galactic_max_human_seats)
                 return refuse<void>("at most " + std::to_string(galactic_max_human_seats) + " human seats");
             sides.insert(seat.human_side_id);
-            if (sides.size() > 2) return refuse<void>("human seats share one side or form exactly two sides; a third side is refused");
+            if (sides.size() > galactic_max_human_sides)
+                return refuse<void>("human seats form at most " + std::to_string(galactic_max_human_sides) + " sides");
         } else if (seat.kind == SeatKind::ai || seat.kind == SeatKind::script) {
             if (seat.human_side_id != 0) return refuse<void>("an AI or script seat has no human side");
         } else {

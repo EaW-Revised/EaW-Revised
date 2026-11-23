@@ -138,7 +138,10 @@ struct Projectile final {
     std::optional<Fixed> rocket_curve_offset{};
     std::optional<Fixed> rocket_straight_distance{};
     sim::tactical::WeakenProfile weaken{};
+    sim::tactical::CombatModProfile combat_mod{};
+    std::string combat_mod_effect; // Projectile_Combat_Mod_Effect: the status particle attached to each recipient
     Fixed damage_delay{}; // Projectile_Damage_Delay_Secs, WAD-26
+    bool damages_random_hardpoints{}; // Projectile_Damages_Random_Hard_Points, WAD-27
     std::optional<Fixed> reveal_range{};
     Fixed dense_reveal_multiplier{Fixed::from_raw(Fixed::scale)};
     bool operator==(const Projectile&) const = default;

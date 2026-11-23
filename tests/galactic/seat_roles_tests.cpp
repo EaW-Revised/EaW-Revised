@@ -3,6 +3,7 @@
 #include "game_session_loopback.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/sim/galactic/mp_roster.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -10,6 +11,7 @@
 #include <exception>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -75,6 +77,66 @@ galactic::GalacticSetup setup(bool coop = false) {
         result.seat_control->controllers.push_back({player, player <= (coop ? 1U : 2U) ? galactic::FactionControl::human : galactic::FactionControl::ai,
             galactic::FactionControl::ai, {1, 2}, {3, 4, 5}});
     return result;
+}
+// `sides` human versus sides (players 1..sides, one seat each) and one AI faction, with the seat policy a roster derives:
+// one team row per side, every faction listed once.
+galactic::GalacticSetup n_sides_setup(std::uint32_t sides, bool with_seat_policy) {
+    galactic::SyntheticGalaxyOptions options; options.planets = 16; options.players = sides + 1;
+    options.fleets_per_player = 1; options.members_per_fleet = 1; options.debug_commands = true; options.human_sides = sides;
+    auto result = galactic::synthetic_galaxy(options);
+    if (!with_seat_policy) return result;
+    result.seat_control.emplace();
+    for (std::uint32_t side = 1; side <= sides; ++side) result.seat_control->teams.push_back({side, {side}, false});
+    for (std::uint32_t player = 1; player <= sides + 1; ++player)
+        result.seat_control->controllers.push_back({player, player <= sides ? galactic::FactionControl::human : galactic::FactionControl::ai,
+            galactic::FactionControl::ai, {}, {}});
+    return result;
+}
+galactic::MpRoster n_sides_roster(std::uint32_t sides) {
+    galactic::MpRoster roster; roster.campaign = "Synthetic"; roster.difficulty = "Normal";
+    for (std::uint32_t player = 1; player <= sides + 1; ++player) {
+        galactic::MpRosterPlayer row; row.player = player; row.faction_id = player; row.faction = "Faction" + std::to_string(player);
+        if (player > sides) row.ai_configuration = {1};
+        roster.players.push_back(std::move(row));
+    }
+    for (std::uint32_t side = 1; side <= sides; ++side) {
+        roster.seats.push_back({{side}, side, galactic::SeatKind::human, side - 1, true, side});
+        roster.teams.push_back({side, {side}, false});
+    }
+    roster.seats.push_back({{sides + 1}, sides + 1, galactic::SeatKind::ai, 0, true, 0});
+    return roster;
+}
+bool refused_with(const eawr::core::Result<void>& result, const std::string_view text) {
+    return !result && result.error().message.find(text) != std::string::npos;
+}
+// #8071: up to galactic_max_human_sides versus sides, one faction each; the seat cap is the only bound above that.
+void human_side_caps() {
+    for (const std::uint32_t sides : {3U, 4U, static_cast<std::uint32_t>(galactic::galactic_max_human_sides)}) {
+        const auto label = std::to_string(sides) + " sides: ";
+        expect(static_cast<bool>(galactic::validate_setup(n_sides_setup(sides, false))), label + "a synthetic galaxy validates");
+        auto config = n_sides_setup(sides, true);
+        expect(static_cast<bool>(galactic::validate_setup(config)), label + "a seat policy with a team row per side validates");
+        auto missing = config; missing.seat_control->teams.pop_back();
+        expect(refused_with(galactic::validate_setup(missing), "seat policy must list every human side and faction once"),
+            label + "a side without its seat-policy team row is refused by the seat-policy rule");
+        galactic::GalacticReplay replay; replay.setup = config;
+        expect(take(galactic::parse_replay(take(galactic::write_replay(replay)))) == replay, label + "the setup round trips through a replay");
+        const auto roster = n_sides_roster(sides);
+        expect(static_cast<bool>(galactic::validate_mp_roster(roster)), label + "the multiplayer roster validates");
+        auto without_lead = roster; without_lead.teams.pop_back();
+        expect(refused_with(galactic::validate_mp_roster(without_lead), "every human side needs exactly one lead entry"),
+            label + "a roster side without a lead entry is refused");
+        auto shared_faction = roster; shared_faction.seats[sides - 1].player = 1;
+        expect(!galactic::validate_mp_roster(shared_faction), label + "two sides cannot hold one faction");
+    }
+    const auto cap = static_cast<std::uint32_t>(galactic::galactic_max_human_sides);
+    // A side needs a seat, so at the cap every human holds a side of its own: a second seat on one side is a ninth human.
+    auto crowd = n_sides_setup(cap, false);
+    crowd.seats.push_back({{cap + 2}, 1, galactic::SeatKind::human, cap + 1, true, 1});
+    expect(refused_with(galactic::validate_setup(crowd), "human seats"), "a second seat on a side at the side cap (nine humans) is refused");
+    auto crowd_roster = n_sides_roster(cap);
+    crowd_roster.seats.push_back({{cap + 2}, 1, galactic::SeatKind::human, cap + 1, true, 1});
+    expect(!galactic::validate_mp_roster(crowd_roster), "a roster with nine humans is refused");
 }
 campaign::ConflictRecord conflict(const galactic::GalacticSetup& config, std::uint32_t defender = 3) {
     auto galaxy = take(galactic::GalacticSession::create(config));
@@ -152,8 +214,13 @@ void roster_and_dropout() {
         expect(take(galactic::parse_replay(bytes)) == replay, "seat policy extension round trips without graph extension");
         auto broken = config; broken.seats.insert(broken.seats.begin() + 8, {{13}, 1, galactic::SeatKind::human, 8, false, 1});
         expect(!galactic::validate_setup(broken), "inactive reconnect slots consume the eight-human roster limit");
+        // A third side (#8071): its seat-policy team row is required, the side itself is no longer refused.
         broken = config; broken.seats[7].human_side_id = 3;
-        expect(!galactic::validate_setup(broken), "third human side refused");
+        expect(refused_with(galactic::validate_setup(broken), "seat policy must list every human side and faction once"),
+            "a third human side without its seat-policy team row is refused by the seat-policy rule");
+        broken.seat_control->teams.push_back({3, {8}, false});
+        expect(refused_with(galactic::validate_setup(broken), "human sides need distinct factions"),
+            "a third human side on a faction another side holds is refused");
         broken = config; broken.seat_control->teams.front().lead = {77};
         expect(!galactic::validate_setup(broken), "lead must be active member of its team");
         broken = config; broken.seat_control->controllers.back().kind = galactic::FactionControl::human;
@@ -901,7 +968,7 @@ void rejoin_ends_fast_forward() {
 }
 } // namespace
 int case_galactic_seat_roles_tests() {
-    try { seeded_controller_ties(); cooperative_no_human_and_solo(); cooperative_cross_path_corpus(); cooperative_departure_continuation(); cooperative_departure_lockstep(); controller_provenance(); roster_and_dropout(); roles_and_checkpoint(); battle_start_events(); unrelated_ai_activity(); readiness_departure_and_return(); all_peers_lockstep(); generated_controller_orders(); rejoin_ends_fast_forward(); }
+    try { seeded_controller_ties(); cooperative_no_human_and_solo(); cooperative_cross_path_corpus(); cooperative_departure_continuation(); cooperative_departure_lockstep(); controller_provenance(); roster_and_dropout(); human_side_caps(); roles_and_checkpoint(); battle_start_events(); unrelated_ai_activity(); readiness_departure_and_return(); all_peers_lockstep(); generated_controller_orders(); rejoin_ends_fast_forward(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures == 0 ? 0 : 1;
 }

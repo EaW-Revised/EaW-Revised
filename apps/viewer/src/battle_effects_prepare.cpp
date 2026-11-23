@@ -603,6 +603,7 @@ void BattleEffects::prewarm_effect_programs() {
     };
     for (const auto& name : move_particles_) warm(name);
     for (const auto& entry : weaken_particles_) warm(entry.second);
+    for (const auto& entry : combat_mod_particles_) warm(entry.second);
     for (const auto& entry : types_) {
         const auto& looks = entry.second;
         std::vector<const std::map<std::uint32_t, ProjectileLook>*> modes{&looks.weapons, &looks.ability_weapons,
@@ -672,6 +673,9 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
         look.shield_absorbed = tag(value, "Projectile_Absorbed_By_Shields_Particle");
         return look;
     };
+    for (const auto& projectile : tables.projectiles)
+        if (projectile.combat_mod.enabled && !projectile.combat_mod_effect.empty())
+            combat_mod_particles_[projectile.combat_mod.key] = projectile.combat_mod_effect;
     for (const auto& type : tables.units) for (const auto& ability : type.abilities) {
         if (ability.spawned_object.empty()) continue;
         const auto id = battle::type_id(ability.spawned_object);

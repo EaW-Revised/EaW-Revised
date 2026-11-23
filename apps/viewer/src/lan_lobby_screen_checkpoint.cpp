@@ -757,6 +757,12 @@ void EawrLanLobby::refresh_checkpoint_staging() {
         signature += cancel_offered ? "X" : "-";   // the bottom button's job (Apply or Cancel restore) changes with it
         const bool recover_offered = impl.host && impl.checkpoint_recoverable && !cancel_offered && !impl.checkpoint_recover.valid();
         signature += recover_offered ? "R" : "-";  // the extra row for Load without old battle history
+        // Rebuild controls when their enabled state changes, even if the roster is unchanged.
+        signature += model.can_assign ? "A" : "-";
+        signature += impl.checkpoint_bytes ? "B" : "-";
+        signature += impl.checkpoint_prepare.active() ? "P" : "-";
+        signature += impl.checkpoint_prepare.finishing() ? "F" : "-";
+        signature += impl.checkpoint_recover.valid() ? "C" : "-";
         for (const auto& seat : room->snapshot.seats) signature += "|" + std::to_string(seat.peer) + seat.selection.name;
         for (const auto& binding : bindings) signature += ":" + std::to_string(binding.seat.value) + "/" + std::to_string(binding.player);
         if (signature != impl.checkpoint_signature) {

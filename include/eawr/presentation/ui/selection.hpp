@@ -255,6 +255,9 @@ public:
     // Drops destroyed selection/group members. The caller's alive IDs must be sorted ascending
     // (SnapshotIndex::alive already is). Probes only stored members, with no allocation or alive scan.
     void retain_sorted(std::span<const sim::EntityId> alive);
+    // TL-15: removes `refused` (ascending IDs) from the selection only; control groups keep their members, so a unit
+    // made selectable again rejoins on recall. Returns whether the selection changed.
+    bool remove_sorted(std::span<const sim::EntityId> refused);
     // #425: the selection becomes `units` (a unit card click, unit_cards.hpp), in that order and
     // without repeats. Returns whether it changed.
     bool replace(std::span<const sim::EntityId> units);

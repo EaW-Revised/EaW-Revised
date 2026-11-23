@@ -30,6 +30,10 @@ core::Result<void> service_objects(const sim::PartitionExecutor& executor, const
     authoritative::ScriptScheduler& scripts, std::uint64_t& sequence,
     std::vector<authoritative::ScriptDiagnostic>& diagnostics, std::uint32_t& active, std::uint32_t& pumps, bool schedule = true);
 
+// The first live battle object whose type is the named one (nil when there is none); Find_First_Object and FindPlanet share it.
+core::Result<authoritative::ValueList> first_object_of_type(detail::Host& host, authoritative::BindingContext& context,
+    const std::string& name);
+
 authoritative::Binding noop();
 // tactical_world_queries=false leaves out the globals that read the tactical battle view (Find_First_Object); a galactic
 // scheduler passes false because the galactic freestore registers its own Find_First_Object there.
@@ -37,6 +41,9 @@ void register_globals(authoritative::ScriptScheduler& scripts, const HostPtr& ho
     std::vector<core::Diagnostic>& errors, bool install_type_lists = true, bool tactical_world_queries = true);
 void register_methods(authoritative::ScriptScheduler& scripts, const HostPtr& host,
     std::vector<core::Diagnostic>& errors, bool install_type_lists = true);
+bool battle_bindings_enabled(const HostPtr& host);
+void register_battle_distribution(authoritative::ScriptScheduler& scripts, const HostPtr& host,
+    std::vector<core::Diagnostic>& errors);
 // The object methods only a battle scheduler binds (tactical_object_bindings.cpp); a galactic scheduler gets none.
 void register_battle_object_bindings(authoritative::ScriptScheduler& scripts, const HostPtr& host,
     std::vector<core::Diagnostic>& errors);

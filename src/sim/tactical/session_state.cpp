@@ -60,15 +60,25 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
                 unit.waypoints->points.begin(), unit.waypoints->points.end(),
                 [](const auto& point) { return point.move.final_yaw.has_value(); }));
         });
+        // WAD-27: a live projectile that redirects its damage to random hardpoints selects the wider projectile layout.
+        out.random_hardpoints = std::any_of(impl_->projectiles.begin(), impl_->projectiles.end(), [](const auto& projectile) {
+            return projectile.damages_random_hardpoints;
+        });
+        // A live projectile that carries a combat modifier selects the wider projectile layout.
+        out.combat_mods = std::any_of(impl_->projectiles.begin(), impl_->projectiles.end(), [](const auto& projectile) {
+            return projectile.combat_mod.enabled;
+        });
         // WDP-02: a live unit that has switched a deploy clip selects the wider ability layout.
         out.deploy_poses = std::any_of(live.begin(), live.end(), [](const auto& unit) {
             return unit.abilities && unit.abilities->deploy_pose.has_value();
         });
         out.hold_fire = std::any_of(live.begin(), live.end(), [](const auto& unit) { return unit.hold_fire; });
+        out.script_view = std::any_of(live.begin(), live.end(), [](const auto& unit) { return unit.script_view.has_value(); });
         // SSU-03: domain 37 base includes direct-creation references and positions.
-        // +1 fire range; +2 script invulnerability; +4 final facing; +8 deploy clips; +16 hold fire. Older layouts are refused.
+        // +1 fire range; +2 script invulnerability; +4 final facing; +8 deploy clips; +16 hold fire; +32 random-hardpoint projectiles; +64 script view flags; +128 combat-modifier projectiles. Older layouts are refused.
         out(std::uint32_t{37U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)
-            + (out.final_facing ? 4U : 0U) + (out.deploy_poses ? 8U : 0U) + (out.hold_fire ? 16U : 0U)});
+            + (out.final_facing ? 4U : 0U) + (out.deploy_poses ? 8U : 0U) + (out.hold_fire ? 16U : 0U)
+            + (out.random_hardpoints ? 32U : 0U) + (out.script_view ? 64U : 0U) + (out.combat_mods ? 128U : 0U)});
         checkpoint_detail::Access::state(out, std::as_const(*impl_));
         out(live);
         out(checkpoint_detail::Access::visibility(*impl_));
@@ -116,12 +126,15 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         checkpoint_detail::Reader in(bytes);
         std::uint32_t version{};
         in(version);
-        if (version < 37U || version > 68U) throw checkpoint_detail::Invalid("unsupported child state domain");
+        if (version < 37U || version > 292U) throw checkpoint_detail::Invalid("unsupported child state domain");
         in.fire_range_bonuses = (version - 37U) % 2U == 1U;
         in.script_invulnerable = (version - 37U) % 4U >= 2U;
         in.final_facing = (version - 37U) % 8U >= 4U;
         in.deploy_poses = (version - 37U) % 16U >= 8U;
         in.hold_fire = (version - 37U) % 32U >= 16U;
+        in.random_hardpoints = (version - 37U) % 64U >= 32U;
+        in.script_view = (version - 37U) % 128U >= 64U;
+        in.combat_mods = (version - 37U) % 256U >= 128U;
         const auto cursors = impl_->last_submitted;
         checkpoint_detail::Access::state(in, *impl_);
         // SAE-10: a reinforcement whose search failed advanced its issuer's cursor but is never recorded, so the
@@ -161,11 +174,20 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         if (in.hold_fire && std::none_of(live.begin(), live.end(), [](const auto& unit) {
                 return unit.hold_fire;
             })) throw checkpoint_detail::Invalid("noncanonical empty hold-fire domain");
+        if (in.script_view && std::none_of(live.begin(), live.end(), [](const auto& unit) {
+                return unit.script_view.has_value();
+            })) throw checkpoint_detail::Invalid("noncanonical empty script-view domain");
         if (in.final_facing && std::none_of(live.begin(), live.end(), [](const auto& unit) {
                 return unit.state.order.final_yaw.has_value() || (unit.waypoints && std::any_of(
                     unit.waypoints->points.begin(), unit.waypoints->points.end(),
                     [](const auto& point) { return point.move.final_yaw.has_value(); }));
             })) throw checkpoint_detail::Invalid("noncanonical empty final-facing domain");
+        if (in.random_hardpoints && std::none_of(impl_->projectiles.begin(), impl_->projectiles.end(), [](const auto& projectile) {
+                return projectile.damages_random_hardpoints;
+            })) throw checkpoint_detail::Invalid("noncanonical empty random-hardpoint domain");
+        if (in.combat_mods && std::none_of(impl_->projectiles.begin(), impl_->projectiles.end(), [](const auto& projectile) {
+                return projectile.combat_mod.enabled;
+            })) throw checkpoint_detail::Invalid("noncanonical empty combat-modifier domain");
         checkpoint_detail::Access::PublishedVisibility visibility;
         in(visibility);
         if (impl_->completed_tick > max_ticks || live.size() > max_units) throw checkpoint_detail::Invalid("state exceeds tactical limits");
@@ -605,6 +627,10 @@ TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const
         instance.contained = unit.state.contained;
         instance.controller_seat = unit.state.controller_seat;
         instance.control = unit.state.control;
+        if (unit.script_view) {
+            instance.script_hidden = unit.script_view->hidden;
+            instance.script_unselectable = unit.script_view->unselectable;
+        }
         if (land) {
             const auto found = std::lower_bound(sensors.begin(), sensors.end(), unit.state.type_id,
                 [](const SensorProfile& row, const TypeId type) { return row.type_id < type; });
@@ -895,6 +921,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.garrison_marks"); append_canonical_garrison_marks_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.script_invulnerable"); append_canonical_script_invulnerable_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.hold_fire"); append_canonical_hold_fire_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.script_view"); append_canonical_script_view_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.craft"); append_canonical_craft_state(bytes, parts(&CanonicalEncoding::crafts)); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.squadron_orders"); append_canonical_squadron_orders_state(bytes, parts(&CanonicalEncoding::minds)); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.attack_paths"); append_canonical_attack_paths_state(bytes); }

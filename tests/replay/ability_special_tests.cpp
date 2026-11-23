@@ -1,6 +1,7 @@
 #include "ability_fixtures.hpp"
 #include "../../src/sim/tactical/session_store_abilities.hpp"
 
+#include <map>
 #include <algorithm>
 #include <cmath>
 #include <array>
@@ -1217,6 +1218,139 @@ void test_script_teleport() {
         }
         if (reference.empty()) reference = hashes;
         else expect(reference == hashes, "Teleport_And_Face: hashes agree at 1/2/4/8 workers");
+    }
+}
+
+void test_script_layering() {
+    // Lua Teleport(position), Hide, Set_Selectable, Cinematic_Hyperspace_In (opcodes 44, 45, 47 and 48):
+    // the position teleport keeps the z and the unit's own facing and stops it; the hide and selectable flags are
+    // checkpointed (child-state domain 101 while one is set, 37 once both are cleared) and hashed; a hyperspace-in starts
+    // the shared arrival sequence at the unit's own position; a unit that cannot move and a
+    // missing unit are left alone; every command round-trips through the replay and every outcome agrees at 1/2/4/8 workers.
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = setup();
+        initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+            {2, frigate_type, 1, at(2400, 1200), math::identity_quat(), {}},
+            {3, plain_type, 2, at(-2400, 0), math::identity_quat(), {}}};
+        auto created = tactical::TacticalSession::create(initial, {}, durability(), motion());
+        expect(static_cast<bool>(created), "layering: fixture creates");
+        if (!created) continue;
+        auto world = std::move(created).value();
+        std::uint64_t sequence = 0;
+        const auto submit = [&](const std::uint64_t tick, const tactical::PlayerId player, const eawr::sim::EntityId unit, tactical::CommandPayload payload) {
+            expect(static_cast<bool>(world.submit(command(tick, player, sequence++, unit, std::move(payload)))), "layering: command submits");
+        };
+        submit(0, 1, 1, tactical::MovePayload{at(-3000, 0)});
+        submit(4, 1, 1, tactical::ScriptTeleportPositionPayload{at(100, 200, 50)});
+        submit(5, 1, 99, tactical::ScriptTeleportPositionPayload{at(1, 2, 3)});
+        submit(14, 1, 3, tactical::ScriptHyperspaceInPayload{10});
+        submit(16, 1, 2, tactical::ScriptHyperspaceInPayload{10});
+        submit(16, 1, 1, tactical::ScriptHyperspaceInPayload{10});
+        submit(18, 1, 1, tactical::ScriptCancelHyperspacePayload{});
+        submit(18, 1, 2, tactical::ScriptCancelHyperspacePayload{});
+        submit(18, 1, 1, tactical::ScriptHidePayload{true});
+        submit(18, 1, 1, tactical::ScriptSelectablePayload{false});
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (unsigned frame = 0; frame < 26; ++frame) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "layering: step succeeds");
+            if (!step) break;
+            hashes.push_back(step.value().state_sha256);
+            if (frame == 8) {
+                const auto moved = world.unit_state(1);
+                expect(moved && moved->position == at(100, 200, 50), "layering: Teleport lands on the point with its z and stops there");
+            }
+            if (frame == 20) {
+                // Every command is in the log by now, so a fresh session replays to the same cursors before the load.
+                const auto checkpoint = world.save_checkpoint_state();
+                expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == 101
+                    && checkpoint.value()[1] == 0 && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
+                    "layering: a flagged unit selects child-state domain 101");
+                auto fresh = tactical::TacticalSession::from_replay(world.record(), {}, durability(), motion());
+                expect(checkpoint && fresh, "layering: checkpoint factory succeeds");
+                if (checkpoint && fresh) {
+                    const auto loaded = fresh.value().load_checkpoint_state(checkpoint.value());
+                    expect(static_cast<bool>(loaded), "layering: a flagged checkpoint loads");
+                    if (loaded) {
+                        const auto recaptured = fresh.value().save_checkpoint_state();
+                        expect(recaptured && recaptured.value() == checkpoint.value(), "layering: checkpoint round-trip preserves canonical bytes");
+                    }
+                }
+                submit(22, 1, 1, tactical::ScriptHidePayload{false});
+                submit(23, 1, 1, tactical::ScriptSelectablePayload{true});
+            }
+            if (frame == 20) {
+                // TL-14/TL-15: the published snapshot carries both flags for the viewer, selection and orders to read.
+                const auto published = world.snapshot();
+                const auto find = [&](const eawr::sim::EntityId id) -> const tactical::TacticalInstance* {
+                    if (!published) return nullptr;
+                    for (const auto& row : published->instances()) if (row.entity_id == id) return &row;
+                    return nullptr;
+                };
+                const auto flagged = find(1);
+                const auto plain = find(2);
+                expect(flagged && flagged->script_hidden && flagged->script_unselectable
+                           && plain && !plain->script_hidden && !plain->script_unselectable,
+                       "layering: the snapshot publishes the Hide and Set_Selectable flags of the flagged unit only");
+            }
+            if (frame == 22) {
+                const auto checkpoint = world.save_checkpoint_state();
+                expect(checkpoint && checkpoint.value()[0] == 101, "layering: one flag left keeps domain 101");
+            }
+            if (frame == 24) {
+                const auto checkpoint = world.save_checkpoint_state();
+                expect(checkpoint && checkpoint.value()[0] == 37, "layering: both flags cleared returns to domain 37");
+                const auto cleared = world.snapshot();
+                const tactical::TacticalInstance* unit_one = nullptr;
+                if (cleared) for (const auto& row : cleared->instances()) if (row.entity_id == 1) unit_one = &row;
+                expect(unit_one && !unit_one->script_hidden && !unit_one->script_unselectable,
+                       "layering: clearing the flags clears the published view");
+            }
+            if (frame == 20) {
+                // TL-17: Cancel_Hyperspace ends the arrival of unit 2 at its exit point; a unit that is not arriving is left alone.
+                expect(world.arrivals().contains(1), "TL-17: base locomotor ignores cancel during arrival");
+                const auto landed = world.unit_state(2);
+                expect(!world.arrivals().contains(2) && landed && landed->position == at(2400, 1200),
+                    "layering: Cancel_Hyperspace ends the arrival at the exit point");
+            }
+            if (frame == 15) expect(!world.arrivals().contains(3), "layering: a unit that cannot move does not hyperspace in");
+            if (frame == 17) {
+                expect(world.arrivals().contains(2), "layering: Cinematic_Hyperspace_In starts the arrival sequence");
+                const auto arriving = world.arrivals().find(2);
+                expect(arriving != world.arrivals().end() && arriving->second.frame >= 15U && arriving->second.exit == at(2400, 1200),
+                    "layering: the sequence starts 25 minus the argument frames in, at the unit's own position");
+            }
+        }
+        const auto bytes = tactical::write_replay(world.record());
+        expect(static_cast<bool>(bytes), "layering: the replay with opcodes 44 to 48 writes");
+        if (bytes) {
+            const auto parsed = tactical::parse_replay(bytes.value());
+            bool point = false, hide = false, selectable = false, hyperspace = false;
+            if (parsed) for (const auto& recorded : parsed.value().commands) {
+                if (const auto* payload = std::get_if<tactical::ScriptTeleportPositionPayload>(&recorded.payload))
+                    point = point || payload->position == at(100, 200, 50);
+                if (const auto* payload = std::get_if<tactical::ScriptHidePayload>(&recorded.payload)) hide = hide || payload->hidden;
+                if (const auto* payload = std::get_if<tactical::ScriptSelectablePayload>(&recorded.payload)) selectable = selectable || !payload->selectable;
+                if (const auto* payload = std::get_if<tactical::ScriptHyperspaceInPayload>(&recorded.payload)) hyperspace = hyperspace || payload->frames == 10U;
+            }
+            expect(point && hide && selectable && hyperspace, "layering: opcodes 44, 45, 47 and 48 round-trip through the replay writer and parser");
+        }
+        {
+            // Opcode 46 is reserved and unused: a body carrying it is refused.
+            tactical::TacticalSetup reserved_setup = initial;
+            const tactical::PlayerCommand hidden{{0, 1, 0}, {1}, tactical::ScriptHidePayload{true}};
+            auto encoded = tactical::encode_command_body(hidden, reserved_setup);
+            expect(static_cast<bool>(encoded), "layering: a hide command encodes");
+            if (encoded) {
+                expect(static_cast<bool>(tactical::decode_command_body(encoded.value(), reserved_setup)), "layering: opcode 45 decodes");
+                encoded.value()[20] = 46;
+                expect(!tactical::decode_command_body(encoded.value(), reserved_setup), "layering: reserved opcode 46 is refused");
+            }
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "layering: hashes agree at 1/2/4/8 workers");
     }
 }
 
@@ -2524,6 +2658,179 @@ void test_spawned_hero_abilities() {
             expect(parsed && parsed.value() == record, "world-point ability extension round-trips");
             if (reference.empty()) reference = hashes;
             else expect(hashes == reference, "spawn and timed-status hashes equal on 1/2/4/8 workers");
+        }
+    }
+
+    // WPCM-02/03: a projectile with a combat modifier puts one timed modifier on each enemy it detonates near.
+    // Scenario 0: long modifier; 1: zero blast damage (the query gates on the radius only); 2: short modifier
+    // that expires and is applied again; its re-application spacing shows the old expiry was not refreshed.
+    for (const unsigned scenario : {0U, 1U, 2U}) {
+        std::vector<std::string> reference;
+        const std::uint32_t modifier_frames = scenario == 2 ? 20 : 10000;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, plain_type, 1, at(0, 0), math::identity_quat(), {}},
+                {2, frigate_type, 2, at(100, 0), math::identity_quat(), {}},
+                {3, corvette_type, 1, at(100, 0), math::identity_quat(), {}}};
+            auto health = durability();
+            for (auto& row : health.profiles) { row.max_shields = {}; row.shield_refresh = {}; }
+            tactical::AbilityTable table;
+            tactical::CombatTable combat;
+            constexpr std::uint32_t key = 0x5a5a1234U;
+            for (const auto type : {corvette_type, frigate_type, plain_type}) {
+                tactical::CombatProfile profile; profile.type_id = type; profile.category_bits = 2;
+                profile.collision = tactical::CollisionBox{at(-10, -10, -10), at(10, 10, 10)};
+                if (type == frigate_type) {
+                    profile.max_attack_distance = units(300);
+                    tactical::WeaponProfile weapon; weapon.range = units(300); weapon.pulse_count = 1;
+                    weapon.opportunity_when_idle = true; weapon.opportunity_when_targeting = true;
+                    weapon.cone_width = units(360); weapon.cone_height = units(160);
+                    weapon.shot = tactical::ShotProfile{units(1), 0, units(1), units(300), true, true, {}};
+                    weapon.shot->blast.damage = scenario == 1 ? math::Fixed{} : units(1);
+                    weapon.shot->blast.radius = units(60);
+                    weapon.shot->blast.max_delay = {};
+                    weapon.shot->combat_mod.enabled = true;
+                    weapon.shot->combat_mod.stat = static_cast<std::uint32_t>(tactical::CombatBonusStat::speed);
+                    weapon.shot->combat_mod.value = decimal("-0.25");
+                    weapon.shot->combat_mod.duration_frames = modifier_frames;
+                    weapon.shot->combat_mod.categories = 2;
+                    weapon.shot->combat_mod.key = key;
+                    profile.weapons = {weapon};
+                }
+                combat.profiles.push_back(profile);
+            }
+            auto created = tactical::TacticalSession::create(initial,
+                std::vector<tactical::SensorProfile>{{corvette_type, units(1000)}, {frigate_type, units(1000)}, {plain_type, units(1000)}},
+                health, {}, std::nullopt, combat, {}, table);
+            expect(static_cast<bool>(created), "combat modifier fixture creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::vector<eawr::sim::EntityId> targets;
+            std::vector<std::pair<eawr::sim::EntityId, unsigned>> applied;
+            std::vector<std::uint8_t> saved_state;
+            std::vector<std::uint8_t> flight_state;
+            std::vector<std::string> after_save;
+            std::vector<std::string> after_flight;
+            unsigned flight_frame = 0;
+            if (scenario == 0) {
+                const auto empty = world.save_checkpoint_state();
+                expect(empty && empty.value().size() >= 4 && empty.value()[0] == 37,
+                    "combat modifier: empty checkpoint uses the base domain");
+                if (empty && empty.value().size() >= 4) {
+                    auto tampered = empty.value();
+                    tampered[0] += 128;
+                    auto victim = tactical::TacticalSession::create(initial,
+                        std::vector<tactical::SensorProfile>{{corvette_type, units(1000)}, {frigate_type, units(1000)}, {plain_type, units(1000)}},
+                        health, {}, std::nullopt, combat, {}, table);
+                    expect(static_cast<bool>(victim), "combat modifier empty-domain fixture creates");
+                    if (victim) {
+                        const auto refused = victim.value().load_checkpoint_state(tampered);
+                        expect(!refused && refused.error().message.find("noncanonical empty combat-modifier domain") != std::string::npos,
+                            "combat modifier: empty flagged domain is refused");
+                    }
+                }
+            }
+            constexpr unsigned save_frame = 40;
+            const unsigned frame_count = scenario == 2 ? 240 : 120;
+            for (unsigned frame = 0; frame < frame_count; ++frame) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "combat modifier step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                if (scenario == 0 && frame > save_frame) after_save.push_back(step.value().state_sha256);
+                if (scenario == 0 && !flight_state.empty()) after_flight.push_back(step.value().state_sha256);
+                if (scenario == 0 && flight_state.empty() && std::any_of(world.projectiles().begin(), world.projectiles().end(),
+                    [](const auto& projectile) { return projectile.combat_mod.enabled; })) {
+                    expect(targets.empty() && std::none_of(step.value().snapshot->combat_events().begin(),
+                        step.value().snapshot->combat_events().end(), [](const auto& event) {
+                            return event.kind == tactical::CombatEventKind::combat_modifier_applied;
+                        }), "combat modifier projectile is in flight before the effect is applied");
+                    const auto saved = world.save_checkpoint_state();
+                    expect(saved && saved.value().size() >= 4 && saved.value()[0] == 165
+                        && saved.value()[1] == 0 && saved.value()[2] == 0 && saved.value()[3] == 0,
+                        "combat modifier projectile selects the +128 checkpoint domain");
+                    if (saved) { flight_state = saved.value(); flight_frame = frame; }
+                }
+                for (const auto& event : step.value().snapshot->combat_events())
+                    if (event.kind == tactical::CombatEventKind::combat_modifier_applied) {
+                        expect(event.outcome == key, "the event carries the projectile type key");
+                        targets.push_back(event.target);
+                        applied.emplace_back(event.target, frame);
+                    }
+                if (scenario == 0 && frame == save_frame) {
+                    const auto saved = world.save_checkpoint_state();
+                    expect(static_cast<bool>(saved), "combat modifier checkpoints mid-effect");
+                    if (saved) saved_state = saved.value();
+                }
+            }
+            if (scenario == 0 && !saved_state.empty()) {
+                // Save/load mid-effect: the restored session replays the rest of the run with the same hashes and
+                // does not apply a second modifier to a target that still holds one.
+                expect(!targets.empty(), "the modifier is live before the checkpoint");
+                const auto before_load = targets.size();
+                expect(static_cast<bool>(world.load_checkpoint_state(saved_state)), "combat modifier checkpoint restores");
+                std::vector<std::string> replayed;
+                for (unsigned frame = save_frame + 1; frame < frame_count; ++frame) {
+                    const auto step = world.step(executor);
+                    expect(static_cast<bool>(step), "combat modifier step after restore succeeds");
+                    if (!step) break;
+                    replayed.push_back(step.value().state_sha256);
+                    for (const auto& event : step.value().snapshot->combat_events())
+                        if (event.kind == tactical::CombatEventKind::combat_modifier_applied) targets.push_back(event.target);
+                }
+                expect(replayed == after_save, "checkpoint mid-effect: same hashes after restore");
+                expect(targets.size() == before_load, "checkpoint mid-effect: a live modifier is not applied again");
+            }
+            if (scenario == 0) {
+                expect(!flight_state.empty(), "combat modifier in-flight checkpoint was captured");
+                if (!flight_state.empty()) {
+                    const auto loaded = world.load_checkpoint_state(flight_state);
+                    expect(static_cast<bool>(loaded), "combat modifier in-flight checkpoint restores");
+                    if (loaded) {
+                        const auto recaptured = world.save_checkpoint_state();
+                        expect(recaptured && recaptured.value() == flight_state,
+                            "combat modifier in-flight checkpoint preserves canonical bytes");
+                        std::vector<std::string> replayed;
+                        for (unsigned frame = flight_frame + 1; frame < frame_count; ++frame) {
+                            const auto step = world.step(executor);
+                            expect(static_cast<bool>(step), "combat modifier step after in-flight restore succeeds");
+                            if (!step) break;
+                            replayed.push_back(step.value().state_sha256);
+                        }
+                        expect(replayed == after_flight, "in-flight checkpoint continues with identical hashes");
+                    }
+                }
+            }
+            std::sort(targets.begin(), targets.end());
+            expect(!targets.empty() && std::all_of(targets.begin(), targets.end(), [](const auto id) { return id == 1 || id == 3; }),
+                "WPCM-02: only enemy objects receive the modifier");
+            if (scenario == 1) expect(!targets.empty(), "WPCM-02: zero blast damage still applies the modifier");
+            if (scenario == 2) {
+                // Expiry: the modifier is applied again only after the old one ran out; while it was live a second
+                // detonation did not refresh it (WPCM-03: old value and expiry stay).
+                std::map<eawr::sim::EntityId, std::vector<unsigned>> per_target;
+                for (const auto& [id, frame] : applied) per_target[id].push_back(frame);
+                bool reapplied = false;
+                for (const auto& [id, frames] : per_target) {
+                    for (std::size_t i = 1; i < frames.size(); ++i) {
+                        reapplied = true;
+                        expect(frames[i] - frames[i - 1] >= modifier_frames, "WPCM-03: a live modifier keeps its expiry");
+                    }
+                }
+                expect(reapplied, "an expired modifier is gone, so the next detonation applies it again");
+            } else {
+                // WPCM-03: a recipient that already holds the modifier gets neither a second one nor a second particle.
+                expect(std::adjacent_find(targets.begin(), targets.end()) == targets.end(),
+                    "WPCM-03: one live modifier per target and projectile type");
+            }
+            const auto record = world.record();
+            const auto encoded = tactical::write_replay(record);
+            const auto parsed = encoded ? tactical::parse_replay(encoded.value()) : eawr::core::Result<tactical::TacticalReplay>::failure({});
+            expect(parsed && parsed.value() == record, "combat modifier run round-trips");
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "combat modifier hashes equal on 1/2/4/8 workers");
         }
     }
 }

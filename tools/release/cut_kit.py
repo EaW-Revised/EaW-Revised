@@ -26,6 +26,7 @@ import host_package
 import kit_engine
 import kit_manifest
 import launcher_artifact
+import linux_viewer_build
 import release_version
 import rig_transfer
 
@@ -103,6 +104,11 @@ def kit_commit(base, label, pin, extras, land=False):
 def engine_identity(base):
     """The pinned engine label and file hashes of the base commit."""
     return kit_engine._default_files(json.loads(git('show', base + ':tools/engine_pins.json')))
+
+
+def linux_engine_identity(base):
+    """The patched Linux x64 engine label and file hashes of the base commit (the Linux x64 player's engine)."""
+    return kit_manifest.linux_engine_identity(json.loads(git('show', base + ':tools/engine_pins.json')))
 
 
 def verify_engine(source, base):
@@ -300,6 +306,44 @@ def extract_cross_assets(bundle, fetched):
     return paths + [sums_copy], receipt
 
 
+def linux_viewer_command(commit, out):
+    """The native Linux viewer-extension build for the Linux x64 player (tools/offload/linux_viewer_build.py)."""
+    return [sys.executable, str(ROOT / 'tools/offload/linux_viewer_build.py'), '--ref', commit, '--out', str(out),
+            '--preset', linux_viewer_build.PRESET, '--lock-timeout', '28800']
+
+
+def check_linux_viewer(out, commit, online=True):
+    """The manifest of a finished Linux viewer leg, after proving the fetched library is the one it describes and was
+    built from `commit`; raises ValueError otherwise."""
+    directory = Path(out) / 'viewer'
+    if problem := linux_viewer_build.verify_viewer(directory):
+        raise ValueError(f'Linux viewer leg: {problem}')
+    manifest = json.loads((directory / 'manifest.json').read_text(encoding='utf-8'))
+    if manifest['commit'] != commit:
+        raise ValueError(f'Linux viewer leg built {manifest["commit"]}, not the kit commit {commit}')
+    if online and manifest.get('online') is not True:
+        raise ValueError('Linux viewer leg built the offline library; the release needs online play (GNS + relay) on')
+    return manifest
+
+
+def collect_linux_viewer(leg, work, commit, meta, meta_path):
+    """Join the Linux viewer leg (a Popen, or None without --linux-viewer) and record its verified manifest in `meta`."""
+    if leg is None:
+        return
+    try:
+        if leg.wait():
+            raise RuntimeError(f'Linux viewer leg failed ({leg.returncode}); see {work / "linux-viewer.log"}')
+        manifest = check_linux_viewer(work / 'linux-viewer', commit)
+    except (RuntimeError, ValueError):
+        meta['ok'] = False  # the pool cut finished, but a release with a missing or non-conforming Linux library is not a cut
+        meta_path.write_text(json.dumps(meta, indent=2), encoding='utf-8')
+        raise
+    meta['linux_viewer'] = manifest
+    meta_path.write_text(json.dumps(meta, indent=2), encoding='utf-8')
+    print(f'Linux viewer: {manifest["file"]} sha256 {manifest["sha256"]}, glibc max {manifest["glibc_max"]} '
+          f'(floor {manifest["glibc_floor"]})')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sha')
@@ -324,10 +368,16 @@ def main(argv=None):
     parser.add_argument('--no-land-skirmish', action='store_true',
                         help='owner kits are built with land skirmish ON (EAWR_ENABLE_LAND_SKIRMISH) until it ships on by default; '
                              "this leaves it at the base commit's default (OFF)")
+    parser.add_argument('--linux-viewer', action='store_true',
+                        help='also build the Linux x64 viewer extension (libeawr_viewer.linux.template_release.x86_64.so) natively '
+                             'on the Linux build host, in parallel with the pool build; it fails the cut when the library needs '
+                             'a glibc newer than config/linux-player-floor.json. The .so and its manifest (sha256, glibc max, '
+                             'build commit) land in <work>/linux-viewer/viewer/ and the cut metadata')
     parser.add_argument('--allow-dirty-tooling', action='store_true',
                         help='cut with uncommitted changes in the orchestrating scripts; the manifest records it')
     parser.add_argument('--work', type=Path, required=True)
     args = parser.parse_args(argv)
+    leg = None  # the Linux viewer leg, when --linux-viewer
     scratch = tempfile.TemporaryDirectory(prefix='eawr-release-')  # holds the tagged commit's pin and manifest of a release cut
     try:
         args.work = args.work.resolve()
@@ -413,7 +463,9 @@ def main(argv=None):
             ROOT, base=base, kit=commit, label=args.label, kit_version=config['version'],
             overlay=['tools/release/kit-label.txt', 'config/launcher-pin.json', *[p for _, p in extras], *land_paths],
             launcher_pin=pin, engine=engine_identity(base),
-            changes_sha256=kit_manifest.sha256_file(args.changes), route=route, operator=operator)
+            changes_sha256=kit_manifest.sha256_file(args.changes), route=route, operator=operator,
+            # a Linux cut also pins the patched Linux x64 engine of the base commit; kit_manifest.verify re-derives it from the kit commit
+            linux_engine=linux_engine_identity(base) if args.linux_viewer else None)
         if release:
             plan['release'] = release
         manifest = kit_manifest.new_manifest(plan, 'release' if release else 'kit')
@@ -432,6 +484,10 @@ def main(argv=None):
                 'manifest': str(manifest_path), 'plan_sha256': manifest['plan_sha256']}
         meta_path.write_text(json.dumps(meta, indent=2), encoding='utf-8')
         build = args.work / 'build'
+        if args.linux_viewer:
+            with (args.work / 'linux-viewer.log').open('wb') as leg_log:  # the child keeps its own copy of the handle
+                leg = subprocess.Popen(linux_viewer_command(commit, args.work / 'linux-viewer'), cwd=ROOT,
+                                       stdout=leg_log, stderr=subprocess.STDOUT)
         if args.cross_host:
             cmd = [sys.executable, str(ROOT / 'tools/offload/linux_cross_build.py'), '--ref', commit, '--kit',
                    '--no-test', '--host', args.cross_host, '--package-on-host', str(cfg), '--out', str(build)]
@@ -465,6 +521,7 @@ def main(argv=None):
                         receipt, attested=bool(summary.get('hostName')), assets=assets)
             meta.update(ok=True, player_zip=str(target.resolve()), player_sha256=digest, host=summary.get('hostName') or args.cross_host)
             meta_path.write_text(json.dumps(meta, indent=2), encoding='utf-8')
+            collect_linux_viewer(leg, args.work, commit, meta, meta_path)
             print(f'Cut {commit} on {meta["host"]}; run finish_kit.py --work {args.work}')
             return 0
         hosts = [h for h in build_hosts.load() if h.name == summary.get('hostName')]
@@ -498,12 +555,15 @@ def main(argv=None):
                     receipt, assets=list(downloaded.values()) if release else None)
         meta.update(ok=True, player_zip=str(target.resolve()), player_sha256=digest, host=hosts[0].name)
         meta_path.write_text(json.dumps(meta, indent=2), encoding='utf-8')
+        collect_linux_viewer(leg, args.work, commit, meta, meta_path)
         print(f'Cut {commit} on {hosts[0].name}; run finish_kit.py --work {args.work}')
         return 0
     except (OSError, ValueError, RuntimeError, kit_engine.KitEngineError, subprocess.SubprocessError) as error:
         print(f'cut-kit: {error}', file=sys.stderr)
         return 1
     finally:
+        if leg is not None and leg.poll() is None:
+            leg.terminate()  # only the child this run started
         scratch.cleanup()
 
 

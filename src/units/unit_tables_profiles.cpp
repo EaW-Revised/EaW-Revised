@@ -742,8 +742,9 @@ void Loader::load_selection(Object& object, UnitType& unit) {
             || selection_behavior("DUMMY_TOOLTIP") || impassable || (living_contact && valid_target);
         unit.bar_admitted = unit.selectable || unit.under_construction
             || selection_behavior("SPAWN_INDIGENOUS_UNITS") || generic_hero || named_hero;
-        unit.locomotion = selection_behavior("SIMPLE_SPACE_LOCOMOTOR")
-            || selection_behavior("FIGHTER_LOCOMOTOR") || selection_behavior("TEAM_LOCOMOTOR");
+        unit.cancels_hyperspace = selection_behavior("SIMPLE_SPACE_LOCOMOTOR")
+            || selection_behavior("FIGHTER_LOCOMOTOR");
+        unit.locomotion = unit.cancels_hyperspace || selection_behavior("TEAM_LOCOMOTOR");
         unit.decoration = flag(object, "Is_Decoration", false).value_or(false);
     }
 

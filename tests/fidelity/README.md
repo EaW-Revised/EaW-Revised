@@ -4,8 +4,8 @@
 
 S-10..S-19 use the SK-22 M2 fleet on the pinned Coruscant map. Each JSON is the complete
 staging input: units, exact positions and facing, tick orders, field tolerances and content
-hashes. The research recorder is `tools/behaviour_recorder` in
-`Thom-Ernst/EmpireAtWar-MultiThreaded`, branch `Thom-Ernst/p2-06-recorder`, based on the projectile, damage and shield work.
+hashes. The research recorder is maintained in a private research checkout, based on the
+projectile, damage and shield work.
 Original traces, raw samples, game logs, screenshots and provenance stay in its ignored
 `out/p2-06-final/` and `out/p2-06-replacement/`; they are neither redistributed nor launched by CI.
 

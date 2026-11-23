@@ -32,6 +32,7 @@ struct CanonicalCounts {
     std::uint64_t marked_units{};
     std::uint64_t script_invulnerable_units{};
     std::uint64_t hold_fire_units{};
+    std::uint64_t script_view_units{};
     std::uint64_t heroes{};
     std::uint64_t history_count{};
     std::uint64_t disabled_garrisons{};
@@ -67,6 +68,7 @@ struct CanonicalCounts {
         marked_units += (unit.garrison_unit) ? 1U : 0U;
         script_invulnerable_units += unit.script_invulnerable ? 1U : 0U;
         hold_fire_units += unit.hold_fire ? 1U : 0U;
+        script_view_units += unit.script_view.has_value() ? 1U : 0U;
         heroes += (unit.state.purchase_type != 0 || !unit.state.contained.empty()) ? 1U : 0U;
         history_count += (unit.position_history.has_value()) ? 1U : 0U;
         disabled_garrisons += !unit.state.garrison_enabled ? 1U : 0U;
@@ -112,6 +114,7 @@ struct CanonicalCounts {
         marked_units += other.marked_units;
         script_invulnerable_units += other.script_invulnerable_units;
         hold_fire_units += other.hold_fire_units;
+        script_view_units += other.script_view_units;
         heroes += other.heroes;
         history_count += other.history_count;
         disabled_garrisons += other.disabled_garrisons;

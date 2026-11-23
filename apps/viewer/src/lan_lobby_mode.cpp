@@ -82,7 +82,7 @@ constexpr double default_wait_seconds = 60.0;
            << ", \"settings_read_only\": " << (shot.settings_read_only ? "true" : "false")
            << ", \"status\": " << json(shot.status) << ", \"start\": {\"caption\": " << json(shot.start_caption)
            << ", \"enabled\": " << (shot.start_enabled ? "true" : "false") << ", \"reason\": " << json(shot.start_reason) << "}"
-           << ", \"room_revision\": " << shot.room_revision
+           << ", \"room_revision\": " << shot.room_revision << ", \"room_capacity\": " << shot.room_capacity
            << ", \"local_ready\": " << (shot.local_ready ? "true" : "false")
            << ", \"preparing\": " << (shot.preparing ? "true" : "false")
            << ", \"ready_seats\": " << shot.ready_seats

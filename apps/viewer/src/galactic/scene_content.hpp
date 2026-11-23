@@ -78,6 +78,8 @@ struct ProductionArt final {
     // GBT-04, GBT-05 (build tray): what groups a build choice. `category_names` are the authored CategoryMask names,
     // `members` the squadron and company member type names, `behaviors` the Behavior values.
     std::vector<std::string> category_names, members, behaviors;
+    // GBT-05 (legacy #8160): the authored Encyclopedia_Unit_Class text key, which splits a category group.
+    std::string encyclopedia_class;
 };
 // WGP-16: the model a galaxy-map fleet marker uses: the override model of the first member, in fleet order, whose type
 // authors one (`override_of(type)` returns it, empty for none), else the stock marker. Which member decides in a fleet

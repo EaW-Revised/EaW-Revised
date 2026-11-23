@@ -197,10 +197,12 @@ struct GalacticAiApplyTally {
     // Async step 3 (a): the window body reads the world through its window input (galactic_ai_world_reader.hpp). window_input_reads
     // counts those reads; window_input_mismatches counts reads whose value differs from the live session's at that moment (the
     // observation oracle only, otherwise 0: equal today, where the body runs inline; the measure of late-inline drift later);
-    // body_live_reads counts reads of the live session the runtime makes while a window input is open, outside the world's own
-    // apply and the lane barrier's named session calls (must stay 0); lane_session_calls counts those named calls (the window's
-    // overlay, identity reservation, barrier and output phase on the session: they move to the lane in step 3c).
-    std::uint64_t window_input_reads{}, window_input_mismatches{}, body_live_reads{}, lane_session_calls{};
+    // body_live_reads/writes count runtime and NativeActions bypasses of the window reader/lane shell (must stay 0). The observer
+    // also compares canonical world bytes after the sim-cut identity reservation and before adoption. lane_session_calls counts
+    // the window's overlay, local reservation, barrier and output phase, now on its private shell.
+    std::uint64_t window_input_reads{}, window_input_mismatches{}, body_live_reads{}, body_live_writes{}, lane_session_calls{};
+    // NativeActions alone, so removing the runtime's reader binding cannot hide behind other window-input clients.
+    std::uint64_t native_window_reads{};
 };
 struct GalacticAiRuntimeView {
     std::weak_ptr<const script::foc::ai::Engine> engine;

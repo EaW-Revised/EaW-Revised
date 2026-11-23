@@ -33,7 +33,10 @@ public:
     bool fire_range_bonuses = false;
     bool script_invulnerable = false; // TL-03: domains 19 and 20
     bool hold_fire = false; // Prevent_All_Fire: child-state versions 45 and up
+    bool script_view = false; // Lua Hide / Set_Selectable: +64 on the domain, each unit then carries its optional view flags
     bool final_facing = false; // MV-40: domains 33 to 36, each order and queued leg then carries its final facing
+    bool random_hardpoints = false; // WAD-27: +32 on the domain, each projectile then carries its random-hardpoint flag
+    bool combat_mods = false; // +128 on the domain, each projectile then carries its combat modifier
     bool deploy_poses = false; // WDP-02: +8 on the domain, each ability state then carries its optional deploy clip
     std::vector<std::uint8_t> bytes;
     template <class... T> void operator()(const T&... values) { (value(values), ...); }
@@ -74,7 +77,10 @@ public:
     bool fire_range_bonuses = false;
     bool script_invulnerable = false; // TL-03: domains 19 and 20
     bool hold_fire = false; // Prevent_All_Fire: child-state versions 45 and up
+    bool script_view = false; // Lua Hide / Set_Selectable: +64 on the domain, each unit then carries its optional view flags
     bool final_facing = false; // MV-40: domains 33 to 36, each order and queued leg then carries its final facing
+    bool random_hardpoints = false; // WAD-27: +32 on the domain, each projectile then carries its random-hardpoint flag
+    bool combat_mods = false; // +128 on the domain, each projectile then carries its combat modifier
     bool deploy_poses = false; // WDP-02: +8 on the domain, each ability state then carries its optional deploy clip
     explicit Reader(std::span<const std::uint8_t> bytes) : bytes_(bytes) { if (bytes.size() > byte_limit) throw Invalid("state exceeds byte budget"); }
     template <class... T> void operator()(T&... values) { (value(values), ...); }

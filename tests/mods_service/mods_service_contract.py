@@ -957,7 +957,7 @@ class RecordsContract(unittest.TestCase):
     assert_error = ServiceContract.assert_error
     # Reuse only the assertion helpers, not a second copy of the protocol suite.
     @contextlib.contextmanager
-    def fixture(self, mode="real", name="records", transcript=None, extra_objects=""):
+    def fixture(self, mode="real", name="records", transcript=None, extra_objects="", clock=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary).resolve()
             game, user = root / "game", root / "user"
@@ -990,6 +990,9 @@ class RecordsContract(unittest.TestCase):
             (root / "game/corruption/Mods/leaf/modinfo.json").write_text('{"name":"Leaf","dependencies":[{"modtype":0,"identifier":"parent"}]}')
             (root / "game/corruption/Mods/parent/modinfo.json").write_text('{"name":"Parent"}')
             args = ["--user-data", str(user)]
+            if clock:
+                (root / "clock.txt").write_text("0")
+                args += ["--records-clock-file", str(root / "clock.txt")]
             if mode == "fake":
                 # Sibling built by the same CMake job; the helper's PID/starts files are observable process seams.
                 candidates = [SERVICE.with_name("fake_loadcheck.exe"),
@@ -1181,7 +1184,7 @@ class RecordsContract(unittest.TestCase):
             self.result("shutdown")
 
     def test_records_fingerprint_reuse_window_and_invalidation(self):
-        with self.fixture() as (root, profile):
+        with self.fixture(clock=True) as (root, profile):
             leaf = root / "game/corruption/Mods/leaf"
             first = self.result("records.index", profile=profile, limit=1)
             key = first["chain_fingerprint"]
@@ -1189,6 +1192,7 @@ class RecordsContract(unittest.TestCase):
                 (leaf / "Data/XML/extra.txt").write_text(text)
             # Inside the window a changed file is not noticed: the loaded helper answers with the same fingerprint.
             touch("one")
+            (root / "clock.txt").write_text("1999")
             self.assertEqual(self.result("records.index", profile=profile, limit=1)["chain_fingerprint"], key)
             self.assertEqual(self.result("records.get", profile=profile, id="A", category="game_objects")["chain_fingerprint"], key)
             # fresh:true always re-fingerprints.
@@ -1211,7 +1215,7 @@ class RecordsContract(unittest.TestCase):
             # After the window passes the next request notices a change by itself.
             key = self.result("records.index", profile=profile, limit=1)["chain_fingerprint"]
             touch("four plus plus plus")
-            time.sleep(2.2)
+            (root / "clock.txt").write_text("3999")
             self.assertNotEqual(self.result("records.index", profile=profile, limit=1)["chain_fingerprint"], key)
             for bad in ("yes", 1, None):
                 self.assert_error(self.call("records.index", profile=profile, fresh=bad), self.ident, "EAWR-MODS-SVC-0005")

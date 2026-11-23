@@ -18,7 +18,13 @@ TrayGeometry place(const Packed& packed, const Metrics& metrics, const float lef
     TrayGeometry geometry;
     geometry.panel = {left, bottom - packed.height, metrics.panel_width, packed.height};
     float row_top = geometry.panel.y + metrics.padding + metrics.top_reserve;
-    for (const auto& row : packed.rows) {
+    const float category_gap = category_gap_of(metrics, packed.rows);
+    for (std::size_t row_index = 0; row_index < packed.rows.size(); ++row_index) {
+        const auto& row = packed.rows[row_index];
+        const bool headed = has_header(row);
+        if (row_index > 0 && headed) row_top += category_gap;
+        // The label is drawn above its row's icons, in the gap, never on the frames below.
+        const float lift = header_lift_of(metrics, row_index > 0 ? category_gap : 0.0F, row_index == 0);
         for (std::size_t position = 0; position < row.runs.size(); ++position) {
             const auto& run = row.runs[position];
             const auto& group = packed.groups[run.group];
@@ -26,7 +32,7 @@ TrayGeometry place(const Packed& packed, const Metrics& metrics, const float lef
             const float width = span_width(metrics, run.count);
             if (run.header) {
                 geometry.headers.push_back({run.group,
-                    {x, row_top, std::max(width, group.min_width), metrics.header_height}});
+                    {x, row_top - lift, std::max(width, group.min_width), metrics.header_height}});
             }
             for (std::size_t index = 0; index < run.count; ++index) {
                 geometry.entries.push_back({group.choices[run.first + index],

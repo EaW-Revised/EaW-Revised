@@ -178,7 +178,8 @@
 - **WMV-20** (debug build, EMV-12; A-04, A-06) A single ship holding on a unit destination
   that is not moving turns in place (WMV-03) toward the destination's centre plus its firepower
   angle (A-06: 0, +90 or -90 degrees, whichever side carries the most weapon power), when that
-  heading differs from its yaw by 10 degrees or more. This destination turn applies to a unit
+  heading differs from its yaw by 10 degrees or more (verified, debug build: FoC's test is greater-than-or-equal,
+  unlike the strict test of the combat turn in A-04). This destination turn applies to a unit
   attack-move or guard independently of the scanned combat target, direct targeting and attack
   range. A position destination does not supply this turn. The ship's targeting has a separate
   turn toward its combat aim point (A-04 documents that path and its conditions).

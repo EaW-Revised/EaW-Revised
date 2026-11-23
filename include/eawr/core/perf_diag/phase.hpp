@@ -31,7 +31,7 @@ public:
         return static_cast<PhaseId>(count);
     }
     [[nodiscard]] std::string_view name(const PhaseId id) const noexcept {
-        return id < count_.load(std::memory_order_acquire) ? names_[id] : std::string_view{};
+        return id < Capacity && id < count_.load(std::memory_order_acquire) ? names_[id] : std::string_view{};
     }
     [[nodiscard]] std::size_t size() const noexcept { return count_.load(std::memory_order_acquire); }
     [[nodiscard]] static constexpr std::size_t capacity() noexcept { return Capacity; }

@@ -32,4 +32,19 @@ inline constexpr Family alpha_family{
     .uniforms = &dx8_mesh::alpha_uniforms,
 };
 
+// RSkinAlphaGloss.fx sph_t0 (#8037): the vertex stage is the skinned form of MeshAlphaGloss's, the pixel stage is
+// RGB = 2 D.rgb x base.rgb + S x gloss.r, alpha base.a x D.a. Its CPUSKIN technique is the fixed-function sph_t1.
+inline constexpr Family alpha_gloss_family{
+    .program = "RSkinAlphaGloss.fx",
+    .technique = "sph_t0",
+    .pass_name = "sph_t0_p0",
+    .opaque = false,
+    .transparent = true,
+    .receives_shadows = true,
+    .binding_textures = dx8_mesh::gloss_textures,
+    .shader = &dx8_mesh::mesh_alpha_gloss_shader,
+    .binding_problem = &dx8_mesh::gloss_problem,
+    .uniforms = &dx8_mesh::alpha_uniforms,
+};
+
 } // namespace eawr::presentation::godot_backend::legacy::rskin

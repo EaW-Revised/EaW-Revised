@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.25)
 include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/EawrReleaseVersion.cmake")
 project(EawrViewer VERSION ${EAWR_RELEASE_VERSION} LANGUAGES CXX)
 include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/EawrSymbols.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/EawrMsvcRuntime.cmake")
 find_package(Threads REQUIRED)
 
 set(EAWR_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." CACHE PATH "EmpireAtWar-Revised source root")
@@ -59,7 +60,7 @@ if(MSVC)
     # Dependencies such as Mbed TLS have an older policy baseline: keep runtime
     # selection enabled when their cmake_minimum_required resets policies.
     set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "${EAWR_MSVC_RUNTIME}"
         CACHE STRING "Viewer MSVC runtime (matches the accepted godot-cpp binding)" FORCE)
 endif()
 
