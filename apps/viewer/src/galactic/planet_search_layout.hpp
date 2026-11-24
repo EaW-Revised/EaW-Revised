@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/core/from_chars.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/data/ui/dialog_script.hpp"
 #include "eawr/data/xml.hpp"
@@ -36,7 +37,7 @@ struct PlanetSearchLayout {
         const auto end = first + text.size();
         const auto read = [&](auto& value) {
             while (first != end && core::xml_whitespace.find(*first) != std::string_view::npos) ++first;
-            const auto parsed = std::from_chars(first, end, value);
+            const auto parsed = core::from_chars(first, end, value);
             first = parsed.ptr;
             return parsed.ec == std::errc{} && std::isfinite(static_cast<double>(value));
         };
@@ -55,7 +56,7 @@ struct PlanetSearchLayout {
     result.emblem = !core::iequals(field(document.root, "Owner_Emblem"), "false");
     if (const auto scale = field(document.root, "Row_Scale"); !scale.empty()) {
         const auto first = scale.data(), end = scale.data() + scale.size();
-        const auto parsed = std::from_chars(first, end, result.row_scale);
+        const auto parsed = core::from_chars(first, end, result.row_scale);
         if (parsed.ec != std::errc{} || parsed.ptr != end || !std::isfinite(result.row_scale)
             || result.row_scale < 0.5F || result.row_scale > 3.0F) return {};
     }

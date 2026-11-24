@@ -1146,6 +1146,10 @@ struct MapMode::State::ReadyLoad final {
                 }
                 state.environment = *candidate;
                 state.wind = lighting::wind::environment_wind(record);
+                // The record's distance fog, applied to the fogged legacy adapters (R-FOG-01).
+                state.renderer->set_distance_fog(space::environment_fog(record));
+            } else {
+                state.renderer->set_distance_fog(std::nullopt); // a default environment has no fog (never the last scene's)
             }
             if (state.policy != lighting::Policy::off) {
                 // Set before any upload so legacy materials compile in the

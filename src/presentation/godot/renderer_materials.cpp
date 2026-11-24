@@ -1,5 +1,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "renderer_upload_internal.hpp"
+#include "distance_fog_source.hpp"
+#include "eawr/presentation/lighting/distance_fog.hpp"
 #include "renderer_prewarm_arrays.hpp"
 #include "eawr/presentation/shader_activation.hpp"
 #include <cstring>
@@ -309,6 +311,15 @@ core::Result<void> GodotRenderer::set_translated_parameters(const sim::EntityId 
         if (!modern_source) return MaterialUpload::shader_compile_failed;
         shader_source = *modern_source;
         declared = StringName("eawr_compile_probe");
+    }
+    // The environment's distance fog for the adapters whose retail vertex stage fogs (distance_fog_source.hpp). Every other
+    // source, and every fogged one while the fog is off, is unchanged in its output.
+    std::string fogged_source;
+    if (source.route == MaterialRoute::legacy_effect && lighting::program_fades_to_fog(source.program)) {
+        if (auto fogged = distance_fog_source::fogged(shader_source)) {
+            fogged_source = std::move(*fogged);
+            shader_source = fogged_source;
+        }
     }
     const std::string uploaded = stored_output::backend_source(shader_source);
     if (shader_cache_) {

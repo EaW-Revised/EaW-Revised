@@ -6,6 +6,13 @@ target_compile_features(lighting_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(lighting_tests)
 add_test(NAME lighting_contracts COMMAND lighting_tests)
 
+add_executable(distance_fog_tests distance_fog_tests.cpp)
+target_link_libraries(distance_fog_tests PRIVATE eawr::presentation)
+target_include_directories(distance_fog_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+target_compile_features(distance_fog_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(distance_fog_tests)
+add_test(NAME distance_fog_contracts COMMAND distance_fog_tests)
+
 add_executable(wind_tests wind_tests.cpp)
 target_link_libraries(wind_tests PRIVATE eawr::presentation)
 target_compile_features(wind_tests PRIVATE cxx_std_20)

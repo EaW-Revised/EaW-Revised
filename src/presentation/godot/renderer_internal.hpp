@@ -410,6 +410,7 @@ public:
     void apply_lighting_params(RenderingServer& rendering, const RID& material) const;
     void apply_ambient_params(RenderingServer& rendering, const RID& material) const;
     void set_ambient_light(const std::array<float, 3>& rgb);
+    void set_distance_fog(const std::optional<lighting::DistanceFog>& fog);
 
     void set_lighting(const GodotRenderer::LightingState& lighting);
     [[nodiscard]] const std::optional<GodotRenderer::LightingState>& lighting() const noexcept { return lighting_; }

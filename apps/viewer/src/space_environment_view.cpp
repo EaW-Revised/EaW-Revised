@@ -8,6 +8,7 @@
 #include "settings_store.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cassert>
 #include <cstring>
 #include <fstream>
@@ -203,6 +204,7 @@ bool EnvironmentView::prepare_head(Node3D& host, const assets::Map& map, const v
     primary_sky_ = environment.primary_sky.value_or("");
     secondary_sky_ = environment.secondary_sky.value_or("");
     light_ = space::environment_light(environment);
+    fog_ = space::environment_fog(environment);
     if (environment.cloud_texture) {
         not_rendered_.push_back("cloud layer " + *environment.cloud_texture
                                 + ": land weather layer; no space composition rule");
@@ -336,6 +338,7 @@ void EnvironmentView::prepare_renderer(Node3D& host, const vfs::Vfs& filesystem)
     // policy or the existing sky/planet adapters (CEM-12A).
     if (light_) renderer_->set_ambient_light({light_->ambient.x, light_->ambient.y, light_->ambient.z});
     else not_rendered_.push_back("independent material ambient unavailable: environment 0 has no complete finite light record");
+    renderer_->set_distance_fog(fog_);
 
 }
 
@@ -400,7 +403,18 @@ void EnvironmentView::prepare_sky(const bool secondary, const assets::Map& map, 
         placed.object = name;
         placed.model_path = *path;
         placed.model = &slot->second;
-        placed.scale = *scale;
+        if (!sky_reach_scale_) {
+            float model_radius = 0.0F;
+            for (const assets::Mesh& mesh : slot->second.meshes) {
+                if (!mesh.visible) continue;
+                const float x = std::max(std::abs(mesh.bounds_min.x), std::abs(mesh.bounds_max.x));
+                const float y = std::max(std::abs(mesh.bounds_min.y), std::abs(mesh.bounds_max.y));
+                const float z = std::max(std::abs(mesh.bounds_min.z), std::abs(mesh.bounds_max.z));
+                model_radius = std::max(model_radius, std::sqrt(x * x + y * y + z * z));
+            }
+            sky_reach_scale_ = space::sky_reach_factor(model_radius * *scale);
+        }
+        placed.scale = *scale * *sky_reach_scale_;
         placed.transform = space::object_transform(eye_source_, space::sky_orientation_degrees(environment, secondary),
                                                    placed.scale);
         compose_object(placed, surfaces);
