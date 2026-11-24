@@ -693,6 +693,7 @@ public:
     void append_canonical_script_invulnerable_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_script_view_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_hold_fire_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
+    void append_canonical_suspended_locomotor_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts = nullptr) const;
     void append_canonical_craft_state(std::vector<std::uint8_t>& bytes,
         std::span<const std::vector<std::uint8_t>> encoded = {}) const;
     void append_canonical_squadron_orders_state(std::vector<std::uint8_t>& bytes,

@@ -28,7 +28,7 @@ bool metadata(const fs::path& path, std::string& out, bool directory) {
     if (error) return false;
     const auto time = entry.last_write_time(error);
     if (error) return false;
-    field(out, std::to_string(time.time_since_epoch().count()));
+    field(out, std::to_string(static_cast<long long>(time.time_since_epoch().count())));
     if (!directory) {
         const auto size = fs::file_size(path, error);
         if (error) return false;

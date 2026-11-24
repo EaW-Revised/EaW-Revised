@@ -105,8 +105,8 @@ private:
     sim::galactic::PlayerId local) {
     if (!frame.pending_conflict) return 0;
     const auto& entry = frame.pending_conflict->conflict;
-    const bool multiplayer = frame.latest && frame.latest->victory() && frame.latest->victory()->context.multiplayer;
-    return multiplayer || local == entry.defender || local == entry.invader ? entry.planet : 0;
+    // #8300: a player who is not in the fight gets no alert for it, in multiplayer too.
+    return local == entry.defender || local == entry.invader ? entry.planet : 0;
 }
 // Pure projection of the same publication used by command validation. Summary
 // acknowledgement is presentation state, never a parent ResumeGalaxy command.
@@ -138,9 +138,12 @@ private:
         if (entry.layer == campaign::BattleLayer::space && frame.auto_resolve_progress
             && frame.auto_resolve_progress->conflict == entry.id && multiplayer) return {};
         // WAR-02/WGM-173: a solo conflict the local player is not part of resolves instantly and bypasses the
-        // pending alert and the progress dialog; nothing opens for it. (Whether a multiplayer
-        // uninvolved seat gets the alert stays unverified, WGM-BP-U02, and keeps its earlier projection.)
-        if (!multiplayer && local != entry.defender && local != entry.invader) return {};
+        // pending alert and the progress dialog; nothing opens for it. In multiplayer a player who is not in the fight
+        // (not a fighting side) gets no pending prompt either (owner rule 2026-11-23, #8300): the prompt's buttons could
+        // never be used by that player, and the fighting humans alone decide the vote. A multiplayer observer still
+        // sees the passive progress dialog of a fight that is being auto-resolved (WAR-66/67).
+        const bool progress_for_conflict = frame.auto_resolve_progress && frame.auto_resolve_progress->conflict == entry.id;
+        if (local != entry.defender && local != entry.invader && !(multiplayer && progress_for_conflict)) return {};
         view.conflict = entry.id;
         view.pending_land = entry.layer == campaign::BattleLayer::land;
         view.pending_multiplayer = multiplayer;

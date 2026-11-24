@@ -939,6 +939,17 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         return none();
     };
     object("Move_To", move_like);
+    object("Suspend_Locomotor", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        if (arguments.size() != 2 || !std::holds_alternative<bool>(arguments[1].data))
+            return fail("Suspend_Locomotor expects one boolean");
+        const AiType* type = host->type(unit->type);
+        if (type == nullptr || !type->locomotor) return fail("Suspend_Locomotor: can't obtain locomotor");
+        context.issue_command(std::string(verb_suspend_locomotor),
+            {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
+        return none();
+    });
     // MV-20: face orders use the same ordered and replayed movement path as player face orders.
     object("Turn_To_Face", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const ViewUnit* unit = live_object(*host, arguments[0]);

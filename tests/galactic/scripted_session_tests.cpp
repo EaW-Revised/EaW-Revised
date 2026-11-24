@@ -899,6 +899,207 @@ void worker_parity() {
     }
 }
 
+// Exercise each public invalidation path against a populated cache. Some
+// setup operations affect only future instances or host callbacks, so their
+// present serialized digest stays equal even though reuse must be refused.
+void hash_reuse_mutator_misses() {
+    const eawr::sim::InlineExecutor executor;
+    const auto miss = [](auth::ScriptedGalacticSession& host, auth::ScriptScheduler& scripts,
+        std::string_view name, auto&& mutate, bool changes_digest) {
+        const auto before = host.script_state_hash();
+        expect(bool(before), std::string(name) + " seeds the hash cache");
+        if (!before) return;
+        const auto generation = scripts.state_revision();
+        const auto hits = host.verified_script_hash_reuse_count();
+        expect(mutate(), std::string(name) + " operation succeeds");
+        expect(scripts.state_revision() != generation, std::string(name) + " invalidates the generation");
+        const auto after = host.script_hash_for_final_barrier(false);
+        expect(host.verified_script_hash_reuse_count() == hits, std::string(name) + " does not reuse the old hash");
+        expect(after && ((after.value() != before.value()) == changes_digest),
+            std::string(name) + " has the expected serialized effect");
+    };
+    const auto empty = [] {
+        auth::SessionConfig config; config.galactic_clock = true;
+        auth::ModuleManifest modules;
+        expect(bool(modules.add("Main.lua", "Value = 1")), "empty scheduler root module");
+        expect(bool(modules.add("Prelude.lua", "PreludeValue = 7")), "empty scheduler prelude module");
+        return auth::ScriptScheduler::create(config, std::move(modules)).value();
+    };
+    const auto binding = [](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({});
+    };
+    auto configured = auth::ScriptedGalacticSession::create(galactic::GalacticSession::create(setup()).value(),
+        scheduler(1, std::string(loop)), empty()).value();
+    auto& setup_scripts = configured.story_scheduler();
+    miss(configured, setup_scripts, "register_binding", [&] { return bool(setup_scripts.register_binding("Extra", binding)); }, true);
+    miss(configured, setup_scripts, "register_free_random", [&] { return bool(setup_scripts.register_free_random(binding)); }, true);
+    miss(configured, setup_scripts, "register_method", [&] { return bool(setup_scripts.register_method(1, "Extra", binding)); }, true);
+    miss(configured, setup_scripts, "register_prelude", [&] { return bool(setup_scripts.register_prelude("Prelude.lua")); }, false);
+    miss(configured, setup_scripts, "register_managed_handles", [&] {
+        return bool(setup_scripts.register_managed_handles({1, "inventory", "release", 1}));
+    }, true);
+    miss(configured, setup_scripts, "set_managed_handle_roots", [&] {
+        setup_scripts.set_managed_handle_roots([] { return auth::ValueList{}; }); return true;
+    }, false);
+    miss(configured, setup_scripts, "set_immediate_effect_host", [&] {
+        return bool(setup_scripts.set_immediate_effect_host(std::make_shared<CounterHost>(), 8));
+    }, false);
+
+    auto host = session(true);
+    auto& story = host.story_scheduler();
+    miss(host, story, "create_instance", [&] { return bool(story.create_instance(3, "Main.lua")); }, true);
+    miss(host, story, "remove_instance", [&] { return bool(story.remove_instance(3)); }, true);
+    miss(host, story, "reconcile_objects", [&] {
+        const auto result = story.reconcile_objects({{{1, 4}, 1, 4, "Main.lua"}});
+        return result && result.value().empty();
+    }, true);
+    miss(host, story, "set_galactic_frame", [&] { return bool(story.set_galactic_frame(1)); }, true);
+    miss(host, story, "stamp_galactic_object_service", [&] {
+        return bool(story.stamp_galactic_object_service(4, false, LuaNumber(1), LuaNumber(7)));
+    }, true);
+    // Object turns are invalid for the galactic clock; even a rejected call
+    // conservatively bumps the generation without changing serialized state.
+    miss(host, story, "service_turn rejection", [&] { return !story.service_turn(executor, {}); }, false);
+
+    const auto saved = story.save();
+    expect(bool(saved), "save before load invalidation");
+    if (saved) miss(host, story, "load", [&] { return bool(story.load(saved.value())); }, false);
+    auto phase = story.begin_phase(executor);
+    expect(bool(phase), "open rollback savepoint");
+    if (phase) {
+        auth::ScriptEvent event;
+        event.key = {story.completed_tick() + 1, auth::first_simulation_producer, 2, 0};
+        event.target = 2; event.kind = auth::ScriptEvent::Kind::assign; event.name = "RollbackProbe";
+        event.parameter = auth::Value::number(LuaNumber(9));
+        expect(bool(story.submit_event(std::move(event))), "stage rollback mutation");
+        miss(host, story, "phase rollback", [&] { return bool(phase.value()->rollback()); }, true);
+    }
+    miss(host, story, "scheduler move assignment", [&] {
+        story = scheduler(2, "Different = 123\n" + std::string(loop)); return true;
+    }, true);
+    expect(story.state_revision() == std::numeric_limits<std::uint64_t>::max(),
+        "replacement conservatively disables reuse for this scheduler");
+
+    auto serviced = session();
+    auto& service_scripts = serviced.story_scheduler();
+    miss(serviced, service_scripts, "service", [&] { return bool(service_scripts.service(executor)); }, true);
+
+    auto object_host = session();
+    const auto before_object = object_host.script_state_hash();
+    const auto object_hits = object_host.verified_script_hash_reuse_count();
+    expect(bool(object_host.set_object_scheduler(scheduler(3, std::string(loop)))), "attach an object scheduler");
+    const auto after_object = object_host.script_hash_for_final_barrier(false);
+    expect(object_host.verified_script_hash_reuse_count() == object_hits, "object scheduler presence prevents reuse");
+    expect(before_object && after_object && before_object.value() != after_object.value(),
+        "object scheduler presence changes the script digest");
+}
+
+void hash_reuse_mutations() {
+    struct ObjectEngine final : auth::GalacticObjectScriptEngine {
+        eawr::core::Result<auth::ServiceReport> service(const eawr::sim::PartitionExecutor& executor,
+            galactic::GalacticSession& world, auth::ScriptScheduler& scripts) override {
+            if (auto set = scripts.set_galactic_frame(world.clock().galactic_frame); !set)
+                return eawr::core::Result<auth::ServiceReport>::failure(set.error());
+            auth::ServiceOptions options; options.time_tick = world.clock().galactic_frame;
+            return scripts.service(executor, options);
+        }
+    };
+    struct PublishedAI final : auth::GalacticScriptEngine {
+        std::string digest = "first-publication";
+        bool uses_sync_hash() const noexcept override { return true; }
+        std::optional<std::string> published_ai_sync_hash() const override { return digest; }
+        eawr::core::Result<auth::ServiceOptions> before_service(const eawr::sim::PartitionExecutor&,
+            const galactic::GalacticSession&, const galactic::GalacticTick&, auth::ScriptScheduler&) override {
+            return eawr::core::Result<auth::ServiceOptions>::success({});
+        }
+    };
+    const eawr::sim::InlineExecutor executor;
+    auto host = auth::ScriptedGalacticSession::create(galactic::GalacticSession::create(setup()).value(),
+        scheduler(1, std::string(loop)), scheduler(2, std::string(loop)), scheduler(3, std::string(loop))).value();
+    expect(host.script_hash_reuse_verification_enabled(), "CTest enables the hash-reuse verification mode in the test process");
+    wire(host);
+    expect(bool(host.set_object_engine(std::make_shared<ObjectEngine>())), "object engine installed for service");
+    auto checkpoint = host.save_scripts();
+    expect(bool(checkpoint), "initial script checkpoint saved");
+    if (checkpoint) {
+        const auto restore = [](const auth::GalacticScriptSave& saved) {
+            return auth::ScriptedGalacticSession::restore(galactic::GalacticSession::create(setup()).value(),
+                scheduler(1, std::string(loop)), scheduler(2, std::string(loop)), saved, scheduler(3, std::string(loop)));
+        };
+        expect(bool(restore(checkpoint.value())), "unchanged script checkpoint restores");
+        auto changed = checkpoint.value();
+        changed.next_sequence[{99}] += 17;
+        const auto cursor = restore(changed);
+        expect(!cursor && cursor.error().message.find("script barrier digest differs") != std::string::npos,
+            "routing sequence alone changes the script digest");
+        changed = checkpoint.value();
+        changed.pending.push_back({1, 1, 0, "mark", {}});
+        const auto pending = restore(changed);
+        expect(!pending && pending.error().message.find("script barrier digest differs") != std::string::npos,
+            "pending command alone changes the script digest");
+    }
+    auto publication = std::make_shared<PublishedAI>();
+    expect(bool(host.set_ai_engine(publication)), "published AI engine installed");
+    auto sync_before = host.script_sync_hash();
+    publication->digest = "second-publication";
+    auto sync_after = host.script_hash_for_final_barrier(true);
+    expect(sync_before && sync_after && sync_before.value() != sync_after.value(),
+        "a new asynchronous AI publication changes the sync hash without scheduler mutation");
+    auto first = host.script_state_hash();
+    const auto hits_before = host.verified_script_hash_reuse_count();
+    auto repeated = host.script_hash_for_final_barrier(false);
+    expect(first && repeated && first.value() == repeated.value(), "unchanged scheduler components reuse identical hashes");
+    expect(host.verified_script_hash_reuse_count() > hits_before, "unchanged barrier actually reuses and verifies the digest");
+    auto prior = repeated;
+    for (const auto& [scripts, id] : {std::pair{&host.ai_scheduler(), 1U}, std::pair{&host.story_scheduler(), 2U},
+                                     std::pair{host.object_scheduler(), 3U}}) {
+        const auto revision = scripts->state_revision();
+        auth::ScriptEvent event;
+        event.key = {1, auth::first_simulation_producer, id, 0}; event.target = id;
+        event.kind = auth::ScriptEvent::Kind::assign; event.name = "HashMutation";
+        event.parameter = auth::Value::number(LuaNumber(7));
+        expect(bool(scripts->submit_event(std::move(event))), "pending event admitted");
+        expect(scripts->state_revision() != revision, "pending event invalidates scheduler hash");
+        const auto hits_before_mutation = host.verified_script_hash_reuse_count();
+        auto next = host.script_hash_for_final_barrier(false);
+        expect(host.verified_script_hash_reuse_count() == hits_before_mutation, "mutation prevents a reuse hit");
+        expect(prior && next && prior.value() != next.value(), "AI, story and object mutations change script hash");
+        auto checked = host.script_state_hash();
+        expect(next && checked && next.value() == checked.value(), "verification rechecks the cached component");
+        prior = std::move(next);
+    }
+    const auto story_revision = host.story_scheduler().state_revision();
+    const auto ai_revision = host.ai_scheduler().state_revision();
+    const auto before_pending = host.script_routing_revision();
+    expect(bool(host.step(executor)), "service and command routing step");
+    expect(host.story_scheduler().state_revision() != story_revision, "story service invalidates scheduler hash");
+    expect(host.ai_scheduler().state_revision() != ai_revision, "AI service advances its mutation generation");
+    expect(host.pending_script_commands() > 0, "service stages outbound commands");
+    expect(host.script_routing_revision() != before_pending, "staging pending commands advances routing generation");
+    auto after = host.script_state_hash();
+    const auto hits_after_tick = host.verified_script_hash_reuse_count();
+    expect(prior && after && prior.value() != after.value() && bool(host.script_hash_for_final_barrier(false)),
+        "post-service hash and its cached recomputation agree");
+    expect(host.verified_script_hash_reuse_count() > hits_after_tick, "a steady tick actually reuses its script digest");
+    const auto before_routing = host.script_routing_revision();
+    expect(bool(host.step(executor)), "route commands and advance sequence");
+    expect(host.script_routing_revision() != before_routing, "routing commands and advancing cursors move the generation");
+    auto routed = host.script_state_hash();
+    expect(after && routed && after.value() != routed.value() && bool(host.script_hash_for_final_barrier(false)),
+        "routing and sequence changes are reflected in the recomposed hash");
+    auto saved = host.story_scheduler().save();
+    const auto before_load = host.story_scheduler().state_revision();
+    expect(saved && bool(host.story_scheduler().load(saved.value())), "story scheduler reloads at barrier");
+    expect(host.story_scheduler().state_revision() != before_load, "loading invalidates scheduler hash");
+    auto reloaded = host.script_hash_for_final_barrier(false);
+    expect(routed && reloaded && routed.value() == reloaded.value() && bool(host.script_hash_for_final_barrier(false)),
+        "byte-identical reload preserves the hash");
+    host.story_scheduler() = scheduler(2, "Different = 123\n" + std::string(loop));
+    auto replaced = host.script_hash_for_final_barrier(false);
+    expect(reloaded && replaced && reloaded.value() != replaced.value() && bool(host.script_hash_for_final_barrier(false)),
+        "replacing a borrowed scheduler cannot reuse its previous owner's hash");
+}
+
 void object_scheduler_barrier() {
     struct ObjectEngine final : auth::GalacticObjectScriptEngine {
         eawr::core::Result<auth::ServiceReport> service(const eawr::sim::PartitionExecutor& executor,
@@ -914,7 +1115,9 @@ void object_scheduler_barrier() {
         scheduler(1, std::string(loop)), scheduler(2, std::string(loop)), scheduler(3, std::string(loop))).value();
     wire(host);
     expect(bool(host.set_object_engine(std::make_shared<ObjectEngine>())), "object engine installed");
+    const auto object_revision = host.object_scheduler()->state_revision();
     const auto first = host.step(executor);
+    expect(host.object_scheduler()->state_revision() != object_revision, "object service invalidates its scheduler hash");
     expect(first && first.value().objects && first.value().objects->commands.size() == 1,
         "the object scheduler contributes to the galactic barrier");
     auto changed_objects = auth::ScriptedGalacticSession::create(galactic::GalacticSession::create(setup()).value(),
@@ -1001,6 +1204,8 @@ void object_scheduler_barrier() {
 } // namespace
 
 int main() {
+    hash_reuse_mutations();
+    hash_reuse_mutator_misses();
     pause_clocks_and_throttle();
     named_fault_and_guardrails();
     terminal_failure();

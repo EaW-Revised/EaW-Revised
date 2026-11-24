@@ -156,6 +156,7 @@ struct LiveUnit {
     bool script_invulnerable{};
     // Lua Prevent_All_Fire(true): none of the unit's weapons fire; checkpointed and hashed (SHFR).
     bool hold_fire{};
+    bool suspended_locomotor{};
     // Lua Hide(b) and Set_Selectable(b): presentation and command-admission flags, absent while both are at their
     // defaults; checkpointed and hashed (SVEW).
     std::optional<ScriptViewState> script_view{};

@@ -652,6 +652,7 @@ core::Result<std::string> ScriptScheduler::save(const sim::PartitionExecutor& ex
 // An allocation failure while decoding rejects the save like any other defect;
 // the scheduler is only touched after the whole save decoded.
 core::Result<void> ScriptScheduler::load(std::string_view bytes) try {
+    impl_->invalidate_state();
     std::string error;
     const detail::sf::CFunctionTable* functions = detail::function_table(error);
     if (functions == nullptr) return detail::reject(error);

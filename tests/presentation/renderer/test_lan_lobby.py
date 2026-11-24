@@ -304,7 +304,7 @@ class LanLobbyStructure(unittest.TestCase):
     def test_a_campaign_room_defaults_to_two_humans_and_lists_the_campaign_title(self):
         # A campaign room opens its mesh only when every configured human joined: the skirmish
         # transport capacity must not become its default seat count, or a joiner waits at Connecting. The default is two until
-        # the campaign list is known, then one seat per playable faction (galactic_lobby_default_humans, LLB-22).
+        # the campaign list is known, then galactic_lobby_default_humans (two until #8130 lets a room start with fewer humans than seats, LLB-22).
         staging = (SRC / "lan_lobby_screen_staging.cpp").read_text(encoding="utf-8")
         self.assertIn("requested_count == 0 ? impl_->galactic_humans : requested_count", staging)
         self.assertIn("std::uint32_t galactic_humans{2};", (SRC / "lan_lobby_screen_internal.hpp").read_text(encoding="utf-8"))
@@ -1166,21 +1166,22 @@ class LanLobbyGraphical(unittest.TestCase):
             self.assertEqual(rows[8]["name"], "+4 AI factions")
             self.assertTrue(rows[8]["visible"])
 
-    def test_galactic_room_opens_for_every_playable_row_by_default_and_the_third_guest_claims_its_row(self):
-        # D8 (#8071), review fix: the host leaves "Human players" at its default; the stock campaign has three playable factions, so the
-        # room opens for three humans (never "room is full" for the third) and each guest claims a row of its own.
-        names = ["Solo", "Guest B", "Guest C"]
-        tag = "gc-rows-default-capacity"
+    def test_galactic_room_opens_for_two_by_default_and_two_humans_with_ai_rows_can_start(self):
+        # #8130 stop-gap (owner P1 11-23): the host leaves "Human players" at its default. The room opens for two players whatever the
+        # campaign (the stock one has three playable factions, a mod stack more), the guest claims a row, every other faction stays an
+        # AI row, and Start unlocks once both humans accepted: a room never waits for seats nobody asked for.
+        names = ["Solo", "Guest B"]
+        tag = "gc-rows-default-two"
         with socket.socket() as available:
             available.bind(("127.0.0.1", 0))
             game_port = available.getsockname()[1]
         ports = free_udp_ports(len(names))
         host_script = ["host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "sleep:5",
                        "host:Default rows", "wait:staging@60",
-                       *["wait:room_player:" + player + "@180" for player in names[1:]], "sleep:10", "snapshot",
+                       *["wait:room_player:" + player + "@180" for player in names[1:]], "ready", "sleep:20", "snapshot",
                        "shot:result-" + tag, "chat:default rows shots done", "sleep:20", "leave"]
         scripts = [host_script] + [["sleep:30", "direct:127.0.0.1:" + str(game_port), "wait:room_player:" + player + "@180",
-                                    "wait:chat:default rows shots done@240", "leave"] for player in names[1:]]
+                                    "ready", "wait:chat:default rows shots done@240", "leave"] for player in names[1:]]
         processes, logs = [], []
         try:
             for index, (player, steps) in enumerate(zip(names, scripts)):
@@ -1211,9 +1212,12 @@ class LanLobbyGraphical(unittest.TestCase):
         report = load(self, self.pictures, f"{tag}-0", host_log)
         full = report["snapshots"][-1]
         humans = [row["name"] for row in full["rows"] if row["kind"] == "human" and row["visible"]]
-        self.assertEqual(len(humans), 3, [(row["kind"], row["name"]) for row in full["rows"]])
+        self.assertEqual(len(humans), 2, [(row["kind"], row["name"]) for row in full["rows"]])
         for player in names:
             self.assertTrue(any(name.startswith(player) for name in humans), (player, humans))
+        self.assertGreaterEqual(sum(row["kind"] == "ai" for row in full["rows"]), 1, "the other factions are AI rows")
+        self.assertTrue(full["start"]["enabled"], "two humans and AI rows: Start unlocks, never 'waiting for connections': "
+                        + str(full["start"].get("reason")))
         self.assertTrue((self.pictures / f"result-{tag}.png").is_file())
 
     def test_galactic_room_seats_follow_the_campaign_while_only_the_host_is_in(self):

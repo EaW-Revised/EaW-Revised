@@ -347,6 +347,7 @@ The UI foundation work was split from the UI design task. The critical path from
 
 ## Fidelity list
 
+- Lua `Suspend_Locomotor`: resumed-path turning from a displaced pose, fighter behavior after a long hold and the squadron-container auto-release's visible effect remain unverified; saved animation restoration is not yet hosted (MV-50).
 - Battle Lua TL-P1 and TL-P2: original behavior is unverified by a runtime walk (docs/behaviour/foc-tactical-ai.md).
 
 - General translated-effect cleanup with no geometry and interpass state carry are **unverified**; the [S-20 metadata plan](../../docs/behaviour/shader-translation.md#translation-wide-rules) retains an explicit qualification prerequisite before renderer admission.

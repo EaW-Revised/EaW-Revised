@@ -8,10 +8,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#elif defined(__linux__)
+#else
+#include <unistd.h>
+#if defined(__linux__)
 #include <sys/resource.h>
 #include <sys/syscall.h>
-#include <unistd.h>
+#endif
 #endif
 
 namespace eawr::mods {

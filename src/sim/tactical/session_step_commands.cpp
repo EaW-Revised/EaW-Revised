@@ -872,6 +872,13 @@ core::Result<void> session_detail::Tick::commands() {
             }
             continue;
         }
+        if (const auto* suspend = std::get_if<ScriptSuspendLocomotorPayload>(&command.payload)) {
+            for (const auto id : command.units) {
+                const auto found = staged.find(id);
+                if (found != staged.end()) found->second.suspended_locomotor = suspend->enabled;
+            }
+            continue;
+        }
         if (const auto* change = std::get_if<ScriptChangeOwnerPayload>(&command.payload)) {
             if (auto applied = lanes.scripted_change_owner(*change, command.units); !applied) return applied;
             continue;

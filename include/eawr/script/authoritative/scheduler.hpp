@@ -532,6 +532,8 @@ public:
     // Changes whenever the set of instance ids does (create, remove, a finished instance leaving, a load). A host that caches the id list
     // reads it again only when this moved. Not saved, not hashed.
     [[nodiscard]] std::uint64_t instance_revision() const noexcept;
+    // Conservative state mutation generation; the maximum value disables reuse.
+    [[nodiscard]] std::uint64_t state_revision() const noexcept;
     // GC fault tombstones persist across barriers and restore; a retired ID cannot be reused.
     [[nodiscard]] std::vector<std::uint64_t> retired_instances() const;
     // The thread slots of an instance at the tick barrier, in slot order: true for a live

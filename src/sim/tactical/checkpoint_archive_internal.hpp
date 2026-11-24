@@ -33,6 +33,7 @@ public:
     bool fire_range_bonuses = false;
     bool script_invulnerable = false; // TL-03: domains 19 and 20
     bool hold_fire = false; // Prevent_All_Fire: child-state versions 45 and up
+    bool suspended_locomotor = false;
     bool script_view = false; // Lua Hide / Set_Selectable: +64 on the domain, each unit then carries its optional view flags
     bool final_facing = false; // MV-40: domains 33 to 36, each order and queued leg then carries its final facing
     bool random_hardpoints = false; // WAD-27: +32 on the domain, each projectile then carries its random-hardpoint flag
@@ -77,6 +78,7 @@ public:
     bool fire_range_bonuses = false;
     bool script_invulnerable = false; // TL-03: domains 19 and 20
     bool hold_fire = false; // Prevent_All_Fire: child-state versions 45 and up
+    bool suspended_locomotor = false;
     bool script_view = false; // Lua Hide / Set_Selectable: +64 on the domain, each unit then carries its optional view flags
     bool final_facing = false; // MV-40: domains 33 to 36, each order and queued leg then carries its final facing
     bool random_hardpoints = false; // WAD-27: +32 on the domain, each projectile then carries its random-hardpoint flag

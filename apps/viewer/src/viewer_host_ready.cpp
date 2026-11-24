@@ -92,6 +92,10 @@ void ViewerHost::record_render_categories() {
     }
 }
 
+void ViewerHost::write_window_title(const std::string& title) {
+    if (auto* display = DisplayServer::get_singleton()) display->window_set_title(String::utf8(title.c_str()));
+}
+
 // Exceptions must not escape a GDExtension callback into the engine.
 void ViewerHost::_ready() try {
     if (!apply_engine_guard(*this)) return;  // engine guard (owner rule 11-03): engine_guard_startup.hpp
@@ -108,13 +112,16 @@ void ViewerHost::_ready() try {
 #endif
     mute_lane_audio_output();
     set_process(true);
-    // The ONE writer of the window title (the engine guard no longer appends to it). The engine titles the window
-    // "<name> (DEBUG)" when its own binary has debug support; this states the viewer and engine builds and the
-    // engine signature (red-flagged text "UNPATCHED ENGINE (...)" when the guard says unpatched) and keeps " (DEBUG)".
-    if (auto* display = DisplayServer::get_singleton()) {
+    // The ONE writer of the window title (the engine guard no longer appends to it). It states the viewer and
+    // engine builds and the engine signature (red-flagged "UNPATCHED ENGINE (...)" when the guard says unpatched),
+    // plus the launcher's mod profile name. It never shows the engine's "(DEBUG)": the title goes through the
+    // DisplayServer and is re-applied after every engine title update (see _notification).
+    {
         const std::string name = ProjectSettings::get_singleton()->get_setting("application/config/name", "EAWR Viewer")
             .operator String().utf8().get_data();
-        display->window_set_title(String::utf8(eawr::presentation::ui::window_title(name, viewer_build_type(), engine_summary(), engine_signature(), engine_debug_enabled()).c_str()));
+        const auto& profile = viewer_profile_options().profile;
+        window_title_.set(eawr::presentation::ui::window_title(name, profile ? profile->name : std::string(),
+            viewer_build_type(), engine_summary(), engine_signature()), write_window_title);
     }
     // UI-07: a text control taking focus cancels held world input (UI-I3).
     get_viewport()->connect("gui_focus_changed", callable_mp(this, &ViewerHost::on_gui_focus_changed));

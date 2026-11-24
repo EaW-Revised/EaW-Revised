@@ -739,7 +739,7 @@ private:
     // With authored_binormals every vertex also carries its binormal as
     // CUSTOM0 coefficients (legacy::binormal_coefficients).
     [[nodiscard]] bool upload_mesh(RenderingServer& rendering, const ModelView& source, Resource& target,
-        bool authored_binormals = false, bool resident = true);
+        bool authored_binormals = false, bool resident = true, bool bone_space_normals = false);
     [[nodiscard]] bool admit_resource(RenderingServer& rendering, sim::AssetId asset, Resource& resource);
     void evict_resource(RenderingServer& rendering, sim::AssetId asset, Resource& resource);
     void reconcile_residency(RenderingServer& rendering, std::span<const sim::RenderInstance> instances);

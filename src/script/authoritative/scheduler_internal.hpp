@@ -10,6 +10,7 @@
 
 #include <array>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -207,6 +208,10 @@ struct ScriptScheduler::Impl {
     std::unique_ptr<detail::Shared> shared;
     std::map<std::uint64_t, std::unique_ptr<detail::Instance>> instances;
     std::uint64_t instance_revision{}; // bumped whenever the set of instance ids changes (create, remove, finish, load); never saved or hashed
+    std::uint64_t state_revision{}; // conservative cache invalidation; never serialized
+    void invalidate_state() noexcept {
+        if (state_revision != std::numeric_limits<std::uint64_t>::max()) ++state_revision;
+    }
     std::map<EventKey, ScriptEvent> pending;
     std::map<std::uint64_t, ObjectScript> objects; // instance order, includes completed attachments
     std::set<std::uint64_t> retired; // GC deterministic fault tombstones; never live simultaneously

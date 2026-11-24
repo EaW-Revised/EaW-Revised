@@ -71,7 +71,7 @@ jobs:
   build-and-test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.name == 'linux-x64-clang' && 150 || 90 }}
+    timeout-minutes: ${{ (matrix.name == 'linux-x64-clang' || matrix.name == 'linux-x64-gcc') && 150 || 90 }}
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false

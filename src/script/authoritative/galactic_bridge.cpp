@@ -7,6 +7,7 @@
 #include "eawr/script/foc/tactical_ai.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <limits>
 #include <set>
@@ -130,6 +131,29 @@ struct ScriptedGalacticSession::Impl {
     std::set<gc::SeatId> exhausted_seats;
     std::vector<ScriptCommand> pending;
     std::optional<core::Diagnostic> failure;
+    struct CachedScriptHash {
+        std::uint64_t routing_revision{}, story_revision{}, object_revision{}, ai_revision{};
+        bool valid{}, objects_present{}, sync_ai{}, published_ai{};
+        std::string ai_digest, digest;
+    };
+    CachedScriptHash cached_script_hash;
+    std::uint64_t verified_reuses{};
+    std::uint64_t routing_revision{};
+    void invalidate_routing() noexcept {
+        if (routing_revision != std::numeric_limits<std::uint64_t>::max()) ++routing_revision;
+    }
+    bool verify_hash_reuse = [] {
+#ifdef _WIN32
+        char* value = nullptr;
+        std::size_t size = 0;
+        const bool verify = _dupenv_s(&value, &size, "EAWR_VERIFY_SCRIPT_HASH_REUSE") == 0 && value && std::string_view(value) == "1";
+        std::free(value);
+        return verify;
+#else
+        const char* value = std::getenv("EAWR_VERIFY_SCRIPT_HASH_REUSE");
+        return value && std::string_view(value) == "1";
+#endif
+    }();
     std::function<void(ServiceReport&)> global_value_committer;
     std::function<core::Result<void>(ServiceReport&)> story_command_committer;
     bool stepped{};
@@ -195,6 +219,7 @@ struct ScriptedGalacticSession::Impl {
     }
 
     void accepted(const gc::CommandOrderKey& key) {
+        invalidate_routing();
         if (key.sequence == std::numeric_limits<std::uint64_t>::max()) {
             exhausted_seats.insert(key.seat);
             next_sequence[key.seat] = key.sequence;
@@ -291,21 +316,36 @@ struct ScriptedGalacticSession::Impl {
         return report;
     }
 
-    core::Result<std::string> script_hash(bool sync_ai = false, const sim::PartitionExecutor& executor = sim::InlineExecutor{}) {
+    core::Result<std::string> script_hash(bool sync_ai = false, const sim::PartitionExecutor& executor = sim::InlineExecutor{},
+        bool allow_reuse = false) {
         const auto published = sync_ai && ai_engine ? ai_engine->published_ai_sync_hash() : std::nullopt;
         auto a = published ? core::Result<std::string>::success(*published)
             : sync_ai ? ai.sync_hash(executor, ai_engine && ai_engine->verifies_sync_hash()) : ai.state_hash();
-        auto s = story.state_hash();
         if (!a) return core::Result<std::string>::failure(a.error());
+        const auto max_revision = std::numeric_limits<std::uint64_t>::max();
+        // A published async AI digest can change without touching the sim-side scheduler; compare that digest directly,
+        // and do not read the scheduler while its owner can be running on another thread.
+        const auto ai_revision = published ? 0 : ai.state_revision();
+        const auto story_revision = story.state_revision();
+        const auto object_revision = objects ? objects->state_revision() : 0;
+        auto& cache = cached_script_hash;
+        const bool hit = allow_reuse && cache.valid && routing_revision != max_revision && story_revision != max_revision
+            && (!objects || object_revision != max_revision) && (published || ai_revision != max_revision)
+            && cache.routing_revision == routing_revision && cache.story_revision == story_revision
+            && cache.objects_present == objects.has_value() && cache.object_revision == object_revision
+            && cache.published_ai == published.has_value() && cache.ai_revision == ai_revision
+            && cache.sync_ai == sync_ai && cache.ai_digest == a.value();
+        if (hit && !verify_hash_reuse) return core::Result<std::string>::success(cache.digest);
+        auto s = story.state_hash();
         if (!s) return core::Result<std::string>::failure(s.error());
         std::string bytes;
         field(bytes, sync_ai ? "eawr-script-galactic-sync-state-v2" : "eawr-script-galactic-state-v1");
         field(bytes, "ai"); field(bytes, a.value());
         field(bytes, "story"); field(bytes, s.value());
         if (objects) {
-            auto object_hash = objects->state_hash();
-            if (!object_hash) return core::Result<std::string>::failure(object_hash.error());
-            field(bytes, "objects"); field(bytes, object_hash.value());
+            auto digest = objects->state_hash();
+            if (!digest) return core::Result<std::string>::failure(digest.error());
+            field(bytes, "objects"); field(bytes, digest.value());
         }
         field(bytes, std::to_string(next_sequence.size()));
         for (const auto& [seat, sequence] : next_sequence) {
@@ -319,7 +359,13 @@ struct ScriptedGalacticSession::Impl {
             field(bytes, std::to_string(command.sequence)); field(bytes, command.verb);
             value(bytes, Value{command.arguments});
         }
-        return core::Result<std::string>::success(hash(bytes));
+        auto digest = hash(bytes);
+        if (hit && digest != cache.digest)
+            return core::Result<std::string>::failure(error(codes::session_abort, "script hash reuse verification mismatch"));
+        if (hit && verified_reuses != std::numeric_limits<std::uint64_t>::max()) ++verified_reuses;
+        cache = {routing_revision, story_revision, object_revision, ai_revision, true, objects.has_value(), sync_ai,
+            published.has_value(), a.value(), digest};
+        return core::Result<std::string>::success(std::move(digest));
     }
 };
 
@@ -429,6 +475,7 @@ core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preservin
     auto shell = gc::GalacticSession::create(world.setup());
     if (!shell) return refuse(shell.error().message);
     auto impl = std::make_unique<Impl>(std::move(shell).value(), std::move(ai), std::move(story), std::move(objects));
+    impl->invalidate_routing();
     impl->pending = saved.pending;
     impl->next_sequence = saved.next_sequence;
     impl->exhausted_seats = saved.exhausted_seats;
@@ -483,6 +530,7 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
             if (auto admitted = impl.world.submit(command); !admitted) out.refused_input.push_back(admitted.error());
             else impl.accepted(command.key);
         }
+        impl.invalidate_routing();
         auto pending = std::move(impl.pending);
         impl.pending.clear();
         for (auto& command : pending) out.script_input.push_back(impl.route(std::move(command)));
@@ -506,6 +554,7 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
             }();
             if (!serviced) return abort(serviced.error());
             out.ai = std::move(serviced).value();
+            impl.invalidate_routing();
             impl.pending = out.ai->commands;
             // WGP-146: one admitted History turn after all committed player AI,
             // outside its parallel phases, before the global story reader.
@@ -528,6 +577,7 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
                 if (auto committed = impl.story_command_committer(*out.objects); !committed) return abort(committed.error());
             }
             impl.world.add_runtime_load_notes(out.objects->load_notes);
+            impl.invalidate_routing();
             impl.pending.insert(impl.pending.end(), out.objects->commands.begin(), out.objects->commands.end());
             out.world.snapshot = impl.world.snapshot();
             if (!unique_instances(impl.ai_ids(), *impl.objects) || !unique_instances(impl.story, *impl.objects))
@@ -535,6 +585,7 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
         }
         if (!unique_instances(impl.ai_ids(), impl.story))
             return abort(error(codes::invalid_request, "AI and story instance IDs must be disjoint"));
+        impl.invalidate_routing();
         impl.pending.insert(impl.pending.end(), out.story.commands.begin(), out.story.commands.end());
         std::sort(impl.pending.begin(), impl.pending.end(), [](const ScriptCommand& a, const ScriptCommand& b) {
             return std::pair(a.issuer, a.sequence) < std::pair(b.issuer, b.sequence);
@@ -580,9 +631,15 @@ ScriptScheduler& ScriptedGalacticSession::story_scheduler() noexcept { return im
 ScriptScheduler* ScriptedGalacticSession::object_scheduler() noexcept { return impl_->objects ? &*impl_->objects : nullptr; }
 std::uint64_t ScriptedGalacticSession::completed_tick() const noexcept { return impl_->world.completed_tick(); }
 std::size_t ScriptedGalacticSession::pending_script_commands() const noexcept { return impl_->pending.size(); }
+std::uint64_t ScriptedGalacticSession::script_routing_revision() const noexcept { return impl_->routing_revision; }
 gc::GalacticReplay ScriptedGalacticSession::record() const { return impl_->world.record(); }
 core::Result<std::string> ScriptedGalacticSession::script_state_hash() { return impl_->script_hash(); }
 core::Result<std::string> ScriptedGalacticSession::script_sync_hash() { return impl_->script_hash(true); }
+core::Result<std::string> ScriptedGalacticSession::script_hash_for_final_barrier(bool sync_ai) {
+    return impl_->script_hash(sync_ai, sim::InlineExecutor{}, true);
+}
+std::uint64_t ScriptedGalacticSession::verified_script_hash_reuse_count() const noexcept { return impl_->verified_reuses; }
+bool ScriptedGalacticSession::script_hash_reuse_verification_enabled() const noexcept { return impl_->verify_hash_reuse; }
 bool ScriptedGalacticSession::uses_sync_hash() const noexcept { return impl_->ai_engine && impl_->ai_engine->uses_sync_hash(); }
 core::Result<std::string> ScriptedGalacticSession::save_story() { return impl_->story.save(); }
 core::Result<GalacticScriptSave> ScriptedGalacticSession::save_scripts() {

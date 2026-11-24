@@ -583,9 +583,57 @@ void coop_vote_route() {
     for (unsigned i = 0; i < 4; ++i) take(game.step(executor));
     expect(resolved == 0 && !game.battle(), "networked human versus AI waits for a vote even when solo admission says auto");
 }
+// #8300 (owner rule 2026-11-23): in a multiplayer galactic game only the humans whose factions are in the fight vote.
+// One human against an AI/neutral side (pirates) decides alone: the second human, who is not in the fight, does nothing,
+// is never asked, and can never block the vote. Auto-resolve resolves; the idle human's own choice is refused.
+void uninvolved_human_never_blocks_vote() {
+    const sim::InlineExecutor executor;
+    for (const bool idle_human_clicks : {false, true}) {
+        auto setup = gc::synthetic_galaxy({7, 3, 3, 1, 1, false}); // players 1 and 2 are human sides, player 3 is AI
+        setup.networked_transport = true;
+        auto record = conflict(setup, Layer::space);
+        record.invader = 1; record.defender = 3; // human 1 fights the AI side; human 2 is not in this fight
+        record.tactical.players = {{1, 1, 1, 1}, {3, 3, 3, 1}};
+        std::erase_if(record.forces, [](const auto& force) { return force.owner == 2; });
+        std::erase_if(record.tactical.units, [](const auto& unit) { return unit.owner == 2; });
+        auto game = take(Game::create(setup));
+        check(game.configure_multiplayer_votes(30));
+        Calls calls;
+        check(game.install_conflict_layer(Layer::space, provider(Layer::space, calls)));
+        unsigned resolved{};
+        game.set_auto_resolver([&](const auto&, const auto&, const auto&) {
+            ++resolved; return core::Result<std::optional<campaign::AutoResolveOutcomeApplication>>::success({});
+        });
+        check(game.queue_conflict(record, {campaign::ConflictRoute::pending_tactical, false, false}));
+        for (unsigned i = 0; i < 6; ++i) {
+            const auto view = game.pending_conflict_view(gc::SeatId{1});
+            if (view && view->choice_ready) break;
+            take(game.step(executor));
+        }
+        const auto prompt = game.pending_conflict_view(gc::SeatId{1});
+        expect(prompt && prompt->choice_ready && prompt->arbitration.route == campaign::ConflictRoute::vote,
+            "a human against an AI side gets the vote");
+        // The player who is not in the fight has no alert of its own and cannot vote.
+        const auto idle_view = game.pending_conflict_view(gc::SeatId{2});
+        expect(idle_view && !idle_view->alert, "a human who is not in the fight gets no battle alert");
+        std::uint64_t idle_sequence{}, fighter_sequence{};
+        if (idle_human_clicks) {
+            check(game.submit({{game.completed_tick(), {2}, ++idle_sequence}, gc::BattleChoice{record.id, true}}));
+            const auto refused = take(game.step(executor));
+            expect(!refused.diagnostics.empty() && !game.battle() && resolved == 0,
+                "a choice from a human who is not in the fight is refused and starts nothing");
+        }
+        check(game.submit({{game.completed_tick(), {1}, ++fighter_sequence}, gc::BattleChoice{record.id, false}}));
+        for (unsigned i = 0; i < 3 && resolved == 0; ++i) take(game.step(executor));
+        const auto after = game.pending_conflict_view(gc::SeatId{1});
+        expect(resolved >= 1 && !game.battle() && calls.entry == 0 && calls.content == 0
+                && after && after->arbitration.route == campaign::ConflictRoute::instant_auto,
+            "the fighting human's Auto-resolve decides alone: the idle human never blocks and no battle starts");
+    }
+}
 }
 int case_galactic_conflict_dispatch_tests() {
-    try { layer_hooks(); land_fallback(); land_admission_refusal(); land_recording(); land_vote_route(); coop_vote_route(); entry_failure_falls_back(); entry_failure_checkpoint(false); entry_failure_checkpoint(true); automatic_persistence(); child_persistence(); }
+    try { layer_hooks(); land_fallback(); land_admission_refusal(); land_recording(); land_vote_route(); coop_vote_route(); uninvolved_human_never_blocks_vote(); entry_failure_falls_back(); entry_failure_checkpoint(false); entry_failure_checkpoint(true); automatic_persistence(); child_persistence(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

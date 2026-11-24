@@ -81,3 +81,4 @@ add_test(NAME lua_engine_contracts COMMAND lua_engine_tests)
 
 # Tier labels (cmake/EawrTestTiers.cmake).
 eawr_label_tests()
+eawr_verify_script_hash_reuse_tests(ALL)

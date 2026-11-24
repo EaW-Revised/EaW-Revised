@@ -45,6 +45,7 @@ EAWR_PAYLOAD_POLICY(ScriptCreateObjectPayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptDespawnPayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptTeleportPayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptHoldFirePayload, engine_only);
+EAWR_PAYLOAD_POLICY(ScriptSuspendLocomotorPayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptChangeOwnerPayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptTeleportPositionPayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptHidePayload, engine_only);

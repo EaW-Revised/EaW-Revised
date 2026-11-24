@@ -2126,6 +2126,9 @@ void mod_ai_calls() {
             object.Turn_To_Face(other.Get_Position())
             object.Turn_To_Face({0, 100, 0})
         end
+        function FaceMissing(object) object.Turn_To_Face() end
+        function LocoOk(object) object.Suspend_Locomotor(true); object.Suspend_Locomotor(false) end
+        function LocoBad(object) object.Suspend_Locomotor(1) end
         function TeleportNoArgs(object) object.Teleport_And_Face() end
         function TeleportNumber(object) object.Teleport_And_Face(5) end
         function TeleportTwoArgs(object, other) object.Teleport_And_Face(other, other) end
@@ -2488,11 +2491,40 @@ void mod_ai_calls() {
     // Prevent_All_Fire(bool) queues one replay command per valid call (a dead object queues none); Teleport_And_Face
     // takes one live game object. Every other shape is a script error naming the call and queues nothing.
     {
+        expect(scripts.value().create_instance(398, "CALLS.LUA").has_value(), "locomotor: valid-call instance");
+        auth::ScriptEvent loco;
+        loco.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 398, sequence++};
+        loco.target = 398; loco.kind = auth::ScriptEvent::Kind::call; loco.name = "LocoOk";
+        loco.arguments = {object_handle};
+        expect(scripts.value().submit_event(std::move(loco)).has_value(), "locomotor: calls queue");
+        const auto loco_report = scripts.value().service(executor);
+        expect(loco_report && loco_report.value().diagnostics.empty() && loco_report.value().commands.size() == 2,
+            "locomotor: hold and release stage commands");
+        if (loco_report) for (const auto& request : loco_report.value().commands) {
+            const auto translated = foc::tactical_ai_detail::translate_order(request);
+            expect(request.verb == foc::verb_suspend_locomotor && translated
+                && std::holds_alternative<eawr::sim::tactical::ScriptSuspendLocomotorPayload>(translated.value().payload),
+                "locomotor: commands translate to replay payloads");
+        }
+        expect(scripts.value().create_instance(397, "CALLS.LUA").has_value(), "locomotor: bad-call instance");
+        auth::ScriptEvent bad_loco;
+        bad_loco.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 397, sequence++};
+        bad_loco.target = 397; bad_loco.kind = auth::ScriptEvent::Kind::call; bad_loco.name = "LocoBad";
+        bad_loco.arguments = {object_handle};
+        expect(scripts.value().submit_event(std::move(bad_loco)).has_value(), "locomotor: invalid call queues");
+        const auto bad_loco_report = scripts.value().service(executor);
+        expect(bad_loco_report && bad_loco_report.value().diagnostics.size() == 1 && bad_loco_report.value().commands.empty(),
+            "locomotor: a non-boolean raises an error");
         expect(scripts.value().create_instance(399, "CALLS.LUA").has_value(), "MV-20: face instance");
+        auto face_target = world.view->units.front();
+        face_target.id = 42;
+        face_target.position.x = eawr::sim::math::Fixed::from_integer(27).value();
+        face_target.position.y = eawr::sim::math::Fixed::from_integer(44).value();
+        world.view->units.push_back(face_target);
         auth::ScriptEvent face;
         face.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 399, sequence++};
         face.target = 399; face.kind = auth::ScriptEvent::Kind::call; face.name = "FaceOk";
-        face.arguments = {object_handle, object_handle};
+        face.arguments = {object_handle, auth::Value{auth::Handle{foc::handle_game_object, 42}}};
         expect(scripts.value().submit_event(std::move(face)).has_value(), "MV-20: face calls queue");
         const auto face_report = scripts.value().service(executor);
         expect(face_report && face_report.value().diagnostics.empty() && face_report.value().commands.size() == 3,
@@ -2504,11 +2536,29 @@ void mod_ai_calls() {
                 "MV-20: the staged command translates to the replayed face order");
         }
         if (face_report && face_report.value().commands.size() == 3) {
+            for (std::size_t index = 0; index < 2; ++index) {
+                const auto translated = foc::tactical_ai_detail::translate_order(face_report.value().commands[index]);
+                const auto* payload = translated ? std::get_if<eawr::sim::tactical::FacePayload>(&translated.value().payload) : nullptr;
+                expect(payload && payload->target.x == face_target.position.x && payload->target.y == face_target.position.y,
+                    "MV-20: object and position targets preserve the target's coordinates");
+            }
+        }
+        if (face_report && face_report.value().commands.size() == 3) {
             const auto translated = foc::tactical_ai_detail::translate_order(face_report.value().commands.back());
             const auto* payload = translated ? std::get_if<eawr::sim::tactical::FacePayload>(&translated.value().payload) : nullptr;
             expect(payload && payload->target.y == eawr::sim::math::Fixed::from_integer(100).value(),
                 "MV-20: point coordinates survive command translation");
         }
+        world.view->units.pop_back();
+        expect(scripts.value().create_instance(396, "CALLS.LUA").has_value(), "MV-20: missing-target instance");
+        auth::ScriptEvent missing_face;
+        missing_face.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 396, sequence++};
+        missing_face.target = 396; missing_face.kind = auth::ScriptEvent::Kind::call; missing_face.name = "FaceMissing";
+        missing_face.arguments = {object_handle};
+        expect(scripts.value().submit_event(std::move(missing_face)).has_value(), "MV-20: missing-target call queues");
+        const auto missing_face_report = scripts.value().service(executor);
+        expect(missing_face_report && missing_face_report.value().diagnostics.size() == 1
+            && missing_face_report.value().commands.empty(), "MV-20: missing target raises an error and stages nothing");
         expect(scripts.value().create_instance(400, "CALLS.LUA").has_value(), "TL-11: valid-call instance");
         auth::ScriptEvent event;
         event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 400, sequence++};

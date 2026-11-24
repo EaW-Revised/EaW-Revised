@@ -135,6 +135,12 @@ destinations inside occupied space.
   one-to-1024 cap on this scale; checked fixed arithmetic still reports a duration that
   cannot fit its storage. Zero and negative factors remain unsupported.
 - **MV-21** (recording S-11) A turn in place ends exactly on its target yaw.
+- **MV-50** (debug build; Lua `Suspend_Locomotor`) The flag holds this object's locomotor service and leaves weapons,
+  abilities and AI alone. Orders still replace the movement path while held; clearing the flag continues the retained
+  path. The remake preserves an absolute-frame plan's progress by shifting its frame coordinates while held. Animation
+  restoration, displaced-pose turning and fighter state after a long hold remain unverified or unhosted. A held squadron
+  container with no held members releases itself and replaces its move with a destination at its current position;
+  the visible effect remains unverified.
 - **MV-22** (research E70-11; recording S-13) A stop drops the plan: the unit halts where
   MV-02 leaves it, without braking. S-13's corvette moves its full 3.72 units at tick 121 and
   none after.

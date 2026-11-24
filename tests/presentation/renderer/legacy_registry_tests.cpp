@@ -275,6 +275,8 @@ void source_contracts() {
     check(!legacy::reads_effect_time(shield), "three zero scroll rates require no clock writes");
     shield.bindings[2].value = 0.5F;
     check(!rejection(shield).empty(), "compiled shield rejects a scalar distortion sampler");
+    check(legacy::bone_space_normals(shield) && !legacy::bone_space_normals(selector(legacy::mesh_shield::farseer_family, RenderPass::transparent)),
+        "the shield edge term reads the normal in the mesh's authored space; the rim family reads the uploaded one");
     auto farseer = selector(legacy::mesh_shield::farseer_family, RenderPass::transparent);
     farseer.bindings = {{"Atmosphere", eawr::assets::Vec4f{0.1F, 0.2F, 0.3F, 0.5F}},
         {"AtmospherePower", 2.0F}};

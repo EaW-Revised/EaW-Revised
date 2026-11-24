@@ -58,3 +58,4 @@ add_test(NAME lua_numeric_bench_smoke COMMAND lua_numeric_bench --quick)
 
 # Tier labels (cmake/EawrTestTiers.cmake).
 eawr_label_tests()
+eawr_verify_script_hash_reuse_tests(ALL)

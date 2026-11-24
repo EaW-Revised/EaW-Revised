@@ -828,7 +828,7 @@ core::Result<PreparedAiSession> prepare_session(
             std::sort(omitted_types.begin(), omitted_types.end());
             if (auto admitted = session.omit_object_script_decisions(omitted_types); !admitted) return admitted;
         }
-        for (const std::string_view verb : {verb_move, verb_face, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_tactical_superweapon, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable, verb_take_damage, verb_teleport_and_face, verb_prevent_all_fire, verb_change_owner, verb_create_object, verb_despawn, verb_teleport_position, verb_hide, verb_hyperspace_in, verb_selectable, verb_cancel_hyperspace}) {
+        for (const std::string_view verb : {verb_move, verb_face, verb_suspend_locomotor, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_tactical_superweapon, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable, verb_take_damage, verb_teleport_and_face, verb_prevent_all_fire, verb_change_owner, verb_create_object, verb_despawn, verb_teleport_position, verb_hide, verb_hyperspace_in, verb_selectable, verb_cancel_hyperspace}) {
             if (auto added = session.register_verb(verb, translate_order); !added) return added;
         }
         if (auto added = session.register_presentation_verb(verb_letter_box); !added) return added;

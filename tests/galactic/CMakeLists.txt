@@ -44,3 +44,4 @@ add_test(NAME galactic_corpus_upgrade_dry_run
         --checkpoint "$<TARGET_FILE:galactic_area_checkpoint>"
         --control "$<TARGET_FILE:galactic_control_tests>")
 set_tests_properties(galactic_corpus_upgrade_dry_run PROPERTIES LABELS "corpus;batch-only" TIMEOUT 1800)
+eawr_verify_script_hash_reuse_tests(ALL)

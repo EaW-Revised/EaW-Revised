@@ -2600,11 +2600,11 @@ void d8_dialog_row_limit() {
         Local few(make_wide_data(3, 0));
         expect(net::galactic_lobby_human_row_limit(few.catalog().front(), 3) == 3 && net::galactic_lobby_human_row_limit(few.catalog().front(), 4) == 4,
             "three drawn factions on a three row dialog: no row is cut, so no line is kept");
-        // The room opens for every playable row by default (D8): three factions, three humans; eight factions on nine seats, eight; no
-        // fewer than two and no more than the transport's seats.
-        expect(net::galactic_lobby_default_humans(few.catalog().front(), 9) == 3, "three playable factions: a room for three humans");
-        expect(net::galactic_lobby_default_humans(campaign, 9) == 8, "eight playable factions: the human side ceiling");
-        expect(net::galactic_lobby_default_humans(campaign, 5) == 5, "the transport's seats cap the default");
+        // The room opens for two humans by default whatever the campaign: it waits for every seat it opens with, so two players can
+        // start a multi-faction campaign (#8130 lifts this). The dropdown still offers up to the playable factions.
+        expect(net::galactic_lobby_default_humans(few.catalog().front(), 9) == 2, "three playable factions: a room for two humans");
+        expect(net::galactic_lobby_default_humans(campaign, 9) == 2, "eight playable factions: still a room for two humans");
+        expect(net::galactic_lobby_default_humans(campaign, 5) == 2, "the transport's seats never lower the default below two");
         Local one(make_wide_data(1, 2));
         expect(net::galactic_lobby_default_humans(one.catalog().front(), 9) == 2, "a room is for at least two humans");
         expect(net::galactic_lobby_max_humans(campaign, 9) == 8 && net::galactic_lobby_max_humans(few.catalog().front(), 9) == 3,
@@ -2616,6 +2616,13 @@ void d8_dialog_row_limit() {
         coop.single_player_rules = true;
         expect(net::galactic_lobby_default_humans(coop, 9) == 2 && net::galactic_lobby_max_humans(coop, 9) == 8,
             "a co-op campaign opens for two humans, all on one side");
+        // Two humans in a room opened for two start without waiting for anyone else; a room opened for more names the missing players.
+        expect(net::galactic_room_waiting_text(2, net::galactic_lobby_default_humans(campaign, 9)).empty(), "two humans in the default room: nothing to wait for");
+        const auto waiting = net::galactic_room_waiting_text(2, 8);
+        expect(waiting.find("Waiting for 6 more players") == 0 && waiting.find("opened for 8") != std::string::npos
+            && waiting.find("fewer Human players") != std::string::npos, "an eight seat room with two players names six missing and the way out");
+        expect(net::galactic_room_waiting_text(2, 3).find("Waiting for 1 more player:") == 0, "one missing player is singular");
+        expect(net::galactic_room_waiting_text(3, 3).empty() && net::galactic_room_waiting_text(4, 3).empty(), "a full room has no waiting text");
     }
     // A four row mod dialog on the eight faction campaign, five humans: the room seats the first three on rows of their own; every other
     // joiner shares one of those rows (a co-op seat, drawn), and a claim of a row past the limit is refused with the dialog named.
@@ -4472,7 +4479,7 @@ void installed_observer_agreement(bool stock_only = false) {
     campaigns = cp::list_mp_lobby_campaigns(*loaded.data);
     expect(campaigns.size() == 1 && campaigns.front().name == "Observer_Agreement_Test", "real XML loader selects the authored fixture");
     const auto& selected = campaigns.front();
-    auto options = require(net::default_galactic_lobby_options(selected, difficulty, match_seed));
+    auto options = require(net::default_galactic_lobby_options(selected, difficulty, match_seed, 3, 2));
     options.custom = true; options.credits = 10000; options.allow_heroes = false;
     options.starting_tech = 2; options.maximum_tech = 5;
     const auto human = std::find_if(options.rows.begin(), options.rows.end(), [](const auto& row) { return row.human; });

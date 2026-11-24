@@ -39,9 +39,9 @@ void EawrLanLobby::fill_host_seats(const std::uint32_t requested_count) {
         // D8 (#8071): the room opens for exactly this many players (its seats and its connections) and waits for all of them; rows
         // are claimed from there. Say so where the host chooses it.
         seats->set_tooltip_text(text("The room waits for this many players before the campaign can start. A multiplayer campaign opens it for "
-                                     "one player per playable faction (at most " + std::to_string(sim::galactic::galactic_max_human_seats)
-                                     + "), a co-op campaign for two, unless you choose fewer. Each player takes a faction row; every other "
-                                     "faction of the campaign is played by the AI."));
+                                     "It opens for two players; choose more (up to the campaign's playable factions, at most "
+                                     + std::to_string(sim::galactic::galactic_max_human_seats)
+                                     + ") for a bigger game. Each player takes a faction row; every other faction of the campaign is played by the AI."));
         // The most humans the campaign can start with (a multiplayer campaign's playable factions, never above eight): the dropdown offers no
         // more, so no host opens a room that Start would refuse. Until the campaign list is known, only the human seat ceiling bounds it.
         const sim::galactic::MpLobbyCampaign* hostable = nullptr;
@@ -54,7 +54,7 @@ void EawrLanLobby::fill_host_seats(const std::uint32_t requested_count) {
         if (limit >= 2) {
             if (requested_count != 0) impl_->galactic_humans_chosen = true;
             else if (!impl_->galactic_humans_chosen && hostable != nullptr) {
-                // The campaign list is known: the room opens for every playable faction of the campaign it opens on (two for a co-op one).
+                // The campaign list is known: the default is two humans (galactic_lobby_default_humans) until #8130 lets a room start short.
                 impl_->galactic_humans = net::galactic_lobby_default_humans(*hostable, seat_limit);
                 impl_->galactic_humans_defaulted = true;
             }

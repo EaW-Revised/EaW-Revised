@@ -82,6 +82,15 @@ void bind_session_mods(eawr::core::degradation::SessionInfo& session, const std:
 int main(const int raw_argc, const char* const raw_argv[]) {
     std::vector<std::string> raw;
     for (int i = 0; i < raw_argc; ++i) raw.emplace_back(raw_argv[i]);
+    // Replay verification must exercise the full script-hash oracle on every cache hit.
+    for (const auto& arg : raw) if (arg == "--galactic-replay") {
+#ifdef _WIN32
+        if (_putenv_s("EAWR_VERIFY_SCRIPT_HASH_REUSE", "1") != 0) return 1;
+#else
+        if (setenv("EAWR_VERIFY_SCRIPT_HASH_REUSE", "1", 1) != 0) return 1;
+#endif
+        break;
+    }
     const auto expanded = eawr::mods::expand_profile_arguments(raw, {}, "--mod-root");
     for (const auto& line : expanded.report) std::cerr << line << '\n';
     if (expanded.error) return report_argument_error(expanded.error->code + ": " + expanded.error->message);

@@ -508,7 +508,13 @@ const ::std::string* ModuleManifest::find(::std::string_view logical_path) const
 
 ScriptScheduler::ScriptScheduler(::std::unique_ptr<Impl> impl) noexcept : impl_(::std::move(impl)) {}
 ScriptScheduler::ScriptScheduler(ScriptScheduler&&) noexcept = default;
-ScriptScheduler& ScriptScheduler::operator=(ScriptScheduler&&) noexcept = default;
+ScriptScheduler& ScriptScheduler::operator=(ScriptScheduler&& other) noexcept {
+    if (this != &other) {
+        impl_ = ::std::move(other.impl_);
+        if (impl_) impl_->state_revision = ::std::numeric_limits<::std::uint64_t>::max();
+    }
+    return *this;
+}
 ScriptScheduler::~ScriptScheduler() = default;
 
 core::Result<ScriptScheduler> ScriptScheduler::create(SessionConfig config, ModuleManifest manifest) {
@@ -547,6 +553,7 @@ core::Result<void> ScriptScheduler::register_free_random(Binding binding) {
 }
 
 core::Result<void> ScriptScheduler::install_binding(::std::string_view name, Binding binding, const bool free_random) {
+    impl_->invalidate_state();
     if (!impl_->instances.empty()) {
         return core::Result<void>::failure(
             detail::make_error(codes::invalid_request, "bindings are registered before the first instance"));
@@ -587,6 +594,7 @@ bool ScriptScheduler::has_module(::std::string_view logical_path) const {
 }
 
 core::Result<void> ScriptScheduler::register_prelude(::std::string_view module) {
+    impl_->invalidate_state();
     if (!impl_->instances.empty()) {
         return core::Result<void>::failure(
             detail::make_error(codes::invalid_request, "preludes are registered before the first instance"));
@@ -607,6 +615,7 @@ core::Result<void> ScriptScheduler::register_prelude(::std::string_view module) 
 
 core::Result<void> ScriptScheduler::register_method(
     const ::std::uint32_t handle_kind, ::std::string_view method, Binding binding) {
+    impl_->invalidate_state();
     if (!impl_->instances.empty()) {
         return core::Result<void>::failure(
             detail::make_error(codes::invalid_request, "bindings are registered before the first instance"));
@@ -627,6 +636,7 @@ core::Result<void> ScriptScheduler::register_method(
 
 core::Result<void> ScriptScheduler::set_immediate_effect_host(
     ::std::shared_ptr<ImmediateEffectHost> host, const ::std::size_t max_instances) {
+    impl_->invalidate_state();
     if (auto usable = impl_->check_usable(); !usable) return usable;
     if (!host || max_instances == 0 || impl_->instances.size() > max_instances)
         return core::Result<void>::failure(detail::make_error(codes::invalid_request, "immediate effects need a host and sufficient instance bound"));
@@ -636,6 +646,7 @@ core::Result<void> ScriptScheduler::set_immediate_effect_host(
 }
 
 core::Result<void> ScriptScheduler::register_managed_handles(ManagedHandlePolicy policy) {
+    impl_->invalidate_state();
     if (auto usable = impl_->check_usable(); !usable) return usable;
     if (!impl_->instances.empty() || impl_->managed_handles || !policy.kind || !policy.interval
         || policy.inventory_query.empty() || policy.release_action.empty())
@@ -644,11 +655,12 @@ core::Result<void> ScriptScheduler::register_managed_handles(ManagedHandlePolicy
     return core::Result<void>::success();
 }
 
-void ScriptScheduler::set_managed_handle_roots(::std::function<ValueList()> roots) { impl_->managed_roots = ::std::move(roots); }
+void ScriptScheduler::set_managed_handle_roots(::std::function<ValueList()> roots) { impl_->invalidate_state(); impl_->managed_roots = ::std::move(roots); }
 ManagedHandleWork ScriptScheduler::managed_handle_work() const noexcept { return impl_->managed_work; }
 
 core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::std::string_view root_module,
     bool* initial_syntax_error) {
+    impl_->invalidate_state();
     if (initial_syntax_error) *initial_syntax_error = false;
     using namespace ::eawr::script::sflua;
     if (auto usable = impl_->check_usable(); !usable) return usable;
@@ -756,6 +768,7 @@ core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::
 }
 
 core::Result<::std::vector<ScriptDiagnostic>> ScriptScheduler::reconcile_objects(::std::vector<ObjectScript> objects) {
+    impl_->invalidate_state();
     using Result = core::Result<::std::vector<ScriptDiagnostic>>;
     if (auto usable = impl_->check_usable(); !usable) return Result::failure(usable.error());
     ::std::sort(objects.begin(), objects.end(), [](const auto& a, const auto& b) { return a.instance < b.instance; });
@@ -834,6 +847,7 @@ bool within_list_depth(const Value& value, int depth = 0) {
 } // namespace
 
 core::Result<void> ScriptScheduler::submit_event(ScriptEvent event) {
+    impl_->invalidate_state();
     if (auto usable = impl_->check_usable(); !usable) return usable;
     if (event.key.tick <= impl_->completed_tick || event.key.producer < first_simulation_producer) {
         return core::Result<void>::failure(
@@ -858,6 +872,7 @@ core::Result<void> ScriptScheduler::submit_event(ScriptEvent event) {
 
 core::Result<ServiceReport> ScriptScheduler::service(
     const sim::PartitionExecutor& executor, const ServiceOptions& options) {
+    impl_->invalidate_state();
     ::std::optional<sim::tactical::DiagnosticTimer> service_timer;
     if (impl_->managed_handles) service_timer.emplace();
     if (impl_->managed_handles && !impl_->immediate_host)
@@ -1251,6 +1266,7 @@ core::Result<ServiceReport> ScriptScheduler::service(
 
 core::Result<ServiceReport> ScriptScheduler::service_turn(
     const sim::PartitionExecutor& executor, const ::std::vector<::std::uint64_t>& requested) {
+    impl_->invalidate_state();
     using Result = core::Result<ServiceReport>;
     if (auto usable = impl_->check_usable(); !usable) return Result::failure(usable.error());
     const auto& config = impl_->shared->config;
@@ -1407,6 +1423,7 @@ core::Result<::std::optional<Value>> ScriptScheduler::read_global(
 
 core::Result<void> ScriptScheduler::stamp_galactic_object_service(::std::uint64_t instance, bool first,
     numeric::LuaNumber rate, numeric::LuaNumber now) {
+    impl_->invalidate_state();
     if (auto usable = impl_->check_usable(); !usable) return usable;
     const auto found = impl_->instances.find(instance);
     if (!impl_->shared->config.galactic_clock || found == impl_->instances.end() || !impl_->objects.contains(instance))
@@ -1464,6 +1481,7 @@ bool ScriptScheduler::uses_galactic_clock() const noexcept { return impl_->share
 TickDuration ScriptScheduler::tick_duration() const noexcept { return impl_->shared->config.tick_duration; }
 ::std::uint64_t ScriptScheduler::galactic_frame() const noexcept { return impl_->galactic_frame; }
 core::Result<void> ScriptScheduler::set_galactic_frame(const ::std::uint64_t frame) {
+    impl_->invalidate_state();
     if (auto usable = impl_->check_usable(); !usable) return usable;
     if (!uses_galactic_clock() || frame >= max_script_tick || frame > impl_->completed_tick + 1) {
         return core::Result<void>::failure(detail::make_error(codes::invalid_request,
@@ -1479,6 +1497,9 @@ core::Result<void> ScriptScheduler::set_galactic_frame(const ::std::uint64_t fra
     return ids;
 }
 ::std::uint64_t ScriptScheduler::instance_revision() const noexcept { return impl_->instance_revision; }
+::std::uint64_t ScriptScheduler::state_revision() const noexcept {
+    return impl_->aborted ? ::std::numeric_limits<::std::uint64_t>::max() : impl_->state_revision;
+}
 
 core::Result<::std::vector<bool>> ScriptScheduler::thread_slots(const ::std::uint64_t instance) const {
     using SlotsResult = core::Result<::std::vector<bool>>;
@@ -1497,6 +1518,7 @@ core::Result<::std::vector<bool>> ScriptScheduler::thread_slots(const ::std::uin
 }
 
 core::Result<void> ScriptScheduler::remove_instance(const ::std::uint64_t instance) {
+    impl_->invalidate_state();
     if (auto usable = impl_->check_usable(); !usable) return usable;
     if (impl_->instances.erase(instance) == 0) {
         return core::Result<void>::failure(detail::make_error(codes::invalid_request, "no such instance"));

@@ -690,7 +690,7 @@ void test_script_hold_fire() {
     // Lua Prevent_All_Fire: while the flag is set none of the unit's weapons fire; clearing it lets them fire again;
     // the flag is checkpointed (child-state domain 53 with no other optional layout) and hashed, the command round-trips
     // through the replay as opcode 42, and every outcome agrees at 1/2/4/8 workers.
-    for (const unsigned scenario : {0U, 1U, 2U}) {
+    for (const unsigned scenario : {0U, 1U, 2U, 3U}) {
         std::vector<std::string> reference;
         for (const auto workers : {1U, 2U, 4U, 8U}) {
             auto health = durability();
@@ -717,8 +717,10 @@ void test_script_hold_fire() {
             auto world = std::move(created).value();
             expect(static_cast<bool>(world.submit(command(0, 1, 0, 1, tactical::AttackPayload{2}))), "Prevent_All_Fire: attack order submits");
             // 0: never held. 1: held from the first tick. 2: held, then released at tick 30.
-            if (scenario != 0) expect(static_cast<bool>(world.submit(command(0, 1, 1, 1, tactical::ScriptHoldFirePayload{true}))),
+            if (scenario == 1 || scenario == 2) expect(static_cast<bool>(world.submit(command(0, 1, 1, 1, tactical::ScriptHoldFirePayload{true}))),
                 "Prevent_All_Fire: hold command submits");
+            if (scenario == 3) expect(static_cast<bool>(world.submit(command(0, 1, 1, 1, tactical::ScriptSuspendLocomotorPayload{true}))),
+                "Suspend_Locomotor: hold command submits");
             if (scenario == 2) expect(static_cast<bool>(world.submit(command(30, 1, 2, 1, tactical::ScriptHoldFirePayload{false}))),
                 "Prevent_All_Fire: release command submits");
             const eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -762,6 +764,7 @@ void test_script_hold_fire() {
             if (scenario == 0) expect(shots_before + shots_after > 0, "Prevent_All_Fire: an unheld shooter fires");
             if (scenario == 1) expect(shots_before + shots_after == 0, "Prevent_All_Fire: a held shooter never fires, hit or miss");
             if (scenario == 2) expect(shots_before == 0 && shots_after > 0, "Prevent_All_Fire: releasing the hold lets the weapons fire again");
+            if (scenario == 3) expect(shots_before + shots_after > 0, "Suspend_Locomotor: holding movement leaves weapon fire enabled");
             if (reference.empty()) reference = hashes;
             else expect(reference == hashes, "Prevent_All_Fire: hashes agree at 1/2/4/8 workers");
         }

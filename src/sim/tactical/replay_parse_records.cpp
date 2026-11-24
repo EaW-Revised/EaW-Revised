@@ -154,6 +154,11 @@ core::Result<void> parse_commands(
                 return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-hold-fire payload" + at, logical_path);
             hold.enabled = enabled != 0;
             command.payload = hold;
+        } else if (opcode == detail::opcode_script_suspend_locomotor) {
+            std::uint32_t enabled{}, reserved{};
+            if (!reader.read_u32(enabled) || !reader.read_u32(reserved) || enabled > 1 || reserved != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-suspend-locomotor payload" + at, logical_path);
+            command.payload = ScriptSuspendLocomotorPayload{enabled != 0};
         } else if (opcode == detail::opcode_script_teleport_position) {
             ScriptTeleportPositionPayload to_point;
             if (!read_vec3(reader, to_point.position))

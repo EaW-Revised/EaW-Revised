@@ -303,8 +303,12 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
         const bool match_startable = net::lobby_game_mode(state.snapshot.game) != net::LobbyGameMode::galactic || (galactic_ && galactic_->can_start());
         if (state.start_reason.empty() && !match_startable)
             state.start_reason = "Starting a campaign match needs the galactic lockstep driver, which this build does not have yet.";
-        else if (state.start_reason.empty() && state.connections_pending)
-            state.start_reason = "Waiting for connections between players. Every pair must connect before Start; My connections shows only your own links.";
+        else if (state.start_reason.empty() && state.connections_pending) {
+            // A campaign room that opened for more players than joined waits for the missing seats, not for a pair (#8130).
+            state.start_reason = galactic_room() ? net::galactic_room_waiting_text(state.snapshot.seats.size(), state.snapshot.capacity) : std::string{};
+            if (state.start_reason.empty())
+                state.start_reason = "Waiting for connections between players. Every pair must connect before Start; My connections shows only your own links.";
+        }
         else if (state.start_reason.empty() && !all_ready) state.start_reason = "Waiting for every player to accept the current setup.";
         const bool start_pending = lobby_->start_pending();
         state.start_preparing = hosting && start_pending;

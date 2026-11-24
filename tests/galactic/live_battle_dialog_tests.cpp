@@ -574,6 +574,14 @@ void publication() {
     pending->alert = cp::pending_battle_alert_view(pending->conflict, countdown, true);
     const auto untimed_prompt = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
     expect(untimed_prompt.pending_multiplayer && !untimed_prompt.pending_countdown, "a co-op prompt shows no countdown");
+    // #8300: in multiplayer a player who is not in the fight gets no pending prompt and no radar flash; a fighting
+    // side keeps both. (Player 3 is neither the invader nor the defender of conflict 70.)
+    expect(view::live_battle_dialog_view(frame, {3}, 3, {}, names).phase == view::BattleDialogPhase::hidden,
+        "a multiplayer player who is not in the fight gets no battle prompt");
+    expect(view::pending_battle_radar_planet(frame, 3) == 0 && view::pending_battle_radar_planet(frame, 1) == 2,
+        "a multiplayer player who is not in the fight gets no radar flash; a fighting side keeps it");
+    expect(view::live_battle_dialog_view(frame, {1}, 1, {}, names).phase == view::BattleDialogPhase::choice,
+        "the fighting side keeps its prompt");
     pending->alert = saved_alert; frame.auto_resolve_progress = saved_progress;
     pending->conflict.layer = cp::BattleLayer::space; frame.latest = solo_snapshot;
     frame.pending_conflict.reset(); frame.auto_resolve_progress.reset();

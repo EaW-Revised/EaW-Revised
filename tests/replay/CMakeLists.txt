@@ -433,3 +433,4 @@ target_link_libraries(tactical_destruction_survivor_tests PRIVATE eawr::sim eawr
 target_compile_features(tactical_destruction_survivor_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_destruction_survivor_tests)
 add_test(NAME tactical_destruction_survivor_contracts COMMAND tactical_destruction_survivor_tests)
+eawr_verify_script_hash_reuse_tests(ALL)

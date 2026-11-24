@@ -157,6 +157,13 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         if (enabled == nullptr) return bad("malformed enabled flag");
         return OrderResult::success(make_order({unit->id}, tactical::ScriptHoldFirePayload{*enabled}));
     }
+    if (command.verb == verb_suspend_locomotor) {
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit and enabled");
+        const auto* enabled = std::get_if<bool>(&arguments[2].data);
+        if (!enabled) return bad("malformed enabled flag");
+        return OrderResult::success(make_order({unit->id}, tactical::ScriptSuspendLocomotorPayload{*enabled}));
+    }
     if (command.verb == verb_change_owner) {
         if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
             return bad("expects issuer, unit and new owner");

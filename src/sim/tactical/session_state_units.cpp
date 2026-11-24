@@ -99,6 +99,17 @@ void TacticalSession::Impl::append_canonical_hold_fire_state(std::vector<std::ui
             sim::detail::append_u64(bytes, unit.state.entity_id);
 }
 
+void TacticalSession::Impl::append_canonical_suspended_locomotor_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
+        const auto flagged = counts ? counts->suspended_locomotor_units : static_cast<std::uint64_t>(std::count_if(units.begin(), units.end(),
+            [](const auto& unit) { return unit.suspended_locomotor; }));
+        if (flagged == 0) return;
+        bytes.insert(bytes.end(), suspended_locomotor_tag.begin(), suspended_locomotor_tag.end());
+        sim::detail::append_u32(bytes, suspended_locomotor_block_version);
+        sim::detail::append_u64(bytes, flagged);
+        for (const auto& unit : units) if (unit.suspended_locomotor)
+            sim::detail::append_u64(bytes, unit.state.entity_id);
+}
+
 void TacticalSession::Impl::append_canonical_script_view_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
         // SVEW v1: the units carrying a Hide or Set_Selectable flag, in stable ID order with both flags; absent while none does.
         const auto flagged = counts ? counts->script_view_units : static_cast<std::uint64_t>(std::count_if(units.begin(), units.end(),

@@ -981,6 +981,12 @@ deadline. Nothing defaults, the countdown is hidden, and the prompt waits until 
 any auto-resolve choice still wins. The rule is derived from the sealed seat-control teams on every peer, so no
 format field carries it. Two or more human sides keep the strict timeout above.
 
+Owner rule of 2026-11-23: only the humans whose factions are the fighting sides take part in the vote. One human
+against pirates, a neutral side or an AI side decides alone, and a human who is not in that fight is never asked and
+can never block it (the tally already counts only the human invader and defender, and refuses a choice from any other
+seat). That player also gets no battle prompt and no radar flash for the fight, so there is no button to press that
+could not be answered; a passive progress dialog for a fight being auto-resolved is unchanged (WAR-66/67).
+
 For this deterministic session policy, any no choice selects auto-resolve and yes choices from every
 voting (human) side select Begin. A side can vote once; stale/conflicting/unauthorized choices are execution refusals
 shared by every peer. This aggregation is the GCMP-06 implementation policy, not additional retail
