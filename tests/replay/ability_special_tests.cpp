@@ -529,11 +529,11 @@ void test_fire_range_bonus() {
                 }
                 if (frame == 1) {
                     const auto checkpoint = world.save_checkpoint_state();
-                    const auto domain = scenario == 0 ? 37U : 38U;
+                    const auto domain = scenario == 0 ? 38U : 39U;
                     expect(checkpoint && checkpoint.value().size() >= 4
                         && checkpoint.value()[0] == domain && checkpoint.value()[1] == 0
                         && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
-                        "WFR-01: zero range uses domain 37; nonzero range selects domain 38");
+                        "WFR-01: zero range uses domain 38; nonzero range selects domain 39");
                     auto fresh = tactical::TacticalSession::from_replay(world.record(),
                         std::vector<tactical::SensorProfile>{{corvette_type, units(1500)}, {frigate_type, units(1500)}},
                         health, {}, std::nullopt, combat, {}, {}, economy);
@@ -623,10 +623,10 @@ void test_script_invulnerable() {
             expect(final && final->hull.raw() < full.raw(), "TL-03: privileged script damage reaches a flagged unit");
             const auto checkpoint = session.save_checkpoint_state();
             // The invulnerability bit selects the extended domain; the leading uint32 is little-endian.
-            const unsigned domain = scenario == 1 ? 39U : 37U;
+            const unsigned domain = scenario == 1 ? 40U : 38U;
             expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == domain
                 && checkpoint.value()[1] == 0 && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
-                "TL-03: the flag selects domain 39; a cleared or absent flag keeps domain 37");
+                "TL-03: the flag selects domain 40; a cleared or absent flag keeps domain 38");
             if (scenario == 1) {
                 // Opcode 34 survives write and parse with its flag and unit list intact.
                 const auto bytes = tactical::write_replay(session.record());
@@ -688,7 +688,7 @@ void test_script_invulnerable() {
 
 void test_script_hold_fire() {
     // Lua Prevent_All_Fire: while the flag is set none of the unit's weapons fire; clearing it lets them fire again;
-    // the flag is checkpointed (child-state domain 53 with no other optional layout) and hashed, the command round-trips
+    // the flag is checkpointed (child-state domain 54 with no other optional layout) and hashed, the command round-trips
     // through the replay as opcode 42, and every outcome agrees at 1/2/4/8 workers.
     for (const unsigned scenario : {0U, 1U, 2U, 3U}) {
         std::vector<std::string> reference;
@@ -735,9 +735,9 @@ void test_script_hold_fire() {
                     if (event.kind == tactical::CombatEventKind::weapon_fired) ++(frame < 30 ? shots_before : shots_after);
                 if (frame == 10 && scenario == 1) {
                     const auto checkpoint = world.save_checkpoint_state();
-                    expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == 53
+                    expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == 54
                         && checkpoint.value()[1] == 0 && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
-                        "Prevent_All_Fire: a held unit selects child-state domain 53");
+                        "Prevent_All_Fire: a held unit selects child-state domain 54");
                     auto fresh = tactical::TacticalSession::from_replay(world.record(), sensors, health, {}, std::nullopt, combat);
                     expect(checkpoint && fresh, "Prevent_All_Fire: checkpoint factory succeeds");
                     if (checkpoint && fresh) {
@@ -845,7 +845,7 @@ void test_script_change_owner() {
                         auto fresh = tactical::TacticalSession::from_replay(world.record(), sensors, health, {}, std::nullopt, combat);
                         expect(checkpoint && fresh, "Change_Owner: checkpoint factory succeeds");
                         if (checkpoint && fresh) {
-                            expect(checkpoint.value().size() >= 4 && checkpoint.value()[0] == 37,
+                            expect(checkpoint.value().size() >= 4 && checkpoint.value()[0] == 38,
                                 "Change_Owner: no new checkpoint state, the base child-state domain");
                             const auto loaded = fresh.value().load_checkpoint_state(checkpoint.value());
                             expect(static_cast<bool>(loaded), "Change_Owner: the checkpoint loads");
@@ -1224,10 +1224,73 @@ void test_script_teleport() {
     }
 }
 
+void test_script_creation_reference() {
+    // A direct creation of a data-defined unit: the ordered commit births the unit at the nearest free spot, tags it with the
+    // command's script reference (and the next references for any further object it makes), and commands that name the
+    // reference reach the unit in the same tick (queued after the creation) and in later ticks. The reference survives a
+    // checkpoint, a replay and every worker count.
+    constexpr tactical::TypeId made_type = corvette_type;
+    constexpr std::uint64_t reference = tactical::script_creation_namespace | (7ULL << tactical::script_reference_member_bits);
+    std::vector<std::string> reference_hashes;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        tactical::EconomyRules economy;
+        economy.players = {{1, {}, 0, true}, {2, {}, 0, true}};
+        economy.footprints = {tactical::FootprintProfile{made_type, std::nullopt, Fixed{}}};
+        auto created = tactical::TacticalSession::create(setup(), {}, durability(), motion(), std::nullopt, {}, {}, {}, economy);
+        expect(static_cast<bool>(created), "creation reference: fixture creates");
+        if (!created) continue;
+        auto world = std::move(created).value();
+        tactical::PlayerCommand make;
+        make.key = {0, 1, 0};
+        make.payload = tactical::ScriptCreateObjectPayload{made_type, 1, at(900, 900), reference};
+        expect(static_cast<bool>(world.submit(make)), "creation reference: the creation submits");
+        // Same tick, after the creation in command order: the reference is not yet a live unit when the script queues this.
+        expect(static_cast<bool>(world.submit(command(0, 1, 1, reference, tactical::ScriptTeleportPositionPayload{at(120, 340, 0)}))),
+            "creation reference: a same-tick command naming the reference submits");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto step = world.step(executor);
+        expect(static_cast<bool>(step), "creation reference: the creation tick steps");
+        if (!step) continue;
+        const auto references = world.script_references();
+        expect(references.size() == 1 && references.front().first == reference, "creation reference: the unit carries the reference");
+        if (references.empty()) continue;
+        const auto born = world.unit_state(references.front().second);
+        expect(born && born->type_id == made_type && born->owner == 1, "creation reference: the unit has the created type and owner");
+        expect(born && born->position.x == units(120) && born->position.y == units(340),
+            "creation reference: a command queued on the reference in the creation tick lands on the unit");
+        // A later tick: the unit is live and the reference still reaches it.
+        expect(static_cast<bool>(world.submit(command(2, 1, 2, reference, tactical::ScriptTeleportPositionPayload{at(-50, 60, 0)}))),
+            "creation reference: a later command naming the reference submits");
+        for (unsigned frame = 0; frame < 4; ++frame) expect(static_cast<bool>(world.step(executor)), "creation reference: later ticks step");
+        const auto moved = world.unit_state(references.front().second);
+        expect(moved && moved->position.x == units(-50) && moved->position.y == units(60),
+            "creation reference: a later command naming the reference lands on the unit");
+        // A reference nobody holds is skipped like an unknown unit, never an error.
+        expect(static_cast<bool>(world.submit(command(5, 1, 3, reference + 9, tactical::ScriptTeleportPositionPayload{at(1, 2, 0)}))),
+            "creation reference: an unheld reference submits");
+        expect(static_cast<bool>(world.step(executor)), "creation reference: an unheld reference is skipped silently");
+        const auto state = world.save_checkpoint_state();
+        const auto log = world.record();
+        auto replay = tactical::TacticalSession::from_replay(log, {}, durability(), motion(), std::nullopt, {}, {}, {}, economy);
+        expect(static_cast<bool>(replay), "creation reference: the recording parses");
+        if (replay) {
+            while (replay.value().completed_tick() < world.completed_tick()) expect(static_cast<bool>(replay.value().step(executor)), "creation reference: the replay steps");
+            expect(replay.value().state_sha256() == world.state_sha256(), "creation reference: the replay reaches the same hash");
+            expect(replay.value().script_references() == world.script_references(), "creation reference: the replay holds the same reference");
+        }
+        auto resumed = tactical::TacticalSession::from_replay(log, {}, durability(), motion(), std::nullopt, {}, {}, {}, economy);
+        expect(state && resumed && resumed.value().load_checkpoint_state(state.value()).has_value(),
+            "creation reference: the checkpoint restores");
+        if (resumed) expect(resumed.value().script_references() == world.script_references(), "creation reference: the checkpoint keeps the reference");
+        if (reference_hashes.empty()) reference_hashes = {world.state_sha256()};
+        else expect(reference_hashes.front() == world.state_sha256(), "creation reference: hashes agree at 1/2/4/8 workers");
+    }
+}
+
 void test_script_layering() {
     // Lua Teleport(position), Hide, Set_Selectable, Cinematic_Hyperspace_In (opcodes 44, 45, 47 and 48):
     // the position teleport keeps the z and the unit's own facing and stops it; the hide and selectable flags are
-    // checkpointed (child-state domain 101 while one is set, 37 once both are cleared) and hashed; a hyperspace-in starts
+    // checkpointed (child-state domain 102 while one is set, 38 once both are cleared) and hashed; a hyperspace-in starts
     // the shared arrival sequence at the unit's own position; a unit that cannot move and a
     // missing unit are left alone; every command round-trips through the replay and every outcome agrees at 1/2/4/8 workers.
     std::vector<std::string> reference;
@@ -1268,9 +1331,9 @@ void test_script_layering() {
             if (frame == 20) {
                 // Every command is in the log by now, so a fresh session replays to the same cursors before the load.
                 const auto checkpoint = world.save_checkpoint_state();
-                expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == 101
+                expect(checkpoint && checkpoint.value().size() >= 4 && checkpoint.value()[0] == 102
                     && checkpoint.value()[1] == 0 && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
-                    "layering: a flagged unit selects child-state domain 101");
+                    "layering: a flagged unit selects child-state domain 102");
                 auto fresh = tactical::TacticalSession::from_replay(world.record(), {}, durability(), motion());
                 expect(checkpoint && fresh, "layering: checkpoint factory succeeds");
                 if (checkpoint && fresh) {
@@ -1280,6 +1343,11 @@ void test_script_layering() {
                         const auto recaptured = fresh.value().save_checkpoint_state();
                         expect(recaptured && recaptured.value() == checkpoint.value(), "layering: checkpoint round-trip preserves canonical bytes");
                     }
+                    // The script-view layout gained a per-unit creation reference: the earlier domain (101) is refused, never misparsed.
+                    auto earlier = checkpoint.value();
+                    earlier[0] = 101;
+                    auto stale = tactical::TacticalSession::from_replay(world.record(), {}, durability(), motion());
+                    expect(stale && !stale.value().load_checkpoint_state(earlier), "layering: the pre-reference script-view domain 101 is refused");
                 }
                 submit(22, 1, 1, tactical::ScriptHidePayload{false});
                 submit(23, 1, 1, tactical::ScriptSelectablePayload{true});
@@ -1300,11 +1368,11 @@ void test_script_layering() {
             }
             if (frame == 22) {
                 const auto checkpoint = world.save_checkpoint_state();
-                expect(checkpoint && checkpoint.value()[0] == 101, "layering: one flag left keeps domain 101");
+                expect(checkpoint && checkpoint.value()[0] == 102, "layering: one flag left keeps domain 102");
             }
             if (frame == 24) {
                 const auto checkpoint = world.save_checkpoint_state();
-                expect(checkpoint && checkpoint.value()[0] == 37, "layering: both flags cleared returns to domain 37");
+                expect(checkpoint && checkpoint.value()[0] == 38, "layering: both flags cleared returns to domain 38");
                 const auto cleared = world.snapshot();
                 const tactical::TacticalInstance* unit_one = nullptr;
                 if (cleared) for (const auto& row : cleared->instances()) if (row.entity_id == 1) unit_one = &row;
@@ -2719,7 +2787,7 @@ void test_spawned_hero_abilities() {
             unsigned flight_frame = 0;
             if (scenario == 0) {
                 const auto empty = world.save_checkpoint_state();
-                expect(empty && empty.value().size() >= 4 && empty.value()[0] == 37,
+                expect(empty && empty.value().size() >= 4 && empty.value()[0] == 38,
                     "combat modifier: empty checkpoint uses the base domain");
                 if (empty && empty.value().size() >= 4) {
                     auto tampered = empty.value();
@@ -2751,7 +2819,7 @@ void test_spawned_hero_abilities() {
                             return event.kind == tactical::CombatEventKind::combat_modifier_applied;
                         }), "combat modifier projectile is in flight before the effect is applied");
                     const auto saved = world.save_checkpoint_state();
-                    expect(saved && saved.value().size() >= 4 && saved.value()[0] == 165
+                    expect(saved && saved.value().size() >= 4 && saved.value()[0] == 166
                         && saved.value()[1] == 0 && saved.value()[2] == 0 && saved.value()[3] == 0,
                         "combat modifier projectile selects the +128 checkpoint domain");
                     if (saved) { flight_state = saved.value(); flight_frame = frame; }

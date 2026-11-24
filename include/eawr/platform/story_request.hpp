@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/core/from_chars.hpp"
+
 // The session's side of the story presentation commands (docs/behaviour/tactical-story-cinematic.md): the request a staged command
 // reads back as, with real numbers. Outside the script library, which has no floating point.
 
@@ -46,7 +48,7 @@ inline std::optional<double> parse_number(const Value& value) {
     const auto* text = std::get_if<std::string>(&value.data);
     if (text == nullptr) return std::nullopt;
     double out{};
-    const auto parsed = std::from_chars(text->data(), text->data() + text->size(), out);
+    const auto parsed = eawr::core::from_chars(text->data(), text->data() + text->size(), out);
     if (parsed.ec != std::errc{} || parsed.ptr != text->data() + text->size() || !std::isfinite(out)) return std::nullopt;
     return out;
 }
@@ -120,7 +122,7 @@ inline const std::string* text_of(const Value& value) { return std::get_if<std::
     request.euler = *n[7] != 0.0;
     if (const auto* object = story_detail::text_of(a[10]); object != nullptr && *object != "-") {
         std::uint64_t id{};
-        const auto parsed = std::from_chars(object->data(), object->data() + object->size(), id);
+        const auto parsed = eawr::core::from_chars(object->data(), object->data() + object->size(), id);
         if (parsed.ec != std::errc{} || parsed.ptr != object->data() + object->size()) return std::nullopt;
         request.object = id;
     }

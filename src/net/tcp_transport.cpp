@@ -512,6 +512,7 @@ struct TcpTransport::Mesh {
     bool hosting{}, assigned{}, roster_seen{}, ready_sent{}, opened{}, stopping{}, repairing{};
     bool bootstrap_seen{}, direct_bootstrap{};
     std::uint32_t frozen_mask{};
+    bool join_hold{}; // Staging host only: a Start is in progress, so no new attachment may take a slot.
     std::string listen_address;
     std::optional<TcpRejoinAuth> auth;
     PeerIndex index{};
@@ -570,6 +571,9 @@ struct TcpTransport::Mesh {
     void assignment(Impl& candidate, std::span<const std::uint8_t> body) {
         if (options.staging_capacity && frozen_mask) {
             candidate.refuse("EAWR-NET-1305", "This room has started; its player roster is locked."); return;
+        }
+        if (options.staging_capacity && join_hold) {
+            candidate.refuse("EAWR-NET-1307", "The host is starting the game; try joining again in a moment."); return;
         }
         std::uint32_t count{}, seat{}, port{};
         std::string address;
@@ -857,9 +861,10 @@ struct TcpTransport::Mesh {
         }
         if (repairing) {
             bool complete = true;
-            for (PeerIndex peer = 0; peer < options.peers; ++peer) if (peer != index)
+            for (PeerIndex peer = 0; peer < options.peers; ++peer) if (peer != index && (frozen_mask & (1U << peer)))
                 complete = complete && links[peer] && confirmed[peer] && links[peer]->authenticated() && links[peer]->state == LinkState::open;
-            if (complete) { socket::close(listener); listener = socket::invalid; repairing = false; }
+            // A staging host keeps its refusal listener: a late arrival still gets the typed started-room refusal.
+            if (complete) { if (!(hosting && options.staging_capacity)) { socket::close(listener); listener = socket::invalid; } repairing = false; }
         }
         if (roster_seen && !opened && Clock::now() - roster_started >= options.handshake_timeout) fail("Whole-mesh readiness timed out");
     }
@@ -1106,6 +1111,12 @@ core::Result<bool> TcpTransport::lock_staging_roster(std::uint32_t active) {
     if (mesh.failure) return Result::failure(*mesh.failure);
     return Result::success(false);
 }
+std::uint32_t TcpTransport::roster_mask() const {
+    return mesh_ ? mesh_->frozen_mask : 3U;
+}
+void TcpTransport::hold_staging_joins(bool hold) {
+    if (mesh_ && mesh_->hosting && mesh_->options.staging_capacity) mesh_->join_hold = hold;
+}
 bool TcpTransport::staging_mesh_ready() const {
     if (!staging_capacity()) return true;
     if (!mesh_->opened || mesh_->stopping) return false;
@@ -1167,7 +1178,9 @@ core::Result<void> TcpTransport::repair_closed_links(std::optional<TcpRejoinAuth
         mesh.repairing = true; mesh.auth = repair_auth_;
         bool needs_listener{};
         for (PeerIndex peer = 0; peer < mesh.options.peers; ++peer) {
-            if (peer == mesh.index || (mesh.links[peer] && mesh.links[peer]->state != LinkState::closed)) continue;
+            // A slot outside the frozen roster (a vacant staging seat) has no endpoint and no credential to repair.
+            if (peer == mesh.index || !(mesh.frozen_mask & (1U << peer))
+                || (mesh.links[peer] && mesh.links[peer]->state != LinkState::closed)) continue;
             mesh.confirmed[peer] = false; mesh.pair_sent[peer] = false;
             if (peer < mesh.index) {
                 auto connected = Mesh::dial(mesh.endpoints[peer].host, mesh.endpoints[peer].port, mesh.options);

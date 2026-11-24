@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/shader_effect_source.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/core/sha256.hpp"
@@ -104,7 +105,7 @@ struct Builder {
             }
         }
         if (!array.empty()) {
-            const auto result = std::from_chars(array.data(), array.data() + array.size(), item.array_count);
+            const auto result = eawr::core::from_chars(array.data(), array.data() + array.size(), item.array_count);
             if (result.ec != std::errc{} || result.ptr != array.data() + array.size() || item.array_count == 0) fail(Failure::unsupported, location);
         }
         view().types.push_back(std::move(item)); budget(); return view().types.size() - 1;
@@ -153,13 +154,13 @@ struct Builder {
                     if (shape.kind == Kind::floating) {
                         float number{}; auto number_text = token;
                         if (number_text.ends_with('f') || number_text.ends_with('F')) number_text.remove_suffix(1);
-                        const auto result = std::from_chars(number_text.data(), number_text.data() + number_text.size(), number);
+                        const auto result = eawr::core::from_chars(number_text.data(), number_text.data() + number_text.size(), number);
                         if (result.ec != std::errc{} || result.ptr != number_text.data() + number_text.size() || !std::isfinite(number)) fail(Failure::unsupported, location);
                         word = std::bit_cast<std::uint32_t>(number);
                     } else if (lower(std::string(token)) == "true") word = 1;
                     else if (lower(std::string(token)) == "false") word = 0;
                     else {
-                        std::int32_t number{}; const auto result = std::from_chars(token.data(), token.data() + token.size(), number);
+                        std::int32_t number{}; const auto result = eawr::core::from_chars(token.data(), token.data() + token.size(), number);
                         if (result.ec != std::errc{} || result.ptr != token.data() + token.size()) fail(Failure::unsupported, location);
                         word = std::bit_cast<std::uint32_t>(number);
                     }

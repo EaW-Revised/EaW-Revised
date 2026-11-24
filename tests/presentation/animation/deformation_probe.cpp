@@ -18,6 +18,7 @@
 
 #include "deformation_probe.hpp"
 
+#include "eawr/core/from_chars.hpp"
 #include "eawr/sim/replay.hpp"
 #include "eawr/vfs/vfs.hpp"
 
@@ -82,7 +83,7 @@ namespace playback = eawr::presentation::animation;
 
 [[nodiscard]] std::optional<float> parse_time(const std::string_view text) {
     double value{};
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    const auto [end, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
     if (text.empty() || error != std::errc{} || end != text.data() + text.size()) return std::nullopt;
     if (!std::isfinite(value) || value < 0.0 || value > static_cast<double>(std::numeric_limits<float>::max()))
         return std::nullopt;

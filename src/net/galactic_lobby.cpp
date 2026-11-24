@@ -170,6 +170,26 @@ std::optional<GalacticAiCaption> galactic_ai_caption(std::string_view difficulty
     return std::nullopt;
 }
 
+GalacticAiCaption galactic_ai_display_level(std::string_view difficulty) noexcept {
+    if (const auto stock = galactic_ai_caption(difficulty)) return *stock;
+    const auto first = difficulty.substr(0, difficulty.find('_'));
+    const auto same = [&](std::string_view name) {
+        return first.size() == name.size() && std::equal(first.begin(), first.end(), name.begin(),
+            [](char x, char y) { return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y)); });
+    };
+    if (same("easy")) return GalacticAiCaption::easy;
+    if (same("hard")) return GalacticAiCaption::hard;
+    return GalacticAiCaption::normal;
+}
+
+std::string_view galactic_ai_caption_key(const GalacticAiCaption level) noexcept {
+    return level == GalacticAiCaption::easy ? "TEXT_EASY_AI_PLAYER" : level == GalacticAiCaption::hard ? "TEXT_HARD_AI_PLAYER" : "TEXT_MEDIUM_AI_PLAYER";
+}
+
+std::string_view galactic_ai_caption_words(const std::string_view key) noexcept {
+    return key == galactic_ai_caption_key(GalacticAiCaption::easy) ? "Easy" : key == galactic_ai_caption_key(GalacticAiCaption::hard) ? "Hard" : "Normal";
+}
+
 core::Result<GalacticLobbyOptions> default_galactic_lobby_options(const gc::MpLobbyCampaign& campaign,
     std::string_view difficulty, std::uint64_t seed, std::uint64_t input_delay, std::size_t planned_humans) {
     if (seed > std::numeric_limits<std::uint32_t>::max()) return refuse<GalacticLobbyOptions>(std::string(galactic_seed_too_wide));
@@ -178,10 +198,11 @@ core::Result<GalacticLobbyOptions> default_galactic_lobby_options(const gc::MpLo
     options.campaign = campaign.name;
     options.difficulty = gc::lobby_difficulty_offered(campaign, difficulty) ? std::string(difficulty) : gc::lobby_default_difficulty(campaign, difficulty);
     options.seed = seed; options.input_delay = input_delay;
-    // The campaign's own constant stays the default when it states one; the host range bounds what a new room offers.
-    if (campaign.vote_timeout_seconds) options.vote_timeout = galactic_lobby_clamp_vote_timeout(*campaign.vote_timeout_seconds);
+    // The vote timeout starts at the project default (owner decision D11), whatever pending-battle timeout the data authors;
+    // the host sets it within the host range.
     // D8: the host's own row is planned; the other playable rows start as AI factions a player takes. A co-op campaign is one side.
     const std::size_t wanted = campaign.single_player_rules ? 1U : std::clamp<std::size_t>(planned_humans, 1U, galactic_lobby_max_human_sides);
+
     std::size_t humans{};
     for (const auto& faction : campaign.factions) {
         GalacticLobbyRow row{faction.player, faction.faction_id, faction.flags, faction.name, false, galactic_lobby_default_dropout};

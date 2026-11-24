@@ -116,11 +116,15 @@ void TacticalSession::Impl::append_canonical_script_view_state(std::vector<std::
             [](const auto& unit) { return unit.script_view.has_value(); }));
         if (flagged == 0) return;
         bytes.insert(bytes.end(), script_view_tag.begin(), script_view_tag.end());
-        sim::detail::append_u32(bytes, script_view_block_version);
+        // v2 adds each carrier's script reference; a session whose flags carry none hashes as v1 did.
+        const bool references = std::any_of(units.begin(), units.end(),
+            [](const auto& unit) { return unit.script_view && unit.script_view->identity != 0; });
+        sim::detail::append_u32(bytes, references ? script_view_block_version + 1U : script_view_block_version);
         sim::detail::append_u64(bytes, flagged);
         for (const auto& unit : units) if (unit.script_view) {
             sim::detail::append_u64(bytes, unit.state.entity_id);
             sim::detail::append_u32(bytes, (unit.script_view->hidden ? 1U : 0U) | (unit.script_view->unselectable ? 2U : 0U));
+            if (references) sim::detail::append_u64(bytes, unit.script_view->identity);
         }
 }
 

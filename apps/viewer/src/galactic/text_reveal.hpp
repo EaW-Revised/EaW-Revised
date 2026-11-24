@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/core/from_chars.hpp"
+
 #include "eawr/core/text.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"
@@ -40,7 +42,7 @@ namespace eawr::viewer::galactic {
     auto text = core::trim_view(found->raw_text, core::xml_whitespace);
     if (!text.empty() && text.front() == '+') text.remove_prefix(1);
     float rate{};
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), rate);
+    const auto [end, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), rate);
     if (error != std::errc{} || end != text.data() + text.size() || !std::isfinite(rate)) return std::nullopt;
     data::tag_trace::used(found);
     return rate;

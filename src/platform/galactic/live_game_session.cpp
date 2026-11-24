@@ -29,6 +29,7 @@
 #include "eawr/campaign/live_conflict.hpp"
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/core/perf_diag/sim_feed.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "save_repository.hpp"
 #include "live_save_transport.hpp"
@@ -59,6 +60,21 @@ namespace galactic = sim::galactic;
 using Clock = std::chrono::steady_clock;
 
 namespace {
+// Fine feeds share the existing process-wide GC profiler. One session must not disable it while another is recording.
+std::mutex gc_feed_mutex;
+std::size_t gc_feed_users{};
+bool gc_feed_was_enabled{};
+void acquire_gc_feed() {
+    const std::lock_guard lock(gc_feed_mutex);
+    if (gc_feed_users++ == 0) {
+        gc_feed_was_enabled = gc_profile::enabled.exchange(true, std::memory_order_relaxed);
+    }
+}
+void release_gc_feed() {
+    const std::lock_guard lock(gc_feed_mutex);
+    if (--gc_feed_users == 0 && !gc_feed_was_enabled)
+        gc_profile::enabled.store(false, std::memory_order_relaxed);
+}
 using HeroReturns = std::vector<galactic::HeroReturnView>;
 std::shared_ptr<const HeroReturns> hero_return_publication(HeroReturns rows,
     const std::shared_ptr<const HeroReturns>& previous = {}) {
@@ -933,6 +949,7 @@ public:
         wake_.notify_all();
         published_.notify_all();
         if (thread_.joinable()) thread_.join();
+        if (gc_profile_owned_) { release_gc_feed(); gc_profile_owned_ = false; }
         { const std::lock_guard lock(mutex_); disk_stopping_ = true; }
         disk_wake_.notify_all();
         if (disk_thread_.joinable()) disk_thread_.join();
@@ -1203,6 +1220,66 @@ public:
         }
     }
 
+    // #8058: write-only diagnostics of one completed parent step, to the feed's rings. Called under the publication lock
+    // but wait-free: nothing here allocates once the ids are interned, and nothing reads simulation state.
+    void publish_diag(const campaign::GameTick& tick, const double total_ms, const double source_ms, const double step_ms) {
+        namespace pd = core::perf_diag;
+        diag_tick_ = tick.completed_tick;
+        if (!diag_ids_.ready) {
+            diag_ids_.source = feed_.intern_static("command-source");
+            diag_ids_.step = feed_.intern_static("session-step");
+            for (std::size_t i = 0; i < gc_profile::names.size(); ++i) diag_ids_.gc[i] = feed_.intern_static(gc_profile::names[i]);
+            diag_ids_.ready = true;
+        }
+        std::uint16_t phases = 2;
+        feed_.push_phase(tick.completed_tick, diag_ids_.source, source_ms);
+        feed_.push_phase(tick.completed_tick, diag_ids_.step, step_ms);
+        if (feed_.fine()) {
+            // One instrument, two consumers: the same gc_profile counters EAWR_GC_TICK_TRACE reads, as per-tick deltas.
+            if (!gc_profile_owned_) {
+                acquire_gc_feed();
+                gc_profile_owned_ = true;
+                gc_previous_ = gc_profile::snapshot();
+                gc_previous_valid_ = true;
+            } else {
+                const auto current = gc_profile::snapshot();
+                if (gc_previous_valid_) {
+                    const auto delta = gc_profile::difference(gc_previous_, current);
+                    constexpr auto wall_end = static_cast<std::size_t>(gc_profile::Phase::perception); // the rest is summed CPU
+                    for (std::size_t i = 0; i < wall_end; ++i) {
+                        if (delta[i].calls == 0) continue;
+                        feed_.push_phase(tick.completed_tick, diag_ids_.gc[i], static_cast<double>(delta[i].exclusive_ns) / 1.0e6);
+                        ++phases;
+                    }
+                }
+                gc_previous_ = current;
+                gc_previous_valid_ = true;
+            }
+        } else {
+            if (gc_profile_owned_) { release_gc_feed(); gc_profile_owned_ = false; }
+            gc_previous_valid_ = false;
+        }
+        pd::TickRecord record;
+        record.tick = tick.completed_tick;
+        record.wall_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            Clock::now().time_since_epoch()).count());
+        record.total_ms = static_cast<float>(total_ms);
+        record.pacing_lag_ms = static_cast<float>(pace_lag_ms_);
+        record.cpu_ratio = pd::thread_cpu_ratio(cpu_start_, pd::thread_cpu_now());
+        record.interval_ms = 0.0F;
+        const bool in_battle = tick.mode == campaign::SessionMode::battle;
+        record.flags = static_cast<std::uint16_t>((clock_reset_ ? pd::TickFlags::clock_reset : 0)
+            | (in_battle ? pd::TickFlags::battle : 0));
+        record.phase_count = phases;
+        feed_.push_tick(record);
+        // Derived markers: what the tick already returned.
+        if (tick.galaxy_work.fiscal_cycles > 0) feed_.mark(pd::MarkerKind::galactic_day, tick.completed_tick);
+        if (in_battle != diag_in_battle_) {
+            feed_.mark(in_battle ? pd::MarkerKind::battle_start : pd::MarkerKind::battle_end, tick.completed_tick);
+            diag_in_battle_ = in_battle;
+        }
+    }
+
     void publish_completed_tick(core::Result<campaign::GameTick>& stepped, const Clock::time_point step_started,
         const Clock::time_point source_done, const Clock::time_point step_done,
         const std::vector<LiveGameOrder>& orders, const std::vector<galactic::GameCommand>& commands,
@@ -1217,6 +1294,8 @@ public:
             // #6933: the opt-in per-tick series (EAWR_GC_TICK_TRACE); one bool test when off.
             if (auto& trace = gc_profile::TickTrace::instance(); trace.active())
                 trace.record(cost.tick, cost.total_ms, cost.phases[0].ms, cost.phases[1].ms);
+            if (feed_.enabled()) publish_diag(stepped.value(), cost.total_ms, cost.phases[0].ms, cost.phases[1].ms);
+            else if (gc_profile_owned_) { release_gc_feed(); gc_profile_owned_ = false; }
             costs_.push_back(std::move(cost));
             if (costs_.size() > tick_cost_history) costs_.pop_front();
         }
@@ -1355,6 +1434,12 @@ public:
             const bool changed = after.pause_depth != clock.pause_depth || after.strategic_speed != clock.strategic_speed;
             const auto interval = session_->mode() == campaign::SessionMode::battle ? LiveSession::tick_interval(battle_rate)
                 : tick_interval(after.strategic_speed);
+            if (changed && feed_.enabled()) {
+                if (after.pause_depth != clock.pause_depth)
+                    feed_.mark(after.pause_depth != 0 ? core::perf_diag::MarkerKind::pause : core::perf_diag::MarkerKind::resume, diag_tick_);
+                if (after.strategic_speed != clock.strategic_speed)
+                    feed_.mark(core::perf_diag::MarkerKind::speed, diag_tick_, static_cast<std::int32_t>(after.strategic_speed.trunc_to_integer()));
+            }
             if (changed || interval != schedule.interval()) schedule.rebase(Clock::now(), interval);
             else schedule.stepped();
         }
@@ -1404,7 +1489,20 @@ public:
                 || std::any_of(commands.begin(), commands.end(), due_command);
             paced = !paused && (options_.pacing == Pacing::driven ? target_ > tick : Clock::now() >= schedule.next_due());
             // Too slow for real time: drop the missed wall time rather than spiral.
-            if (paced && options_.pacing == Pacing::real_time) schedule.drop_backlog(Clock::now(), options_.max_catch_up);
+            pace_lag_ms_ = 0.0;
+            clock_reset_ = false;
+            if (paced && options_.pacing == Pacing::real_time) {
+                // The clock is read for the drop test anyway: the lag is a subtraction, so it is always kept.
+                const auto now = Clock::now();
+                pace_lag_ms_ = std::max(0.0, std::chrono::duration<double, std::milli>(now - schedule.next_due()).count());
+                if (schedule.drop_backlog(now, options_.max_catch_up)) {
+                    clock_reset_ = true;
+                    if (feed_.enabled()) {
+                        feed_.note_clock_reset();
+                        feed_.mark(core::perf_diag::MarkerKind::clock_reset, diag_tick_);
+                    }
+                }
+            }
         }
         return true;
     }
@@ -1494,6 +1592,10 @@ public:
             if (options_.step_driver && event.kind == galactic::GalacticEventKind::save_requested) continue;
             const auto token = found->first; auto request = std::move(found->second); save_requests_.erase(found);
             auto& outcome = save_outcomes_.at(token); outcome.completed_tick = tick.completed_tick;
+            if (event.kind != galactic::GalacticEventKind::save_rejected)
+                feed_.mark(request.prebattle ? core::perf_diag::MarkerKind::prebattle_autosave
+                    : request.autosave ? core::perf_diag::MarkerKind::autosave : core::perf_diag::MarkerKind::save,
+                    tick.completed_tick);
             if (event.kind == galactic::GalacticEventKind::save_rejected) {
                 outcome.phase = LiveSavePhase::rejected;
                 outcome.diagnostic = diagnostic("EAWR-SAVE-0103", "Save request refused by session admission.");
@@ -1769,6 +1871,8 @@ public:
                 const std::lock_guard state_lock(state_mutex_);
                 { const std::lock_guard lock(mutex_); if (stopping_) return; }
                 const auto step_started = Clock::now();
+                if (feed_.enabled()) cpu_start_ = core::perf_diag::thread_cpu_now();
+                pace_lag_ms_ = 0.0; clock_reset_ = false;
                 auto driven = options_.step_driver->step(context, orders, static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(step_started.time_since_epoch()).count()));
                 const auto step_done = Clock::now();
@@ -1876,6 +1980,7 @@ public:
             // No polling a callback while paused: explicit input is the wake-up mechanism.
             const bool stepping = paced || (paused && current_input);
             const auto step_started = Clock::now();
+            if (feed_.enabled()) cpu_start_ = core::perf_diag::thread_cpu_now();
             if (stepping && options_.command_source) {
                 auto sourced = options_.command_source(tick);
                 std::move(sourced.begin(), sourced.end(), std::back_inserter(commands));
@@ -2019,6 +2124,18 @@ public:
     bool battle_paused_{true};
     std::uint32_t battle_rate_{30};
     std::deque<LiveTickCost> costs_;
+    // #8058 diagnostics (write-only; the simulation thread is the only producer).
+    core::perf_diag::SimFeed feed_;
+    core::perf_diag::ThreadCpuStamp cpu_start_{};
+    double pace_lag_ms_{};
+    bool clock_reset_{}, diag_in_battle_{}, gc_profile_owned_{}, gc_previous_valid_{};
+    std::uint64_t diag_tick_{};
+    gc_profile::Snapshot gc_previous_{};
+    struct DiagIds final {
+        core::perf_diag::PhaseId source{}, step{};
+        std::array<core::perf_diag::PhaseId, gc_profile::names.size()> gc{};
+        bool ready{};
+    } diag_ids_;
     std::function<std::vector<sim::tactical::PlayerCommand>(std::uint64_t)> battle_source_;
     std::map<galactic::SeatId, TacticalFeed::ExecutionObserver> battle_execution_observers_; // observation only
     struct PauseRequest { bool paused{}; std::uint64_t since{}; };
@@ -2711,6 +2828,7 @@ bool LiveGameSession::story_listens_for_click(const std::string_view component) 
 }
 std::uint64_t LiveGameSession::completed_tick() const { return frame().session_tick; }
 
+core::perf_diag::SimFeed& LiveGameSession::perf_feed() noexcept { return impl_->feed_; }
 std::vector<LiveTickCost> LiveGameSession::tick_costs_after(const std::uint64_t after) const {
     const std::lock_guard lock(impl_->mutex_);
     std::vector<LiveTickCost> costs;

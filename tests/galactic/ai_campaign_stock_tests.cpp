@@ -1,6 +1,12 @@
 // R5 runtime preparation contracts. --release is an honest provider/progression
 // gate; --installed proves stock preparation and explicit unavailable refusal.
 #include "ai_campaign_stock_private.hpp"
+#if __has_include("eawr/core/perf_diag/sim_feed.hpp")
+#include "eawr/core/perf_diag/sim_feed.hpp"
+#define EAWR_BENCH_HAS_FEED 1
+#else
+#define EAWR_BENCH_HAS_FEED 0
+#endif
 #include "galactic_support.hpp"
 #include "raid_fixture.hpp"
 #include "eawr/core/gc_profile.hpp"
@@ -1435,6 +1441,15 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
         Live::Options options; options.workers = workers; options.pacing = Live::Pacing::driven;
         options.saves.directory = (directory / ("saves-" + mode + "-w" + worker_text)).string();
         auto live = must(Live::start(fixture.prepare(mode == "on"), options));
+        const auto feed_mode = environment_or("EAWR_TICK_PROFILE_FEED", "off");
+#if EAWR_BENCH_HAS_FEED
+        if (feed_mode != "off") live->perf_feed().set_enabled(true);
+        if (feed_mode == "fine") live->perf_feed().set_fine(true);
+#else
+        if (feed_mode != "off") throw std::runtime_error("feed unavailable on this revision");
+#endif
+        if (feed_mode != "off" && feed_mode != "coarse" && feed_mode != "fine")
+            throw std::runtime_error("invalid EAWR_TICK_PROFILE_FEED");
         // The paused galaxy never steps on its own (#5518): an AI invasion of the human seat parks the session on a
         // ready conflict choice that a presentation would answer. Answer it once per conflict by resolving, as a
         // player pressing Resolve, and report any other wait by name instead of timing out on the tick.
@@ -1479,6 +1494,7 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
         rows.reserve(ticks);
         const bool was_enabled = gp::enabled.exchange(true, std::memory_order_relaxed);
         double cpu_begin_ms = process_cpu_ms(), cpu_end_ms = cpu_begin_ms;
+        const auto run_begin = std::chrono::steady_clock::now();
         for (std::uint64_t index = 0; index < ticks; ++index) {
             if (index == stats_from) cpu_begin_ms = process_cpu_ms();
             const auto tick = live->completed_tick() + 1;
@@ -1493,6 +1509,7 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
             if (state_digest) row.snapshot_hash = live->frame().latest->sha256();
             rows.push_back(row);
         }
+        const double run_wall_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - run_begin).count();
         cpu_end_ms = process_cpu_ms();
         gp::enabled.store(was_enabled, std::memory_order_relaxed);
         const auto label = mode + "-w" + worker_text;
@@ -1566,6 +1583,7 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::stri
         std::cout << "TICK-PROFILE " << label << " ticks=" << rows.size() << " hash_fnv=" << digest
             << " hashes=" << hashes_all.size() << " step_ms avg/p50/p95/p99/max=" << step_stats[0] << '/' << step_stats[1]
             << '/' << step_stats[2] << '/' << step_stats[3] << '/' << step_stats[4]
+            << " total_wall_ms=" << run_wall_ms << " feed=" << feed_mode
             << " wall_ms avg/p50/p95/p99/max=" << wall_stats[0] << '/' << wall_stats[1] << '/' << wall_stats[2] << '/' << wall_stats[3]
             << '/' << wall_stats[4] << std::endl;
         for (std::size_t i = 0; i < phase_count; ++i) {

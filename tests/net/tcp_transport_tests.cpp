@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <initializer_list>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -774,10 +775,183 @@ void staging_freeze_departure_and_bootstrap() {
         || (old.client->diagnostic() && old.client->diagnostic()->code == "EAWR-NET-1306"), "Incompatible lobby bootstrap receives a typed refusal");
 }
 
+// A staged room keeps native slot numbers: a vacant seat is a hole in the frozen mask, never compacted away.
+TcpRejoinAuth staged_repair_auth(PeerIndex self, std::uint32_t slots) {
+    TcpRejoinAuth auth; auth.match_identity.fill(42); auth.epoch = 1;
+    auth.seat_tokens.resize(slots);
+    for (PeerIndex remote = 0; remote < slots; ++remote) if (remote != self)
+        auth.seat_tokens[remote].fill(static_cast<std::uint8_t>(1U + std::min(self, remote) * slots + std::max(self, remote)));
+    return auth;
+}
+struct StagedRoom {
+    std::vector<std::unique_ptr<TcpTransport>> peers; // index = native slot; null = vacant
+    StagedRoom(std::uint32_t capacity, std::initializer_list<PeerIndex> guests) {
+        auto config = options(); config.peers = capacity; config.staging_capacity = true;
+        auto hosted = TcpTransport::host("127.0.0.1", 0, config);
+        require(bool(hosted), "Create staged room host");
+        peers.resize(capacity); peers[0] = std::move(hosted).value();
+        for (const auto seat : guests) {
+            auto guest = options(); guest.peers = capacity; guest.staging_capacity = true; guest.seat = seat;
+            auto joined = TcpTransport::connect("127.0.0.1", peers[0]->port(), guest);
+            require(bool(joined), "Create staged room guest"); peers[seat] = std::move(joined).value();
+        }
+    }
+    void pump() { for (auto& peer : peers) if (peer) (void)peer->poll(); }
+    std::uint32_t present() const { std::uint32_t mask{}; for (PeerIndex i = 0; i < peers.size(); ++i) if (peers[i]) mask |= 1U << i; return mask; }
+    void attach() {
+        until([&] {
+            pump();
+            for (PeerIndex i = 1; i < peers.size(); ++i)
+                if (peers[i] && (peers[0]->link(i) != LinkState::open || peers[i]->link(0) != LinkState::open)) return false;
+            return true;
+        });
+    }
+    // Start with the humans present: freeze exactly the attached slots and wait for the native mesh to open.
+    void start() {
+        auto frozen = peers[0]->lock_staging_roster(present());
+        require(bool(frozen), "Freeze the present roster");
+        until([&] { pump(); return std::all_of(peers.begin(), peers.end(), [](const auto& peer) { return !peer || peer->staging_mesh_ready(); }); });
+        require(peers[0]->lock_staging_roster(present()).value(), "Native mesh confirms the frozen roster");
+    }
+    void send_all_pairs(std::uint8_t tag) {
+        std::size_t expected{};
+        for (PeerIndex from = 0; from < peers.size(); ++from) if (peers[from])
+            for (PeerIndex to = 0; to < peers.size(); ++to) if (peers[to] && to != from) {
+                require(bool(peers[from]->send(to, Bytes{tag, static_cast<std::uint8_t>(from), static_cast<std::uint8_t>(to)})), "Queue pair frame");
+                ++expected;
+            }
+        std::size_t received{};
+        until([&] {
+            for (PeerIndex to = 0; to < peers.size(); ++to) if (peers[to]) {
+                while (auto frame = peers[to]->poll()) {
+                    require(frame->frame == Bytes{tag, static_cast<std::uint8_t>(frame->from), static_cast<std::uint8_t>(to)},
+                        "Pair frame keeps its sparse native identity");
+                    ++received;
+                }
+            }
+            return received >= expected;
+        });
+        require(received == expected, "Every present pair delivers exactly once");
+    }
+    // Close each listed edge from its first end, then arm confidential repair on every present peer and wait for the mesh.
+    void drop_and_repair(std::initializer_list<std::pair<PeerIndex, PeerIndex>> edges) {
+        for (const auto& [a, b] : edges) require(bool(peers[a]->close_peer(b)), "Close an established edge");
+        until([&] {
+            pump();
+            for (const auto& [a, b] : edges) if (peers[a]->link(b) == LinkState::open || peers[b]->link(a) == LinkState::open) return false;
+            return true;
+        });
+        for (PeerIndex i = 0; i < peers.size(); ++i) if (peers[i]) {
+            const auto armed = peers[i]->repair_closed_links(staged_repair_auth(i, static_cast<std::uint32_t>(peers.size())));
+            require(bool(armed), "Repair skips vacant slots instead of dialling an empty endpoint");
+        }
+        until([&] {
+            pump();
+            for (PeerIndex i = 0; i < peers.size(); ++i) if (peers[i])
+                for (PeerIndex j = 0; j < peers.size(); ++j) if (peers[j] && j != i && peers[i]->link(j) != LinkState::open) return false;
+            return true;
+        });
+    }
+};
+
+void staged_mesh_repair_with_gap() {
+    // Capacity 4, slot 2 vacant (a faction row nobody claimed): host, guest 1, guest 3.
+    StagedRoom room(4, {1, 3}); room.attach();
+    require(room.peers[0]->roster_mask() == 0U && room.peers[1]->roster_mask() == 0U, "No roster mask before the freeze");
+    room.start();
+    for (const auto& peer : room.peers) if (peer) require(peer->roster_mask() == 11U, "Every present peer reports the same frozen mask with its gap");
+    room.send_all_pairs(1);
+    // A host edge and the guest-to-guest edge drop. Guest 3 sits above the gap: the old repair dialled slot 2's empty endpoint
+    // and refused the whole repair.
+    room.drop_and_repair({{0, 1}, {1, 3}});
+    room.send_all_pairs(2);
+    require(room.peers[0]->link(2) == LinkState::closed && room.peers[3]->link(2) == LinkState::closed, "The vacant slot stays closed after repair");
+    require(!room.peers[0]->diagnostic() && !room.peers[1]->diagnostic() && !room.peers[3]->diagnostic(), "Repair raises no failure");
+    // A second loss after the first repair completed.
+    room.drop_and_repair({{0, 3}});
+    room.send_all_pairs(3);
+    require(room.peers[0]->listening(), "A staging host keeps its refusal listener through repair");
+    auto late_config = options(); late_config.staging_capacity = true;
+    auto late_result = TcpTransport::connect("127.0.0.1", room.peers[0]->port(), late_config);
+    require(bool(late_result), "Dial the host after repair"); auto late = std::move(late_result).value();
+    until([&] { room.pump(); (void)late->poll(); return late->diagnostic().has_value(); });
+    require(late->diagnostic()->code == "EAWR-NET-1305" && !room.peers[0]->diagnostic(), "A late join after repair still gets the started-room refusal");
+}
+
+void staged_two_human_room_repair() {
+    // A two-human campaign room (capacity 2, or 3 with one vacant row) uses the mesh path, not the legacy two-seat edge.
+    for (const auto capacity : {2U, 3U}) {
+        StagedRoom room(capacity, {1}); room.attach();
+        require(room.peers[1]->peer_count() == capacity, "The guest learns the host's staged capacity");
+        room.start();
+        require(room.peers[0]->roster_mask() == 3U && room.peers[1]->roster_mask() == 3U, "Two present slots are frozen");
+        room.send_all_pairs(1);
+        room.drop_and_repair({{0, 1}});
+        room.send_all_pairs(2);
+        // The guest side loses the edge and rejoins from scratch (restart_links), the host repairs.
+        require(bool(room.peers[1]->close_peer(0)), "The guest side closes its edge");
+        until([&] { room.pump(); return room.peers[0]->link(1) != LinkState::open && room.peers[1]->link(0) != LinkState::open; });
+        require(bool(room.peers[1]->restart_links(staged_repair_auth(1, capacity))) && bool(room.peers[0]->repair_closed_links(staged_repair_auth(0, capacity))),
+            "restart_links rejoins on the staged mesh");
+        until([&] { room.pump(); return room.peers[0]->link(1) == LinkState::open && room.peers[1]->link(0) == LinkState::open; });
+        room.send_all_pairs(3);
+        require(!room.peers[0]->diagnostic() && !room.peers[1]->diagnostic(), "Reconnect leaves both ends healthy");
+    }
+}
+
+void staged_start_join_gate_and_departure_before_start() {
+    StagedRoom room(3, {1, 2}); room.attach();
+    // Guest 1 leaves before Start; the lobby releases its identity.
+    room.peers[1]->cancel();
+    until([&] { room.pump(); return room.peers[0]->link(1) == LinkState::closed; });
+    require(!room.peers[0]->diagnostic(), "A departure before Start does not fail the host");
+    require(bool(room.peers[0]->close_peer(1)), "Lobby releases the departed native identity");
+    room.peers[1].reset(); (void)room.peers[0]->poll();
+    // Start begins: new attachments are refused with a retryable named code and cannot race the freeze.
+    room.peers[0]->hold_staging_joins(true);
+    auto guest = options(); guest.staging_capacity = true;
+    auto held_result = TcpTransport::connect("127.0.0.1", room.peers[0]->port(), guest);
+    require(bool(held_result), "Dial during a Start in progress"); auto held = std::move(held_result).value();
+    until([&] { room.pump(); (void)held->poll(); return held->diagnostic().has_value(); });
+    require(held->diagnostic()->code == "EAWR-NET-1307" && !room.peers[0]->diagnostic(), "A join during Start gets the retryable refusal and the room is unharmed");
+    require(room.peers[0]->link(1) == LinkState::closed, "The refused newcomer did not take the vacant slot");
+    auto raced = room.peers[0]->lock_staging_roster(7U);
+    require(!raced && raced.error().code == "EAWR-NET-1774", "A mask naming an absent slot is refused without freezing");
+    require(room.peers[0]->roster_mask() == 0U, "A refused freeze leaves no mask");
+    // The host cancels Start: the hold lifts and the room takes the player again at the lowest free slot.
+    room.peers[0]->hold_staging_joins(false);
+    auto again_result = TcpTransport::connect("127.0.0.1", room.peers[0]->port(), guest);
+    require(bool(again_result), "Join again after the cancelled Start"); room.peers[1] = std::move(again_result).value();
+    until([&] { room.pump(); return room.peers[0]->link(1) == LinkState::open && room.peers[1]->link(0) == LinkState::open; });
+    require(room.peers[1]->self() == 1, "The newcomer takes the released slot");
+    room.start();
+    require(room.peers[0]->roster_mask() == 7U, "The re-formed room freezes all three");
+    room.peers[0]->hold_staging_joins(true);
+    auto late_result = TcpTransport::connect("127.0.0.1", room.peers[0]->port(), guest);
+    require(bool(late_result), "Dial after the freeze"); auto late = std::move(late_result).value();
+    until([&] { room.pump(); (void)late->poll(); return late->diagnostic().has_value(); });
+    require(late->diagnostic()->code == "EAWR-NET-1305", "The started-room refusal outranks the Start gate");
+}
+
+void staged_gap_freeze_after_departure_before_start() {
+    // Capacity 3: guests 1 and 2 attach, guest 1 leaves, Start freezes {0, 2}: the gap is slot 1.
+    StagedRoom room(3, {1, 2}); room.attach();
+    room.peers[1]->cancel();
+    until([&] { room.pump(); return room.peers[0]->link(1) == LinkState::closed; });
+    require(bool(room.peers[0]->close_peer(1)), "Lobby releases the departed native identity");
+    room.peers[1].reset(); (void)room.peers[0]->poll();
+    room.start();
+    require(room.peers[0]->roster_mask() == 5U && room.peers[2]->roster_mask() == 5U, "The re-frozen roster has the departed slot as its gap");
+    room.send_all_pairs(1);
+    room.drop_and_repair({{0, 2}});
+    room.send_all_pairs(2);
+}
+
 }
 int main() {
     try {
         staging_capacity_roster(); staging_refill_and_join_race(); staging_freeze_departure_and_bootstrap();
+        staged_mesh_repair_with_gap(); staged_two_human_room_repair(); staged_start_join_gate_and_departure_before_start(); staged_gap_freeze_after_departure_before_start();
         authenticated_repair(); close_unproved_repair(); repair_retry();
         join_endpoints(); resolved_loopback(); resolution_errors(); text_contracts(); open_probe_refusals(); stale_probe_echoes(); frames(); roundtrip(); link_measurement(); probe_under_backpressure(); crossing_probe_close(); mismatch(false); mismatch(true); lifecycle(); backpressure(); receive_capacity();
         unread_close(); host_lifecycle(); close_failed_join(); fixed_port_rehost(); slow_frame(); invalid_options();

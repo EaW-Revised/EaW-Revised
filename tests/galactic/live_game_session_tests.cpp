@@ -3,6 +3,7 @@
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/core/gc_tick_trace.hpp"
+#include "eawr/core/perf_diag/sim_feed.hpp"
 #include "eawr/platform/live_game_session.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
 #include "eawr/platform/campaign_battle_view.hpp"
@@ -29,6 +30,33 @@ using namespace std::chrono_literals;
 galactic::GalacticSetup setup() {
     return galactic::synthetic_galaxy({.seed = 91, .planets = 16, .players = 3,
         .fleets_per_player = 2, .members_per_fleet = 2, .debug_commands = true, .coop_seat = true});
+}
+void fine_feed_releases_profiling_on_stop() {
+    namespace gp = eawr::gc_profile;
+    if (gp::enabled.load(std::memory_order_relaxed)) return; // another explicit profiler owns the switch
+    auto started = LiveGameSession::start(setup(), {.pacing = LiveGameSession::Pacing::driven, .entries = {}});
+    expect(static_cast<bool>(started), "fine feed session starts");
+    if (!started) return;
+    auto& live = *started.value();
+    live.perf_feed().set_enabled(true);
+    live.perf_feed().set_fine(true);
+    live.advance_to(2);
+    expect(live.wait_for(2, 5s), "fine feed session advances");
+    expect(gp::enabled.load(std::memory_order_relaxed), "fine feed enables galactic profiling");
+    auto second = LiveGameSession::start(setup(), {.pacing = LiveGameSession::Pacing::driven, .entries = {}});
+    expect(static_cast<bool>(second), "second fine feed session starts");
+    if (second) {
+        second.value()->perf_feed().set_enabled(true);
+        second.value()->perf_feed().set_fine(true);
+        second.value()->advance_to(2);
+        expect(second.value()->wait_for(2, 5s), "second fine feed session advances");
+    }
+    live.stop();
+    if (second) {
+        expect(gp::enabled.load(std::memory_order_relaxed), "another fine feed keeps profiling enabled");
+        second.value()->stop();
+    }
+    expect(!gp::enabled.load(std::memory_order_relaxed), "stopping the last fine feed restores profiling off");
 }
 void retained_campaign_root() {
     {
@@ -340,6 +368,33 @@ std::uint64_t scheduled_ticks(const Fixed speed, const std::chrono::nanoseconds 
         ++ticks;
     }
     return ticks;
+}
+
+// The diagnostics feed is an observer: galactic tick hashes must match with sampling off, coarse, and fine.
+void perf_feed_keeps_hashes() {
+    const auto initial = setup();
+    const auto input = script(initial, 50);
+    std::vector<std::string> baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        for (const unsigned mode : {0U, 1U, 2U}) {
+            auto started = LiveGameSession::start(initial,
+                {.workers = workers, .pacing = LiveGameSession::Pacing::driven, .entries = {}});
+            expect(static_cast<bool>(started), "galactic feed session starts");
+            if (!started) continue;
+            auto& live = *started.value();
+            if (mode != 0) live.perf_feed().set_enabled(true);
+            if (mode == 2) live.perf_feed().set_fine(true);
+            for (auto at = input.rbegin(); at != input.rend(); ++at) live.submit(*at);
+            live.advance_to(50);
+            expect(live.wait_for(50, 10s), "galactic feed session reaches its target");
+            live.stop();
+            const auto hashes = live.tick_hashes();
+            if (baseline.empty()) baseline = hashes;
+            expect(hashes.size() == 50 && hashes == baseline,
+                "galactic feed sampling and worker count do not change tick hashes");
+            expect(!live.failure() && live.rejected_orders().empty(), "galactic feed inputs remain valid");
+        }
+    }
 }
 
 // The opt-in per-tick trace (EAWR_GC_TICK_TRACE) reads clocks and counters only: the same input gives the same tick
@@ -1767,6 +1822,7 @@ void invasion_accept_command() {
 }
 
 int case_galactic_live_game_session_tests() {
+    fine_feed_releases_profiling_on_stop();
     runtime_note_publication();
     retained_campaign_root();
     intervals();
@@ -1783,6 +1839,7 @@ int case_galactic_live_game_session_tests() {
     summary_startup_reconciliation();
     pending_choice_publication();
     replay_parity();
+    perf_feed_keeps_hashes();
     tick_trace_keeps_hashes();
     tick_trace_stop_path();
     pause_and_sequences(LiveGameSession::Pacing::driven);

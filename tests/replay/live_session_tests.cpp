@@ -1850,6 +1850,70 @@ void test_admission_driver_holds_and_publishes_once() {
 
 } // namespace
 
+// #8058 P2: the runtime diagnostics feed. Switching it (coarse, fine) never changes a tick hash on 1/2/4/8 workers;
+// off allocates no ring and records nothing; coarse records one tick record per tick with the coarse phases and no
+// per-barrier rows; fine adds the barrier and serial rows as ids; the legacy cost rows stay exactly the coarse ones.
+void test_perf_feed_runtime_switch(const std::filesystem::path& fixtures) {
+    namespace pd = eawr::core::perf_diag;
+    const auto parsed = tactical::parse_replay(read_bytes(fixtures / "tactical-motion.eawr-replay"), "perf-feed");
+    expect(static_cast<bool>(parsed), "perf feed fixture parses");
+    if (!parsed) return;
+    const auto golden = read_hashes(fixtures / "tactical-motion.hashes.csv");
+    constexpr std::uint64_t ticks = 12;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        for (const unsigned mode : {0U, 1U, 2U}) { // off, coarse, fine
+            const std::string label = "perf feed workers " + std::to_string(workers) + " mode " + std::to_string(mode) + ": ";
+            LiveSession::Options options;
+            options.workers = workers;
+            options.pacing = LiveSession::Pacing::driven;
+            auto live = LiveSession::start(parsed.value().setup, {}, {}, motion_table(), {}, options);
+            expect(static_cast<bool>(live), label + "session starts");
+            if (!live) continue;
+            auto& feed = live.value()->perf_feed();
+            if (mode >= 1) feed.set_enabled(true);
+            if (mode == 2) feed.set_fine(true);
+            for (const auto& command : parsed.value().commands) live.value()->submit(order_of(command, true));
+            live.value()->advance_to(ticks);
+            expect(live.value()->wait_for(ticks, std::chrono::seconds(10)), label + "ticks finish");
+            live.value()->stop();
+            expect(golden.size() >= ticks && live.value()->tick_hashes()
+                == std::vector<std::string>(golden.begin(), golden.begin() + static_cast<std::ptrdiff_t>(ticks)),
+                label + "the feed never changes a tick hash");
+            if (mode == 0) {
+                expect(!feed.allocated() && feed.ticks_pushed() == 0 && feed.phases_pushed() == 0
+                    && feed.markers_pushed() == 0, label + "off holds no ring and records nothing");
+                continue;
+            }
+            pd::TickRecord record;
+            std::uint64_t seen = 0, previous = 0;
+            while (feed.pop_tick(record)) {
+                expect(record.tick > previous && record.total_ms >= 0.0F && record.pacing_lag_ms >= 0.0F,
+                    label + "tick records are ordered and nonnegative");
+                previous = record.tick;
+                ++seen;
+            }
+            expect(seen == ticks && feed.dropped() == 0, label + "one tick record per tick");
+            pd::PhaseRecord phase;
+            bool step = false, fog = false, worker = false, remainder = false;
+            while (feed.pop_phase(phase)) {
+                const auto name = feed.phase_name(phase.id);
+                expect(!name.empty() && phase.ms >= 0.0F, label + "phase records carry an interned name");
+                step = step || name == "step";
+                fog = fog || name == "fog";
+                worker = worker || name.starts_with("worker.");
+                remainder = remainder || name == "serial-remainder";
+            }
+            expect(step && fog, label + "coarse phases are always present");
+            expect(worker == (mode == 2) && remainder == (mode == 2), label + "barrier rows need fine sampling");
+            for (const auto& cost : live.value()->tick_costs_after(0)) {
+                for (const auto& row : cost.phases)
+                    expect(!row.name.starts_with("worker.") && !row.name.starts_with("partition-"),
+                        label + "the legacy cost rows stay the start-time trace's");
+            }
+        }
+    }
+}
+
 int main(const int argc, const char* const argv[]) {
     {
         namespace profile = eawr::core::tick_profile;
@@ -1904,6 +1968,7 @@ int main(const int argc, const char* const argv[]) {
     test_content_bundle_matches_arguments();
     test_driven_matches_headless(argv[1]);
     test_phase_timings_preserve_hashes(argv[1]);
+    test_perf_feed_runtime_switch(argv[1]);
     test_event_log_outlives_the_history();
     test_event_log_bounds_a_high_event_rate();
     test_event_log_keeps_pad_audio_events();

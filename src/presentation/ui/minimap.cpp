@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/presentation/renderer.hpp"
@@ -46,7 +47,7 @@ constexpr std::string_view factions_path = "data/xml/factions.xml";
     text = trim(text);
     if (!text.empty() && (text.back() == 'f' || text.back() == 'F')) text.remove_suffix(1);
     double value{};
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    const auto [end, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
     if (error != std::errc{} || end != text.data() + text.size() || !std::isfinite(value)) return std::nullopt;
     return value;
 }

@@ -302,8 +302,10 @@ void EawrLanLobby::show_galactic_options_values() {
     // Only the difficulties the campaign's AI types author, under the stock AI captions like single player's levels; a
     // campaign that states none shows the room's current one.
     state.gc_difficulty->clear();
+    const sim::galactic::MpLobbyCampaign* offered_campaign = campaign != campaigns.end() ? &*campaign : nullptr;
     const auto add_choice = [&](const std::string& entry) {
-        state.gc_difficulty->add_item(resolved(resources_->text, ai_seat_caption(entry)));
+        // The caption is the level the campaign's entry stands for, so a mod's own entry names still read Easy, Normal or Hard.
+        state.gc_difficulty->add_item(ai_caption_text(resources_->text, ai_seat_caption(offered_campaign, entry)));
         state.gc_difficulty->set_item_metadata(state.gc_difficulty->get_item_count() - 1, text(entry));
         return state.gc_difficulty->get_item_count() - 1;
     };
@@ -352,9 +354,8 @@ void EawrLanLobby::reset_galactic_options() {
     const auto campaign = std::find_if(campaigns.begin(), campaigns.end(), [&](const auto& value) { return value.name == edit.campaign; });
     edit.difficulty = campaign != campaigns.end() ? sim::galactic::lobby_default_difficulty(*campaign, "Normal_Default") : "Normal_Default";
     edit.auto_resolve = net::galactic_lobby_default_auto_resolve;
-    // As when the room opened: the campaign's own constant clamped to the host range, else the retail 15.
-    edit.vote_timeout = campaign != campaigns.end() && campaign->vote_timeout_seconds
-        ? net::galactic_lobby_clamp_vote_timeout(*campaign->vote_timeout_seconds) : net::galactic_lobby_default_vote_timeout;
+    // As when the room opened: the project default (30 s, owner decision D11), whatever the data's constant says.
+    edit.vote_timeout = net::galactic_lobby_default_vote_timeout;
     show_galactic_options_values();
 }
 

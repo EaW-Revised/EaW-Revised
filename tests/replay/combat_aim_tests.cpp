@@ -1058,12 +1058,12 @@ void test_deploy_pose_checkpoint() {
     expect(session.canonical_state_bytes() == restored.canonical_state_bytes(), "WDP-02: identical canonical bytes after the restore");
     // The refusals: a version past the last domain, and the deploy-clip domain without a unit holding a clip.
     auto beyond = saved.value();
-    beyond[0] = 53;
+    beyond[0] = 54;
     auto fresh = make();
-    expect(!fresh.load_checkpoint_state(beyond), "WDP-02: a domain above 52 is refused");
+    expect(!fresh.load_checkpoint_state(beyond), "WDP-02: a domain above 53 is refused");
     auto idle = make();
     const auto idle_saved = idle.save_checkpoint_state();
-    expect(static_cast<bool>(idle_saved) && idle_saved.value()[0] < 45, "WDP-02: a battle without a clip state keeps the earlier domain");
+    expect(static_cast<bool>(idle_saved) && idle_saved.value()[0] < 46, "WDP-02: a battle without a clip state keeps the earlier domain");
     if (idle_saved) {
         auto forged = idle_saved.value();
         forged[0] = static_cast<std::uint8_t>(forged[0] + 8);

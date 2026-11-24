@@ -909,8 +909,10 @@ sim::SeatId GalacticLanMatch::local_seat() const { return state_->local_seat(); 
 void GalacticLanMatch::configure_recovery_restore(net::GalacticRecoveryWorker::Restore restore) {
     state_->configure_recovery_restore(std::move(restore));
 }
-void GalacticLanMatch::configure_acceptance(std::filesystem::path directory, std::string campaign, bool stock) {
-    if (!directory.empty()) state_->acceptance_ = std::make_unique<GalacticAcceptance>(std::move(directory), std::move(campaign), stock);
+void GalacticLanMatch::configure_acceptance(std::filesystem::path directory, std::string campaign, bool stock, std::string difficulty,
+    std::string difficulty_level) {
+    if (!directory.empty()) state_->acceptance_ = std::make_unique<GalacticAcceptance>(std::move(directory), std::move(campaign), stock,
+        std::move(difficulty), std::move(difficulty_level));
 }
 
 } // namespace eawr::presentation::godot_backend

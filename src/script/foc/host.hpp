@@ -290,6 +290,26 @@ inline std::optional<ViewUnit> pending_created_object(const Host& host, const Bi
     return std::nullopt;
 }
 
+// The script's own staged births follow the committed roster in creation order.
+inline std::vector<ViewUnit> pending_created_objects(const Host& host, const BindingContext& context) {
+    std::vector<ViewUnit> result;
+    for (const auto& command : context.staged_commands()) {
+        if (command.verb != verb_create_object || command.arguments.size() != 5) continue;
+        const auto* identity = as_handle(command.arguments[4], handle_game_object);
+        const auto* type = as_handle(command.arguments[1], handle_type);
+        const auto* owner = as_handle(command.arguments[3], handle_player);
+        const auto point = position_of(host, command.arguments[2]);
+        if (!identity || !type || !owner || !point) continue;
+        ViewUnit unit;
+        unit.id = identity->id;
+        unit.type = type->id;
+        unit.owner = static_cast<tactical::PlayerId>(owner->id);
+        unit.position = *point;
+        result.push_back(std::move(unit));
+    }
+    return result;
+}
+
 struct UnitDestination {
     sim::EntityId object{};
     math::Vec3 position{};

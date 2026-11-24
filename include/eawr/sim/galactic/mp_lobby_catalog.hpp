@@ -42,9 +42,6 @@ struct MpLobbyCampaign {
     bool supports_custom_settings{};
     // Campaign limits for the custom starting and maximum tech (WGP-69); absent means the data states none.
     std::optional<std::int64_t> minimum_custom_tech, maximum_custom_tech;
-    // The data's Battle_Pending_Timeout_Seconds, in whole seconds (negative reads as zero): the default a new room offers
-    // for the battle-vote timeout (#6156). Absent when the data states none.
-    std::optional<std::int64_t> vote_timeout_seconds;
     std::vector<MpLobbyFaction> factions; // ascending player ID
     // Co-op on a single-player campaign entry (design B2): the entry's authored single-player rules apply and its
     // only playable faction is the Starting_Active_Player, held by every human seat. False for multiplayer entries.
@@ -68,6 +65,23 @@ struct MpLobbyCampaign {
             return true;
     }
     return !any;
+}
+// The level (0 Easy, 1 Normal, 2 Hard) a room difficulty names in this campaign: the position of the entry it equals (any
+// ASCII case). A name no entry of the campaign carries has no level here; the caller falls back to its stock caption.
+[[nodiscard]] inline std::optional<std::size_t> lobby_difficulty_level(const MpLobbyCampaign& campaign, const std::string_view difficulty) noexcept {
+    const auto fold = [](const char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c | 0x20) : c; };
+    for (std::size_t level = 0; level < campaign.difficulties.size(); ++level) {
+        const auto& entry = campaign.difficulties[level];
+        if (!entry.empty() && entry.size() == difficulty.size()
+            && std::equal(entry.begin(), entry.end(), difficulty.begin(), [&](char a, char b) { return fold(a) == fold(b); }))
+            return level;
+    }
+    return std::nullopt;
+}
+// The entry the host's choice of `level` (0 Easy, 1 Normal, 2 Hard) agrees: the campaign's own entry for it, empty when the
+// campaign's AI types author none (that level is not offered, as the start would refuse a name no type carries).
+[[nodiscard]] inline std::string lobby_difficulty_entry(const MpLobbyCampaign& campaign, const std::size_t level) {
+    return level < campaign.difficulties.size() ? campaign.difficulties[level] : std::string{};
 }
 // The entry a new room starts at: the campaign's Normal entry; when that level has none, the middle one of the entries it
 // has (never silently the easiest); `fallback` when it states none.

@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
 #include "skirmish_prepare.hpp"
@@ -46,7 +47,7 @@ using namespace live_session_detail;
 namespace live_session_detail {
 [[nodiscard]] std::optional<std::uint64_t> parse_u64(const std::string_view text) {
     std::uint64_t value{};
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    const auto [end, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
     if (error != std::errc{} || end != text.data() + text.size() || text.empty()) return std::nullopt;
     return value;
 }
@@ -545,7 +546,7 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         if (!options.melee_size) error = "--eawr-live-melee expects s, m or l";
     } else if (name == "--eawr-live-melee-seed") {
         std::uint64_t seed{};
-        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), seed);
+        const auto parsed = eawr::core::from_chars(text.data(), text.data() + text.size(), seed);
         if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) {
             error = "--eawr-live-melee-seed expects a whole number";
         }
@@ -784,7 +785,7 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         const auto direction = second == std::string::npos ? std::string{} : text.substr(first + 1, second - first - 1);
         double seconds{};
         const auto tail = second == std::string::npos ? std::string{} : text.substr(second + 1);
-        const auto parsed = std::from_chars(tail.data(), tail.data() + tail.size(), seconds);
+        const auto parsed = eawr::core::from_chars(tail.data(), tail.data() + tail.size(), seconds);
         if (!tick || *tick == 0 || (direction != "in" && direction != "out") || tail.empty() || parsed.ec != std::errc{}
             || parsed.ptr != tail.data() + tail.size() || !std::isfinite(seconds) || seconds < 0.0) {
             error = "--eawr-live-letterbox expects <tick>:<in|out>:<seconds> with a tick of 1 or later";

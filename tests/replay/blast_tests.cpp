@@ -593,10 +593,10 @@ void test_random_hardpoint_checkpoint() {
         expect(in_flight, "WAD-27: the checkpoint is taken with a projectile in flight");
         if (!in_flight) continue;
         expect(live.projectiles().front().damages_random_hardpoints == random, "WAD-27: the live projectile carries the profile flag");
-        // The domain is a little-endian uint32 at the start of the state: byte 0 is its low byte (values 37..100), byte 1 is zero.
+        // The domain is a little-endian uint32 at the start of the state: byte 0 is its low byte (values 38..101), byte 1 is zero.
         const auto saved = live.save_checkpoint_state();
         expect(static_cast<bool>(saved) && saved.value().size() > 4
-            && ((saved.value()[0] - 37U) % 64U >= 32U) == random && saved.value()[1] == 0U,
+            && ((saved.value()[0] - 38U) % 64U >= 32U) == random && saved.value()[1] == 0U,
             "WAD-27: only a live random-hardpoint projectile selects the wider checkpoint domain");
         if (!saved) continue;
         auto restored = battle.make();

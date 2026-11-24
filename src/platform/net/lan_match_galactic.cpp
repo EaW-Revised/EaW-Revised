@@ -71,8 +71,9 @@ void TcpLanMatch::pump_galactic_start() {
         io_->transport.pending_bytes += raw->frame.size();
         io_->transport.pending.push_back(std::move(*raw));
     }
-    for (net::PeerIndex peer = 0; peer < io_->transport.peer_count(); ++peer)
-        if (peer != io_->transport.self() && io_->transport.link(peer) == net::LinkState::closed) {
+    // Only the admitted seats hold links: a room opened for more players than joined has empty transport slots (#8130).
+    for (const auto& seat : lobby_result_->snapshot().seats)
+        if (const auto peer = seat.peer; peer != io_->transport.self() && io_->transport.link(peer) == net::LinkState::closed) {
             set_failure(io_->transport.tcp->diagnostic().value_or(net::lobby_diagnostic(net::LobbyReason::link_closed,
                 "A campaign peer disconnected while sending the launch commitment."))); return;
         }
@@ -93,6 +94,9 @@ std::shared_ptr<GalacticLaunch> TcpLanMatch::take_galactic_launch() {
     core::gc_load::trace.mark("launch_handover");
     auto launch = std::make_shared<GalacticLaunch>();
     launch->options = galactic_start_->options;
+    if (const auto* found = campaign::find_mp_lobby_campaign(galactic_->campaigns(), launch->options.campaign))
+        if (const auto level = sim::galactic::lobby_difficulty_level(*found, launch->options.difficulty))
+            launch->difficulty_level = *level == 0 ? "easy" : *level == 2 ? "hard" : "normal";
     launch->roster = lobby_result_->snapshot();
     launch->plan = agreement->plan;
     launch->owner = std::make_shared<platform::PreparedLiveAgreement>(); launch->owner->session = agreement->session;

@@ -447,6 +447,9 @@ public:
     struct CompanyBirth {
         EntityId root{};
         std::vector<EntityId> created;
+        // The objects the request itself made, in creation order: every member first, then each team container.
+        std::vector<EntityId> members;
+        std::vector<EntityId> teams;
     };
     [[nodiscard]] core::Result<CompanyBirth> spawn_company(const CompanySpawn& request,
         UnitStage& units, EconomyStage& stage, std::uint64_t tick);

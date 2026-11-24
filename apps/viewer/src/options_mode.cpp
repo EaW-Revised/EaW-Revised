@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "viewer_profile_arguments.hpp"
 #include "eawr/core/json_text.hpp"
 #include "options_mode.hpp"
@@ -291,7 +292,7 @@ bool OptionsMode::State::run_action(const std::string& action) {
         if (equals == std::string::npos) return false;
         double value{};
         const std::string number = argument.substr(equals + 1);
-        const auto [end, error] = std::from_chars(number.data(), number.data() + number.size(), value);
+        const auto [end, error] = eawr::core::from_chars(number.data(), number.data() + number.size(), value);
         if (error != std::errc{} || end != number.data() + number.size()) return false;
         return screen->set_control(argument.substr(0, equals), value);
     }

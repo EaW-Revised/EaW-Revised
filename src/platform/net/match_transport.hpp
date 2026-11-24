@@ -67,6 +67,10 @@ public:
     bool mesh_complete() const { const std::lock_guard lock(net::checkpoint_io_mutex()); return !mesh() || gns_->mesh_complete(); }
     bool staging_capacity() const { const std::lock_guard lock(net::checkpoint_io_mutex()); return tcp_ && tcp_->staging_capacity(); }
     bool staging_mesh_ready() const { const std::lock_guard lock(net::checkpoint_io_mutex()); return !tcp_ || tcp_->staging_mesh_ready(); }
+    // Frozen TCP roster (bit per native slot; 0 before the freeze, and always 0 on a GNS room): callers that walk native slots skip
+    // the vacant ones. hold_staging_joins refuses new TCP attachments while a campaign Start prepares (freeze at setup-ready).
+    std::uint32_t staged_roster() const { const std::lock_guard lock(net::checkpoint_io_mutex()); return tcp_ ? tcp_->roster_mask() : 0U; }
+    void hold_staging_joins(bool hold) { const std::lock_guard lock(net::checkpoint_io_mutex()); if (tcp_) tcp_->hold_staging_joins(hold); }
     bool mesh_complete(std::uint32_t active) const { const std::lock_guard lock(net::checkpoint_io_mutex());
         return staging_capacity() ? tcp_->staging_roster_ready(active) : !mesh() || gns_->mesh_complete(active);
     }

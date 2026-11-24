@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/core/sha256.hpp"
 #include <stdexcept>
@@ -11,6 +12,7 @@
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/world.hpp"
 #include "eawr/core/tick_profile.hpp"
+#include "eawr/core/perf_diag/sim_feed.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -33,12 +35,33 @@ namespace {
 namespace tactical = sim::tactical;
 using Clock = std::chrono::steady_clock;
 
+// Scratch the measured executor reuses from tick to tick, so the feed path allocates nothing after warm-up (names are
+// copied into the feed once, at their first barrier; the vectors keep their capacity).
+struct MeasureScratch final {
+    struct Name final { std::string name; core::perf_diag::PhaseId worker{}, maximum{}, sum{}; };
+    struct Barrier final { core::perf_diag::PhaseId worker{}, maximum{}, sum{}; double elapsed{}, max_ms{}, sum_ms{}; };
+    std::vector<Name> names;
+    std::vector<double> partition_ms;
+    std::vector<Barrier> barriers;
+    core::tick_profile::Recording serial;
+    MeasureScratch() {
+        names.reserve(96);
+        partition_ms.reserve(256);
+        barriers.reserve(512);
+        serial.costs.reserve(256);
+    }
+};
+
 // Preserve the executor's dispatch policy and partition callbacks. Only the caller
 // records completed barrier rows; workers write only their fixed callback/job slots.
+// `legacy` keeps the string-labelled rows the perf trace reads (`phases`, `partition_costs`: they allocate); without it
+// a barrier writes one fixed record into the scratch and nothing else.
 class MeasuredExecutor final : public sim::PartitionExecutor {
 public:
-    explicit MeasuredExecutor(const sim::PartitionExecutor& executor, const bool detailed)
-        : executor_(executor), detailed_(detailed), origin_(detailed ? Clock::now() : Clock::time_point{}) {}
+    explicit MeasuredExecutor(const sim::PartitionExecutor& executor, const bool detailed, const bool legacy,
+        core::perf_diag::SimFeed& feed, MeasureScratch& scratch)
+        : executor_(executor), detailed_(detailed), legacy_(legacy), feed_(feed), scratch_(scratch),
+          origin_(detailed ? Clock::now() : Clock::time_point{}) {}
     std::size_t worker_count() const noexcept override { return executor_.worker_count(); }
     core::Result<void> execute(const std::size_t count,
         const std::function<void(std::size_t)>& partition) const override {
@@ -56,12 +79,13 @@ public:
         // Each callback owns its partition slot. These wall samples distinguish
         // a long callback from the surrounding dispatch/join interval; they are
         // separate diagnostic rows, never additional worker barrier cost.
-        std::vector<double> partition_ms(count);
-        const bool sample_jobs = detailed_ || name == "plan-searches" || name == "script-instances";
+        auto& partition_ms = scratch_.partition_ms;
+        partition_ms.assign(count, 0.0);
+        const bool sample_jobs = legacy_ && (detailed_ || name == "plan-searches" || name == "script-instances");
         struct Callback final { Clock::time_point begin{}; std::size_t thread{}; };
-        std::vector<Callback> callbacks(detailed_ ? count : 0);
+        std::vector<Callback> callbacks(detailed_ && legacy_ ? count : 0);
         std::vector<core::tick_profile::Recording> job_recordings(sample_jobs ? count : 0);
-        const auto job_count = core::tick_profile::active
+        const auto job_count = core::tick_profile::active && legacy_
             ? std::exchange(core::tick_profile::active->pending_jobs, std::size_t{}) : 0;
         for (std::size_t index = 0; index < job_recordings.size(); ++index) {
             job_recordings[index].costs.reserve((index + 1) * job_count / count - index * job_count / count);
@@ -72,7 +96,7 @@ public:
             const core::tick_profile::Pause pause;
             const auto sampled = [&](const std::size_t index) {
                 const auto began = Clock::now();
-                if (detailed_) {
+                if (!callbacks.empty()) {
                     callbacks[index].begin = began;
                     callbacks[index].thread = std::hash<std::thread::id>{}(std::this_thread::get_id());
                 }
@@ -89,6 +113,13 @@ public:
         }();
         const double elapsed = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
         if (core::tick_profile::active) core::tick_profile::active->barriers_ms += elapsed;
+        double maximum = 0.0, sum = 0.0;
+        for (const auto sample : partition_ms) { maximum = std::max(maximum, sample); sum += sample; }
+        if (scratch_.barriers.size() < scratch_.barriers.capacity()) {
+            const auto& ids = ids_of(name);
+            scratch_.barriers.push_back({ids.worker, ids.maximum, ids.sum, elapsed, maximum, sum});
+        }
+        if (!legacy_) return result;
         const std::string label = name.empty() ? std::string("unnamed") : std::string(name);
         const auto phase_index = phases.size();
         phases.push_back({"worker." + label, elapsed});
@@ -105,8 +136,6 @@ public:
                     + "." + stamp(callbacks[index].begin), partition_ms[index]});
             }
         }
-        double maximum = 0.0, sum = 0.0;
-        for (const auto sample : partition_ms) { maximum = std::max(maximum, sample); sum += sample; }
         partition_costs.push_back({"partition-max." + label, maximum});
         partition_costs.push_back({"partition-sum." + label, sum});
         for (std::size_t index = 0; index < job_recordings.size(); ++index) {
@@ -136,10 +165,25 @@ public:
     mutable std::vector<LivePhaseCost> phases;
     mutable std::vector<LivePhaseCost> partition_costs;
 private:
+    // First sight of a barrier name copies it (and its three row names) into the feed; later barriers only compare.
+    const MeasureScratch::Name& ids_of(const std::string_view name) const {
+        const std::string_view key = name.empty() ? std::string_view("unnamed") : name;
+        for (const auto& known : scratch_.names) if (known.name == key) return known;
+        MeasureScratch::Name added;
+        added.name = std::string(key);
+        added.worker = feed_.intern("worker." + added.name);
+        added.maximum = feed_.intern("partition-max." + added.name);
+        added.sum = feed_.intern("partition-sum." + added.name);
+        scratch_.names.push_back(std::move(added));
+        return scratch_.names.back();
+    }
     const sim::PartitionExecutor& executor_;
     const std::thread::id owner_{std::this_thread::get_id()};
     mutable bool measuring_{};
     bool detailed_{};
+    bool legacy_{};
+    core::perf_diag::SimFeed& feed_;
+    MeasureScratch& scratch_;
     Clock::time_point origin_{};
 };
 
@@ -790,11 +834,23 @@ private:
                 held = holding();
                 requested = std::exchange(save_request_, {});
             }
+            // Derived markers (write-only): pause, resume and speed changes seen between two ticks.
+            if (feed_.enabled()) {
+                const auto at = world().completed_tick();
+                if (held != marked_held_) feed_.mark(held ? core::perf_diag::MarkerKind::pause : core::perf_diag::MarkerKind::resume, at);
+                if (interval != marked_interval_ && marked_interval_ != Clock::duration{})
+                    feed_.mark(core::perf_diag::MarkerKind::speed, at,
+                        static_cast<std::int32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(interval).count()));
+            }
+            marked_held_ = held;
+            marked_interval_ = interval;
+            interval_ms_ = std::chrono::duration<double, std::milli>(interval).count();
             // A player's save runs here, between two ticks, also while the battle is paused.
             if (requested) save_now(std::move(requested));
             // Orders for a tick that already ran are refused now; the rest wait for their tick.
             submit_due(world().completed_tick(), false);
             pacing_lag_ms_ = dropped_wall_ms_ = 0.0;
+            clock_reset_ = false;
             if (held) {
                 if (options_.step_driver && !step(executor, false)) return;
                 continue;
@@ -810,14 +866,21 @@ private:
                 const auto due_ticks = static_cast<std::uint64_t>(elapsed / interval);
                 const std::uint64_t behind = clock_tick + due_ticks > world().completed_tick()
                     ? clock_tick + due_ticks - world().completed_tick() : 0U;
-                if ((options_.measure_phases || options_.cadence_profile) && behind > 0U) {
+                // One clock read is already taken above: the lag costs a subtraction, so it is always kept.
+                if (behind > 0U) {
                     const auto deadline = clock_start + interval * static_cast<std::int64_t>(
                         world().completed_tick() + 1U - clock_tick);
                     pacing_lag_ms_ = std::max(0.0,
                         std::chrono::duration<double, std::milli>(now - deadline).count());
                 }
                 if (behind > options_.max_catch_up) {
-                    if (options_.measure_phases || options_.cadence_profile) dropped_wall_ms_ = pacing_lag_ms_;
+                    dropped_wall_ms_ = pacing_lag_ms_;
+                    clock_reset_ = true;
+                    if (feed_.enabled()) {
+                        feed_.note_clock_reset();
+                        feed_.mark(core::perf_diag::MarkerKind::clock_reset, world().completed_tick(),
+                            static_cast<std::int32_t>(behind));
+                    }
                     // Too slow for real time: drop the missed time rather than spiral.
                     clock_start = now - interval;
                     clock_tick = world().completed_tick();
@@ -903,9 +966,19 @@ private:
     }
 
     bool step(const ThreadWorkerAdapter& executor, bool advance_allowed = true) {
-        MeasuredExecutor measured(executor, options_.detailed_profile);
-        core::tick_profile::Recording serial;
-        const sim::PartitionExecutor& step_executor = options_.measure_phases
+        // Read once per tick on this thread. `legacy` is the start-time trace (string-labelled rows in costs_); `diag`
+        // is the runtime feed (coarse); `fine` is the executor and scope timing for either of them. Off: one bool test.
+        const bool legacy = options_.measure_phases;
+        const bool diag = feed_.enabled();
+        const bool fine = legacy || (diag && feed_.fine());
+        const auto cpu_begin = diag ? core::perf_diag::thread_cpu_now() : core::perf_diag::ThreadCpuStamp{};
+        MeasuredExecutor measured(executor, options_.detailed_profile, legacy, feed_, scratch_);
+        auto& serial = scratch_.serial;
+        if (fine) {
+            serial.costs.clear(); serial.auxiliary_costs.clear(); serial.barriers_ms = 0.0; serial.pending_jobs = 0;
+            scratch_.barriers.clear();
+        }
+        const sim::PartitionExecutor& step_executor = fine
             ? static_cast<const sim::PartitionExecutor&>(measured) : executor;
         std::vector<core::Diagnostic> script_refusals;
         std::shared_ptr<const LiveFog> fog;
@@ -916,15 +989,15 @@ private:
         bool land_motion_timed = false;
         double session_lock_ms = 0.0;
         bool held_tick = false;
-        const auto lock_started = options_.measure_phases ? Clock::now() : Clock::time_point{};
+        const auto lock_started = fine ? Clock::now() : Clock::time_point{};
         core::Result<tactical::TacticalTick> tick = [&]() -> core::Result<tactical::TacticalTick> {
             std::unique_lock driver_lock(session_mutex_);
             const auto started = Clock::now();
-            if (options_.measure_phases)
+            if (fine)
                 session_lock_ms = std::chrono::duration<double, std::milli>(started - lock_started).count();
             const auto local_step = [&] {
                 const auto run = [&] { return scripted_ ? step_scripted(step_executor, script_refusals) : session_->step(step_executor); };
-                if (!options_.measure_phases) return run();
+                if (!fine) return run();
                 core::tick_profile::Capture capture(serial);
                 // The caller capture admits inline path jobs; partition callbacks install their own slots.
                 std::optional<core::tick_profile::JobCapture> jobs;
@@ -1021,7 +1094,7 @@ private:
             const std::lock_guard lock(mutex_);
             rejected_.insert(rejected_.end(), script_refusals.begin(), script_refusals.end());
         }
-        const auto publish_started = options_.measure_phases ? Clock::now() : Clock::time_point{};
+        const auto publish_started = fine ? Clock::now() : Clock::time_point{};
         {
             const std::lock_guard lock(mutex_);
             if (!tick) {
@@ -1063,7 +1136,7 @@ private:
                     cost.phases.push_back({"cadence.total-ms", cost.total_ms});
                     cost.phases.push_back({"cadence.clock-reset", dropped_wall_ms_ > 0.0 ? 1.0 : 0.0});
                 }
-                if (options_.measure_phases) {
+                if (legacy) {
                     // Pacing lateness/discarded wall time are observations, not
                     // additional work and never inputs to the clock policy.
                     cost.phases.push_back({"pacing-lag", pacing_lag_ms_});
@@ -1094,7 +1167,65 @@ private:
             }
         }
         published_.notify_all();
+        if (diag && tick) publish_diag(tick.value(), fine, publish_started, cpu_begin, step_ms, fog_ms, land_motion_ms, land_motion_timed, session_lock_ms);
         return static_cast<bool>(tick);
+    }
+
+    // Write-only diagnostics of one completed tick, after the lock is released: the tick record, its phases and the
+    // derived markers go to the feed's rings (wait-free, no allocation once the barrier names are interned).
+    void publish_diag(const tactical::TacticalTick& tick, const bool fine, const Clock::time_point publish_started,
+        const core::perf_diag::ThreadCpuStamp& cpu_begin, const double step_ms, const double fog_ms,
+        const double land_motion_ms, const bool land_motion_timed, const double session_lock_ms) {
+        namespace pd = core::perf_diag;
+        const auto completed = tick.completed_tick;
+        if (!diag_ids_.ready) {
+            diag_ids_.step = feed_.intern_static("step");
+            diag_ids_.fog = feed_.intern_static("fog");
+            diag_ids_.ai = feed_.intern_static("ai");
+            diag_ids_.lua = feed_.intern_static("lua");
+            diag_ids_.land_motion = feed_.intern_static("land-motion");
+            diag_ids_.publish_tail = feed_.intern_static("publish-tail");
+            diag_ids_.worker_total = feed_.intern_static("worker-total");
+            diag_ids_.serial_remainder = feed_.intern_static("serial-remainder");
+            diag_ids_.ready = true;
+        }
+        std::uint16_t phases = 0;
+        const auto put = [&](const pd::PhaseId id, const double ms) { feed_.push_phase(completed, id, ms); ++phases; };
+        if (scripted_) {
+            put(diag_ids_.step, std::max(0.0, step_ms - ai_ms_ - lua_ms_));
+            put(diag_ids_.ai, ai_ms_);
+            put(diag_ids_.lua, lua_ms_);
+        } else put(diag_ids_.step, step_ms);
+        put(diag_ids_.fog, fog_ms);
+        if (land_motion_timed) put(diag_ids_.land_motion, land_motion_ms);
+        if (fine) {
+            double worker_total = 0.0;
+            for (const auto& barrier : scratch_.barriers) {
+                worker_total += barrier.elapsed;
+                put(barrier.worker, barrier.elapsed);
+                put(barrier.maximum, barrier.max_ms);
+                put(barrier.sum, barrier.sum_ms);
+            }
+            put(diag_ids_.publish_tail, std::chrono::duration<double, std::milli>(Clock::now() - publish_started).count());
+            put(diag_ids_.worker_total, worker_total);
+            put(diag_ids_.serial_remainder, std::max(0.0, step_ms - worker_total));
+            for (const auto& cost : scratch_.serial.costs) put(feed_.intern(cost.name), cost.ms);
+        }
+        pd::TickRecord record;
+        record.tick = completed;
+        record.wall_us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            Clock::now().time_since_epoch()).count());
+        record.total_ms = static_cast<float>(step_ms + fog_ms + land_motion_ms);
+        record.pacing_lag_ms = static_cast<float>(pacing_lag_ms_);
+        record.session_lock_ms = static_cast<float>(session_lock_ms);
+        record.cpu_ratio = pd::thread_cpu_ratio(cpu_begin, pd::thread_cpu_now());
+        record.interval_ms = static_cast<float>(interval_ms_);
+        record.flags = static_cast<std::uint16_t>((clock_reset_ ? pd::TickFlags::clock_reset : 0)
+            | (land_motion_timed ? pd::TickFlags::land : 0) | (scripted_ ? pd::TickFlags::scripted : 0));
+        record.phase_count = phases;
+        feed_.push_tick(record);
+        if (!battle_started_) { battle_started_ = true; feed_.mark(pd::MarkerKind::battle_start, completed); }
+        if (!battle_ended_ && tick.snapshot->outcome()) { battle_ended_ = true; feed_.mark(pd::MarkerKind::battle_end, completed); }
     }
 
     // Simulation thread only, between two ticks: the battle's save bytes, or why it cannot be saved.
@@ -1112,6 +1243,7 @@ private:
     void save_if_due() {
         if (!options_.save_at || save_done_ || world().completed_tick() != *options_.save_at) return;
         save_done_ = true;
+        feed_.mark(core::perf_diag::MarkerKind::save, world().completed_tick());
         auto bytes = save_bytes();
         if (options_.save_sink) options_.save_sink(*options_.save_at, std::move(bytes));
     }
@@ -1119,6 +1251,7 @@ private:
     // Simulation thread only, between two ticks: a request_save.
     void save_now(SaveSink sink) {
         const auto tick = world().completed_tick();
+        feed_.mark(core::perf_diag::MarkerKind::save, tick);
         sink(tick, save_bytes());
     }
 
@@ -1291,7 +1424,7 @@ private:
             const auto* text = std::get_if<std::string>(&command.arguments[1].data);
             if (!direction || !text) continue;
             double seconds{};
-            const auto parsed = std::from_chars(text->data(), text->data() + text->size(), seconds);
+            const auto parsed = eawr::core::from_chars(text->data(), text->data() + text->size(), seconds);
             if (parsed.ec != std::errc{} || parsed.ptr != text->data() + text->size() || !std::isfinite(seconds) || seconds < 0.0) continue;
             made.push_back({tick, *direction == "in", seconds});
         }
@@ -1372,7 +1505,19 @@ private:
     // #558: the newest ticks' cost, oldest first.
     std::deque<LiveTickCost> costs_;
     double pacing_lag_ms_{}, dropped_wall_ms_{}; // simulation-thread diagnostics only
+    // #8058: diagnostics feed and the simulation thread's scratch for it. Write-only; never read by the simulation.
+    core::perf_diag::SimFeed feed_;
+    MeasureScratch scratch_;
+    struct DiagIds final {
+        core::perf_diag::PhaseId step{}, fog{}, ai{}, lua{}, land_motion{}, publish_tail{}, worker_total{}, serial_remainder{};
+        bool ready{};
+    } diag_ids_;
+    bool clock_reset_{}, marked_held_{}, battle_started_{}, battle_ended_{};
+    Clock::duration marked_interval_{};
+    double interval_ms_{};
     std::thread thread_;
+public:
+    core::perf_diag::SimFeed& perf_feed() noexcept { return feed_; }
 };
 
 std::size_t LiveSession::game_worker_count() noexcept {
@@ -1634,6 +1779,7 @@ std::vector<LiveTickCost> LiveSession::tick_costs_after(const std::uint64_t afte
 std::optional<core::Diagnostic> LiveSession::failure() const { return impl_->failure(); }
 std::vector<core::Diagnostic> LiveSession::rejected_orders() const { return impl_->rejected_orders(); }
 std::size_t LiveSession::worker_count() const noexcept { return impl_->worker_count(); }
+core::perf_diag::SimFeed& LiveSession::perf_feed() noexcept { return impl_->perf_feed(); }
 std::uint64_t LiveSession::next_sequence(const tactical::PlayerId player) const { return impl_->next_sequence(player); }
 void LiveSession::request_save(SaveSink sink) { impl_->request_save(std::move(sink)); }
 diagnostics::MemoryCapacity LiveSession::memory_capacity() const { return impl_->memory_capacity(); }

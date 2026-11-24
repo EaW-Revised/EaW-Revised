@@ -248,7 +248,7 @@ void codec_and_mode() {
     expect(game.map == "Multiplayer", "the campaign is the room's map string");
     const std::string text(game.options.begin(), game.options.end());
     // The agreed bytes, pinned: any change to this text is a new version.
-    expect(text == "gc2 3 4242 2 15 0 0 0 0 1 \"Normal_Default\" 4 1 1 0 \"REBEL\" 1 2 2 2 0 \"EMPIRE\" 1 2 3 3 0 \"UNDERWORLD\" 0 2 4 4 0 \"NEUTRAL\" 0 2",
+    expect(text == "gc2 3 4242 2 30 0 0 0 0 1 \"Normal_Default\" 4 1 1 0 \"REBEL\" 1 2 2 2 0 \"EMPIRE\" 1 2 3 3 0 \"UNDERWORLD\" 0 2 4 4 0 \"NEUTRAL\" 0 2",
         "gc2 options bytes: " + text);
     expect(net::lobby_game_mode(game) == net::LobbyGameMode::galactic, "the tag makes it a Galactic Conquest room");
     expect(require(net::decode_galactic_lobby_game(game)) == options, "options round trip");
@@ -259,21 +259,22 @@ void codec_and_mode() {
     custom.auto_resolve = 3; custom.rows[1].dropout = gc::FactionControl::passive; custom.seed = 0xFFFFFFFFULL;
     custom.vote_timeout = 45;
     expect(require(net::decode_galactic_lobby_game(require(net::encode_galactic_lobby_game(custom)))) == custom, "custom options round trip");
-    {   // #6156: the battle-vote timeout is a host setting. It defaults to the retail 15 s, follows the campaign's own constant
-        // when the data states one (clamped to the host range 5..120), and rides the agreed bytes.
-        expect(options.vote_timeout == net::galactic_lobby_default_vote_timeout && net::galactic_lobby_default_vote_timeout == 15,
-            "a new room offers the retail 15 s");
+    {   // #6156: the battle-vote timeout is a host setting. It defaults to 30 s (owner D11), whatever constant the data authors
+        // (the host range is 5..120), and rides the agreed bytes.
+        expect(options.vote_timeout == net::galactic_lobby_default_vote_timeout && net::galactic_lobby_default_vote_timeout == 30,
+            "a new room offers 30 s (owner decision D11)");
         expect(net::galactic_lobby_clamp_vote_timeout(-3) == 5 && net::galactic_lobby_clamp_vote_timeout(0) == 5
             && net::galactic_lobby_clamp_vote_timeout(4) == 5 && net::galactic_lobby_clamp_vote_timeout(5) == 5
             && net::galactic_lobby_clamp_vote_timeout(60) == 60 && net::galactic_lobby_clamp_vote_timeout(120) == 120
             && net::galactic_lobby_clamp_vote_timeout(121) == 120 && net::galactic_lobby_clamp_vote_timeout(100000) == 120,
             "the host range is 5 to 120 seconds");
-        const auto offered = [&](std::optional<std::int64_t> authored) {
-            auto campaign = local.catalog().front(); campaign.vote_timeout_seconds = authored;
-            return require(net::default_galactic_lobby_options(campaign, difficulty, match_seed)).vote_timeout;
-        };
-        expect(offered(std::nullopt) == 15 && offered(30) == 30 && offered(2) == 5 && offered(900) == 120 && offered(0) == 5,
-            "the campaign's own constant is the room's default, clamped to the host range");
+        // Owner D11: a room opens at 30 s even when the data authors the retail 15 (or any other value) for its own vote.
+        for (const char* authored : {"15", "7", "900", "0"}) {
+            Local authored_local;
+            authored_local.data.constants.push_back({"Battle_Pending_Timeout_Seconds", authored, whole(std::stoll(authored))});
+            expect(require(net::default_galactic_lobby_options(authored_local.catalog().front(), difficulty, match_seed)).vote_timeout == 30,
+                std::string("a room opens at 30 s whatever the data authors: ") + authored);
+        }
         auto codec = options; codec.vote_timeout = 120;
         const auto bytes = require(net::encode_galactic_lobby_game(codec));
         expect(std::string(bytes.options.begin(), bytes.options.end()).find(" 2 120 0 ") != std::string::npos,
@@ -740,6 +741,44 @@ void difficulty_follows_the_campaigns_ai_types() {
         "a campaign without a list keeps accepting an authored name");
 }
 
+// #8071: the host's AI difficulty is ONE setting for every AI faction: a level of the campaign (Easy, Normal or Hard) that the
+// room's options carry to every peer, the roster the start agrees, and the campaign's start refuses a peer that cannot offer it.
+void host_ai_difficulty_is_one_agreed_setting() {
+    Local local;
+    auto catalog = local.catalog();
+    catalog.front().difficulties = {"Easy_Default", "Normal_Minor", "Hard_Default"};
+    const auto& campaign = catalog.front();
+    expect(gc::lobby_difficulty_level(campaign, "easy_default") == 0U && gc::lobby_difficulty_level(campaign, "NORMAL_MINOR") == 1U
+        && gc::lobby_difficulty_level(campaign, "Hard_Default") == 2U, "a room difficulty names the level of the entry it equals, in any case");
+    expect(!gc::lobby_difficulty_level(campaign, "Normal_Default") && !gc::lobby_difficulty_level(campaign, ""),
+        "a name none of the campaign's entries carries has no level");
+    expect(gc::lobby_difficulty_entry(campaign, 2) == "Hard_Default" && gc::lobby_difficulty_entry(campaign, 3).empty(),
+        "a level maps to the campaign's own entry for it");
+    gc::MpLobbyCampaign gap;
+    gap.difficulties = {"Easy_X", "", "Hard_X"};
+    expect(gc::lobby_difficulty_entry(gap, 1).empty(), "a level the campaign's AI types author nothing for has no entry to agree");
+
+    for (std::size_t level = 0; level < 3; ++level) {
+        const auto entry = gc::lobby_difficulty_entry(campaign, level);
+        // Two planned humans: the snapshot below seats a guest next to the host (D8 plans the host's row only by default).
+        const auto options = require(net::default_galactic_lobby_options(campaign, entry, match_seed, 3, 2));
+        expect(options.difficulty == entry, "the host's level is the room's difficulty");
+        const auto game = require(net::encode_galactic_lobby_game(options));
+        const auto guest = require(net::decode_galactic_lobby_game(game));
+        expect(guest == options && guest.difficulty == entry, "a guest reads the host's difficulty from the room");
+        const auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "host"), seat_of(1, 2, options, 2, "guest")});
+        expect(net::validate_galactic_lobby(snapshot, true, catalog).has_value(), "the host's level validates at Start");
+        expect(require(net::galactic_roster_draft(snapshot, catalog)).difficulty == entry,
+            "the agreed roster carries the level's entry for every AI faction");
+        // A peer whose own AI types cannot run the host's level refuses it with a reason instead of playing another level.
+        auto other = catalog;
+        other.front().difficulties[level].clear();
+        other.front().difficulties[(level + 1) % 3] = "Other_Entry";
+        expect(refused(snapshot, true, other, "does not apply to campaign Multiplayer"),
+            "a peer that cannot offer the host's difficulty refuses the start with its reason");
+    }
+}
+
 void staging_validation() {
     Local local;
     const auto catalog = local.catalog();
@@ -832,7 +871,7 @@ void roster_draft() {
     const auto two = two_side_options(local);
     const auto draft = require(net::galactic_roster_draft(snapshot_of(two, {seat_of(0, 1, two, 1, "host"), seat_of(1, 2, two, 2, "guest")}), catalog));
     expect(draft.campaign == "Multiplayer" && draft.difficulty == difficulty && !draft.custom && draft.allow_heroes, "campaign and difficulty carried");
-    expect(draft.vote_timeout_seconds == 15, "the room's vote timeout is the roster's (#6156)");
+    expect(draft.vote_timeout_seconds == 30, "the room's vote timeout is the roster's (#6156)");
     {
         auto edited = two; edited.vote_timeout = 90;
         const auto timed = require(net::galactic_roster_draft(snapshot_of(edited, {seat_of(0, 1, edited, 1, "host"), seat_of(1, 2, edited, 2, "guest")}), catalog));
@@ -1586,7 +1625,7 @@ void production_file_resume(unsigned workers, bool single_player_rules, bool pen
 // `joiners` humans join the loaded save on faction row 1 (#7869): their bindings carry saved seat 0 and the faction, the
 // backend derives each seat id from the saved seat table, and every peer restores and agrees on the amended game.
 std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay, bool departed = false, unsigned lobby_failure = 0,
-    bool single_player_rules = false, unsigned joiners = 0) {
+    bool single_player_rules = false, unsigned joiners = 0, const char* room_difficulty = difficulty) {
     const unsigned total = count + joiners;
     auto locals = locals_of(total);
     for (auto& local : locals) {
@@ -1595,7 +1634,7 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
         campaign.starting_active_player = "REBEL";
         local->data.campaigns.push_back(std::move(campaign));
     }
-    GcRoom room(locals, coop_options(*locals[0]), 1);
+    GcRoom room(locals, require(net::default_galactic_lobby_options(locals[0]->catalog().front(), room_difficulty, match_seed, 3, false)), 1);
     room.resumed_workers = std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers);
     room.resumed_clock_policy = net::GalacticClockPolicy::limited;
     for (unsigned peer = 1; peer < count; ++peer) room.admit(peer, 1, "human" + std::to_string(peer));
@@ -1654,10 +1693,13 @@ std::string checkpoint_room_resume(unsigned workers, unsigned count, bool relay,
     }
     candidate.original_roster.tick_zero = roster.tick_zero;
     // #6156: this fixture arms no vote service, so its save recorded no vote timeout and the inspected roster carries none.
-    expect(candidate.original_roster.vote_timeout_seconds == 0 && roster.vote_timeout_seconds == 15,
+    expect(candidate.original_roster.vote_timeout_seconds == 0 && roster.vote_timeout_seconds == 30,
         "a save without a vote service recorded no timeout; the room's roster has the default");
     candidate.original_roster.vote_timeout_seconds = roster.vote_timeout_seconds;
     expect(candidate.original_roster == roster && candidate.seed == match_seed, "UI inspection recovers original saved roster and seed without new-game placement");
+    // #8071: the save records the room's one AI difficulty and the resumed room reads it back, whatever the level was.
+    expect(roster.difficulty == room_difficulty && candidate.original_roster.difficulty == room_difficulty,
+        "a multiplayer save carries the agreed AI difficulty back into the resumed room");
     expect(candidate.original_roster.players.size() == 4
         && candidate.original_roster.players[2].faction == "UNDERWORLD"
         && candidate.original_roster.players[3].faction == "NEUTRAL"
@@ -4103,15 +4145,21 @@ void viewer_staging_room(std::uint64_t final_tick_count = 0, bool resume = false
 // `modded` is a campaign room whose host mounts a mod list (#8195): every guest holds its mod review for two seconds after all of
 // them are waiting (a player reading the "Mods differ" box, a harness with nobody to answer it), the host must keep every pending
 // guest in the room and show each as still checking, and once all have answered the room reaches staging and a GC start.
-void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false, bool claims = false, bool modded = false) {
+// `room_seats` > `count` is a room opened for more players than joined (#8130 T2): the transport holds capacity for `room_seats`
+// (staged capacity, as the lobby screen opens it once the capacity dropdown is gone), only `count` humans join, the rest of the rows
+// stay AI, and Start must reach the game with the humans present; the roster and the seat ids are the same on every peer.
+void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false, bool claims = false, bool modded = false,
+    std::size_t room_seats = 0) {
     std::vector<std::shared_ptr<Local>> locals;
     std::vector<std::shared_ptr<viewer::LanMatch>> peers;
     std::vector<gc::PlayerId> owners;
-    for (unsigned i = 1; i <= count; ++i) owners.push_back(i);
+    const bool sparse_room = room_seats > count;
+    for (unsigned i = 1; i <= (sparse_room ? room_seats : count); ++i) owners.push_back(i);
     for (std::size_t i = 0; i < count; ++i) {
         locals.push_back(claims ? std::make_shared<Local>(make_wide_data(3, 1)) : std::make_shared<Local>());
         auto match = viewer::make_lan_match();
         match->configure_seats(owners);
+        if (sparse_room) match->configure_staging_capacity(true);
         match->configure_lobby("Player " + std::to_string(i + 1), 0, {}, [](const auto&) {
             eawr::core::Diagnostic error; error.code = "EAWR-TEST-0002"; error.message = "GC never builds tactical setup";
             return eawr::core::Result<eawr::sim::tactical::TacticalSetup>::failure(error);
@@ -4292,6 +4340,19 @@ void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false, b
             "galactic survivors agree after the loading departure");
     } else {
         verify_launch(launches);
+        if (sparse_room) {
+            // T2: the agreed roster is the present humans in seat order on every peer, and a seat keeps its id.
+            const auto& first = launches.front()->roster.seats;
+            expect(first.size() == count, "the launched roster holds the humans present, not the room's capacity");
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto& roster = launches[i]->roster.seats;
+                expect(roster.size() == first.size() && launches[i]->seat == launches[i]->roster.seats[i].seat.value,
+                    "every peer launches with the same number of seats and its own seat id");
+                for (std::size_t row = 0; row < first.size(); ++row)
+                    expect(roster[row].seat == first[row].seat && roster[row].player == first[row].player
+                        && roster[row].selection.slot == first[row].selection.slot, "the roster rows match on every peer");
+            }
+        }
     }
     launches.clear();
     for (const auto& peer : peers) peer->cancel();
@@ -4563,6 +4624,21 @@ void ai_seat_caption_follows_room_difficulty() {
         "a mod level that merely starts with a stock name keeps its authored name");
     expect(galactic_ai_caption("easy") == GalacticAiCaption::easy && galactic_ai_caption("Medium_Default") == GalacticAiCaption::normal,
         "a bare stock name and Medium_Default are stock levels");
+    // The lobby never shows a raw entry name: a name with no stock level shows the level its first word names, else Normal.
+    using eawr::net::galactic_ai_display_level;
+    expect(galactic_ai_display_level("Medium_Skirmish") == GalacticAiCaption::normal && galactic_ai_display_level("Easy_Skirmish") == GalacticAiCaption::easy
+            && galactic_ai_display_level("Hard_Story") == GalacticAiCaption::hard && galactic_ai_display_level("Normal_Minor") == GalacticAiCaption::normal,
+        "a mod's own entry shows the level its first word names");
+    expect(galactic_ai_display_level("Hardened_Mod") == GalacticAiCaption::normal && galactic_ai_display_level("Brutal") == GalacticAiCaption::normal
+            && galactic_ai_display_level("") == GalacticAiCaption::normal && galactic_ai_display_level("Hard_Default") == GalacticAiCaption::hard,
+        "a name with no level word shows Normal, and a stock name keeps its level");
+    // A text stack that words no AI caption shows the plain level words, never the key.
+    using eawr::net::galactic_ai_caption_key;
+    using eawr::net::galactic_ai_caption_words;
+    expect(galactic_ai_caption_words(galactic_ai_caption_key(GalacticAiCaption::easy)) == "Easy"
+            && galactic_ai_caption_words(galactic_ai_caption_key(GalacticAiCaption::normal)) == "Normal"
+            && galactic_ai_caption_words(galactic_ai_caption_key(GalacticAiCaption::hard)) == "Hard" && galactic_ai_caption_words("Medium_Skirmish") == "Normal",
+        "without text the captions read Easy, Normal and Hard");
     // Roster level: every AI seat of a room built at a difficulty takes that difficulty's caption, none a fixed Medium.
     const Local local;
     for (const auto& level : {std::pair{"Easy_Default", GalacticAiCaption::easy}, std::pair{"Normal_Default", GalacticAiCaption::normal},
@@ -4787,6 +4863,7 @@ int main(int argc, char** argv) {
         for (const unsigned failure : {1U, 2U, 3U})
             static_cast<void>(checkpoint_room_resume(1, failure == 3 ? 3 : 2, false, false, failure, true));
         static_cast<void>(checkpoint_room_resume(1, 2, false, true, 0, true));
+        static_cast<void>(checkpoint_room_resume(1, 2, false, false, 0, false, 0, "Hard_Default")); // #8071: a Hard room saves and resumes Hard
         std::string sp_resume_reference;
         for (const auto workers : {1U, 2U, 4U, 8U}) {
             const auto hash = checkpoint_room_resume(workers, 2, false, false, 0, true);
@@ -4803,6 +4880,7 @@ int main(int argc, char** argv) {
         campaign_labels();
         staging_validation();
         difficulty_follows_the_campaigns_ai_types();
+        host_ai_difficulty_is_one_agreed_setting();
         ai_seat_caption_follows_room_difficulty();
         roster_draft();
         two_peer_room();
@@ -4848,6 +4926,7 @@ int main(int argc, char** argv) {
         viewer_many_seat_launch(3, true);
         viewer_many_seat_launch(3, false, true);
         viewer_many_seat_launch(3, false, false, true);
+        viewer_many_seat_launch(2, false, true, false, 3); // #8130 T2: a room for three starts with the two humans present
         viewer_many_seat_launch(4, false, false, true);
         installed_observer_agreement();
         viewer::shutdown_lan_drains();

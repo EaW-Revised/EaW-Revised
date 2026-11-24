@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/camera/camera.hpp"
 
 #include <algorithm>
@@ -61,7 +62,7 @@ constexpr float full_turn_degrees = 360.0F;
     float parsed{};
     const char* const begin = token.data();
     const char* const end = begin + token.size();
-    const std::from_chars_result result = std::from_chars(begin, end, parsed);
+    const std::from_chars_result result = eawr::core::from_chars(begin, end, parsed);
     if (result.ec != std::errc{} || result.ptr != end) return false;
     if (!finite(parsed)) return false;
     out = parsed;

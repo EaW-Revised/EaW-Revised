@@ -30,6 +30,13 @@ public:
         count_.store(count + 1, std::memory_order_release);
         return static_cast<PhaseId>(count);
     }
+    // The id of an already interned name, no_phase when unknown; never adds.
+    [[nodiscard]] PhaseId find(const std::string_view name) const noexcept {
+        const std::size_t count = count_.load(std::memory_order_acquire);
+        for (std::size_t i = 0; i < count; ++i)
+            if (names_[i] == name) return static_cast<PhaseId>(i);
+        return no_phase;
+    }
     [[nodiscard]] std::string_view name(const PhaseId id) const noexcept {
         return id < Capacity && id < count_.load(std::memory_order_acquire) ? names_[id] : std::string_view{};
     }

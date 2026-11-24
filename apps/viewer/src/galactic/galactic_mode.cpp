@@ -373,7 +373,8 @@ bool GalacticMode::State::start_game(platform::LiveGameSession::Options live_opt
         options.model_cache_budget_off ? std::numeric_limits<std::uint64_t>::max() : scene::default_model_cache_budget_bytes);
     if (!options.lan_acceptance_directory.empty()) {
         if (!options.lan_match || !options.lan_start) { failure = "GC acceptance needs an agreed lobby launch"; return false; }
-        options.lan_match->configure_acceptance(options.lan_acceptance_directory, options.campaign, options.mod_root.empty());
+        options.lan_match->configure_acceptance(options.lan_acceptance_directory, options.campaign, options.mod_root.empty(),
+            options.lan_start->options.difficulty, options.lan_start->difficulty_level);
     }
     if (options.hud_provider && !options.hud_provider->configure_score(*this, live_options)) return false;
     configure_save_repository(live_options, options);

@@ -6,6 +6,7 @@
 #include "eawr/core/perf_diag/pattern.hpp"
 #include "eawr/core/perf_diag/phase.hpp"
 #include "eawr/core/perf_diag/ring.hpp"
+#include "eawr/core/perf_diag/sim_feed.hpp"
 #include "eawr/core/perf_diag/verdict.hpp"
 
 #include <algorithm>
@@ -127,6 +128,23 @@ void phase_contracts() {
     (void)table.intern("a");
     (void)table.intern("b");
     expect(table.intern("overflow") == no_phase && table.size() == 4, "a full table refuses new names");
+
+    SimFeed feed;
+    std::vector<std::string> names;
+    for (int i = 0; i < 384; ++i) names.push_back("long phase name beyond small string storage " + std::to_string(i));
+    for (std::size_t i = 0; i < 256; ++i) (void)feed.intern(names[i]);
+    const auto known = feed.intern(names[0]);
+    allocations.store(0, std::memory_order_relaxed);
+    counting.store(true, std::memory_order_relaxed);
+    bool refused = true;
+    for (std::size_t i = 256; i < names.size(); ++i) refused &= feed.intern(names[i]) == no_phase;
+    const auto still_known = feed.intern(names[0]);
+    const auto static_overflow = feed.intern_static("another phase beyond capacity");
+    counting.store(false, std::memory_order_relaxed);
+    expect(refused && static_overflow == no_phase && feed.phase_count() == 256 && still_known == known &&
+               feed.phase_name(known) == names[0], "full feed retains stable ids and refuses new names");
+    expect(allocations.load(std::memory_order_relaxed) == 0, "interning beyond the cap allocates nothing");
+    expect(feed.names_dropped() == 129 && feed.dropped() == 129, "overflowed phase names are counted");
 }
 
 void marker_contracts() {
@@ -519,6 +537,75 @@ void log_contracts() {
     expect(log.size() == 4 && log.total() == 6 && log.recent(0).number == 6 && log.recent(3).number == 3, "hitch log keeps the newest");
 }
 
+// The sim-thread feed (#8058, P2): off holds nothing and records nothing; on records; the producer path allocates nothing
+// once names are interned; the thread-CPU read is sane.
+void simulation_feed_contracts() {
+    {
+        SimFeed feed;
+        counting.store(true);
+        allocations.store(0);
+        for (std::uint64_t i = 0; i < 1000; ++i) {
+            feed.mark(MarkerKind::save, i);
+            feed.push_tick(TickRecord{});
+            feed.push_phase(i, 0, 1.0);
+        }
+        counting.store(false);
+        TickRecord tick;
+        expect(!feed.enabled() && !feed.allocated(), "a fresh feed is off and holds no ring");
+        expect(allocations.load() == 0, "off allocates nothing");
+        expect(!feed.pop_tick(tick) && feed.ticks_pushed() == 0 && feed.markers_pushed() == 0 && feed.phases_pushed() == 0,
+            "off records nothing");
+    }
+    SimFeed feed;
+    feed.set_enabled(true);
+    expect(feed.enabled() && feed.allocated() && !feed.fine(), "enabling allocates the rings; fine stays off");
+    feed.set_fine(true);
+    expect(feed.fine(), "fine needs the switch and the feed");
+    feed.set_enabled(false);
+    expect(!feed.fine(), "fine does not count while the feed is off");
+    feed.set_enabled(true);
+    {
+        const std::string temporary = std::string("worker.") + "some-barrier";
+        const PhaseId id = feed.intern(temporary);
+        const PhaseId again = feed.intern("worker.some-barrier");
+        const PhaseId literal = feed.intern_static("step");
+        expect(id == again && id != no_phase && feed.phase_name(id) == "worker.some-barrier", "interning copies and is stable");
+        expect(feed.intern("step") == literal, "a copied name finds the static one");
+    }
+    const PhaseId phase = feed.intern("a-phase");
+    counting.store(true);
+    allocations.store(0);
+    for (std::uint64_t i = 0; i < 10000; ++i) {
+        feed.mark(MarkerKind::clock_reset, i, 3);
+        feed.push_phase(i, phase, 0.5);
+        TickRecord record;
+        record.tick = i;
+        record.cpu_ratio = thread_cpu_ratio(thread_cpu_now(), thread_cpu_now());
+        feed.push_tick(record);
+        (void)feed.intern("a-phase");
+    }
+    counting.store(false);
+    expect(allocations.load() == 0, "the enabled producer path allocates nothing after warm-up: " + std::to_string(allocations.load()));
+    TickRecord tick;
+    PhaseRecord record;
+    Marker marker;
+    std::uint64_t ticks = 0, phases = 0, markers = 0;
+    while (feed.pop_tick(tick)) ++ticks;
+    while (feed.pop_phase(record)) ++phases;
+    while (feed.pop_marker(marker)) { ++markers; expect(marker.kind == MarkerKind::clock_reset && marker.value == 3, "marker round trip"); }
+    expect(ticks + feed.dropped() >= 10000 && phases > 0 && markers > 0, "the enabled feed records");
+
+    // thread cpu: a busy loop reads a plausible ratio or unknown, never garbage.
+    const ThreadCpuStamp begin = thread_cpu_now();
+    volatile std::uint64_t sink = 0;
+    for (std::uint64_t i = 0; i < 20000000; ++i) sink = sink + i;
+    const float ratio = thread_cpu_ratio(begin, thread_cpu_now());
+    expect(ratio == cpu_ratio_unknown || (ratio > 0.0F && ratio <= 4.0F), "thread cpu ratio is unknown or in range: " + std::to_string(ratio));
+    expect(thread_cpu_ratio(ThreadCpuStamp{}, ThreadCpuStamp{}) == cpu_ratio_unknown, "invalid stamps read unknown");
+    ThreadCpuStamp backwards{10, 10, true};
+    expect(thread_cpu_ratio(backwards, ThreadCpuStamp{5, 5, true}) == cpu_ratio_unknown, "a backwards interval reads unknown");
+}
+
 } // namespace
 
 int main() {
@@ -532,6 +619,7 @@ int main() {
     verdict_contracts();
     log_contracts();
     steady_state_allocations();
+    simulation_feed_contracts();
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

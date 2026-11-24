@@ -149,7 +149,10 @@ public:
     [[nodiscard]] sim::SeatId local_seat() const;
     // Call before handing the driver to the live thread. Empty paths leave the ordinary path untouched.
     void configure_recovery_restore(net::GalacticRecoveryWorker::Restore); // before live handover only
-    void configure_acceptance(std::filesystem::path directory, std::string campaign, bool stock);
+    // `difficulty` is the agreed room difficulty entry and `difficulty_level` the level it stands for in the campaign
+    // ("easy", "normal", "hard", empty when the campaign names none); both go into the receipt (#8071).
+    void configure_acceptance(std::filesystem::path directory, std::string campaign, bool stock, std::string difficulty = {},
+        std::string difficulty_level = {});
 
     // A transport owner supplies its authenticated dense peer index. The query
     // runs at the simulation boundary; UI callers never borrow the live owner.

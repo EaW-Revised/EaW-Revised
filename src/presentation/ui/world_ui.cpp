@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/ui/world_ui.hpp"
 #include "eawr/core/text.hpp"
 #include "eawr/data/xml.hpp"
@@ -132,7 +133,7 @@ WorldUiSettings world_ui_settings(const vfs::Vfs& filesystem) {
             if (!raw.empty() && (raw.back() == 'f' || raw.back() == 'F')) raw.remove_suffix(1);
             if (!raw.empty() && raw.front() == '+') raw.remove_prefix(1);
             float value{};
-            const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+            const auto [end, error] = eawr::core::from_chars(raw.data(), raw.data() + raw.size(), value);
             if (!raw.empty() && error == std::errc{} && end == raw.data() + raw.size()
                 && std::isfinite(value)) *destination = value;
         }
@@ -549,7 +550,7 @@ std::optional<HardpointReticleSizes> hardpoint_reticle_sizes(const vfs::Vfs& fil
         const auto raw = core::trim_view(found->raw_text, core::xml_whitespace);
         if (raw.empty()) return std::nullopt;
         float value{};
-        const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+        const auto [end, error] = eawr::core::from_chars(raw.data(), raw.data() + raw.size(), value);
         if (error != std::errc{} || end != raw.data() + raw.size() || !std::isfinite(value) || value < 0) return std::nullopt;
         *destination = value;
     }

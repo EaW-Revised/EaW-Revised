@@ -881,6 +881,13 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
     if (state_ && page_ == Page::staging && match_->galactic_room()) {
         if (const auto room = match_->lobby_state()) {
             if (auto decoded = net::decode_galactic_lobby_game(room->snapshot.game)) shot.galactic_options = std::move(decoded).value();
+            if (shot.galactic_options) {
+                const sim::galactic::MpLobbyCampaign* shown_campaign = nullptr;
+                if (impl.galactic_backend && impl.galactic_backend->content_ready())
+                    for (const auto& candidate : impl.galactic_backend->campaigns())
+                        if (candidate.name == shot.galactic_options->campaign) shown_campaign = &candidate;
+                shot.difficulty_shown = utf8(ai_caption_text(resources_->text, ai_seat_caption(shown_campaign, shot.galactic_options->difficulty)));
+            }
         }
         if (state_->galactic_editing) shot.options_error = utf8(state_->gc_error->get_text());
         if (const auto* description = EAWR_CONTROL(EawrUiLabel, "EAWR_CAMPAIGN_DESCRIPTION"); description != nullptr && description->is_visible())

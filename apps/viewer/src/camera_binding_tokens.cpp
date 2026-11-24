@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "camera_binding_config_internal.hpp"
 
 #include <algorithm>
@@ -256,7 +257,7 @@ const JsonValue* JsonValue::find(const std::string_view key) const noexcept {
         double parsed{};
         const auto* begin = text_.data() + start;
         const auto* end = text_.data() + position_;
-        const auto result = std::from_chars(begin, end, parsed);
+        const auto result = eawr::core::from_chars(begin, end, parsed);
         if (result.ec != std::errc{} || result.ptr != end || !std::isfinite(parsed)) {
             return fail("number is out of range");
         }

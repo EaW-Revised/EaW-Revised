@@ -273,8 +273,8 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
         const auto valid = validate_lobby(state.snapshot, true);
         if (!valid) state.ready_reason = valid.error().message;
         const bool hosting = view().host;
-        const bool mesh_complete = !io_->transport.tcp || (galactic_room() ? io_->transport.tcp->mesh_complete()
-            : io_->transport.tcp->mesh_complete(admitted_seats(state.snapshot)));
+        // Every PRESENT seat is linked; a room opened for more than joined starts with the humans there (#8130). Unclaimed rows stay AI.
+        const bool mesh_complete = !io_->transport.tcp || io_->transport.tcp->mesh_complete(admitted_seats(state.snapshot));
         const bool all_ready = std::all_of(state.snapshot.seats.begin(), state.snapshot.seats.end(), [](const auto& seat) { return seat.ready; });
         state.connections_pending = hosting && online_options_.has_value() && !mesh_complete;
         // Who has finished checking the host's mods. The host knows every guest's acknowledgement; a guest knows its own (it is past
@@ -304,10 +304,7 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
         if (state.start_reason.empty() && !match_startable)
             state.start_reason = "Starting a campaign match needs the galactic lockstep driver, which this build does not have yet.";
         else if (state.start_reason.empty() && state.connections_pending) {
-            // A campaign room that opened for more players than joined waits for the missing seats, not for a pair (#8130).
-            state.start_reason = galactic_room() ? net::galactic_room_waiting_text(state.snapshot.seats.size(), state.snapshot.capacity) : std::string{};
-            if (state.start_reason.empty())
-                state.start_reason = "Waiting for connections between players. Every pair must connect before Start; My connections shows only your own links.";
+            state.start_reason = "Waiting for connections between players. Every pair must connect before Start; My connections shows only your own links.";
         }
         else if (state.start_reason.empty() && !all_ready) state.start_reason = "Waiting for every player to accept the current setup.";
         const bool start_pending = lobby_->start_pending();
@@ -746,20 +743,17 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
         };
         hooks.remove_peer = [this](net::PeerIndex peer, net::LobbyReason) { closing_peers_.insert(peer); removed_peers_.insert(peer); };
         if (online_options_ || (io_->transport.tcp && io_->transport.tcp->staging_capacity())) {
-            hooks.lock_at_start = io_->transport.tcp && io_->transport.tcp->staging_capacity();
+            // A campaign freezes the roster when its setup is ready, not at Start: its preparation is long and cancels back to staging (#8130).
+            hooks.lock_at_start = io_->transport.tcp && io_->transport.tcp->staging_capacity() && !galactic_room();
             hooks.mesh_complete = [this]() -> core::Result<void> {
-                if (io_->transport.tcp && (galactic_room() ? io_->transport.tcp->mesh_complete()
-                    : io_->transport.tcp->mesh_complete(admitted_seats(lobby_->snapshot())))) return core::Result<void>::success();
+                if (io_->transport.tcp && io_->transport.tcp->mesh_complete(admitted_seats(lobby_->snapshot()))) return core::Result<void>::success();
                 return lobby_fail<void>(net::LobbyReason::mesh_incomplete, "The room mesh is incomplete.");
             };
             hooks.lock_room_progress = [this]() -> core::Result<bool> {
                 if (!io_->transport.tcp) return lobby_fail<bool>(net::LobbyReason::mesh_incomplete, "The room mesh is gone.");
-                if (galactic_room()) {
-                    auto locked = io_->transport.tcp->lock_room();
-                    return locked ? core::Result<bool>::success(true) : core::Result<bool>::failure(locked.error());
-                }
-                if (auto valid = validate_lobby(lobby_->snapshot(), true); !valid)
-                    return core::Result<bool>::failure(valid.error());
+                if (!galactic_room())
+                    if (auto valid = validate_lobby(lobby_->snapshot(), true); !valid)
+                        return core::Result<bool>::failure(valid.error());
                 return io_->transport.tcp->lock_roster(admitted_seats(lobby_->snapshot()));
             };
         }

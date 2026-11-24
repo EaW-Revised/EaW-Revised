@@ -86,11 +86,20 @@ struct WorldView {
     std::vector<ViewPlayer> players; // ascending ID
     std::vector<tactical::CaptureCandidate> capture_candidates; // prepared with the unit rows
     std::size_t script_objects{}; // SSU-03: appended hidden rows; physical high IDs are not a classification.
+    // The script references of units a direct creation made, ascending, with the unit's physical ID. Rebuilt with the
+    // completed view: a creation lands in the ordered commit, not before.
+    std::vector<std::pair<std::uint64_t, sim::EntityId>> script_references;
 
     [[nodiscard]] const ViewUnit* find(sim::EntityId id) const {
         const auto found = std::lower_bound(units.begin(), units.end(), id,
             [](const ViewUnit& unit, sim::EntityId key) { return unit.id < key; });
-        return found != units.end() && found->id == id ? &*found : nullptr;
+        if (found != units.end() && found->id == id) return &*found;
+        const auto reference = std::lower_bound(script_references.begin(), script_references.end(), id,
+            [](const auto& row, sim::EntityId key) { return row.first < key; });
+        if (reference == script_references.end() || reference->first != id) return nullptr;
+        const auto physical = std::lower_bound(units.begin(), units.end(), reference->second,
+            [](const ViewUnit& unit, sim::EntityId key) { return unit.id < key; });
+        return physical != units.end() && physical->id == reference->second ? &*physical : nullptr;
     }
     [[nodiscard]] const ViewPlayer* player(tactical::PlayerId id) const {
         for (const ViewPlayer& entry : players) {

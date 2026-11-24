@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
 #include "eawr/core/text.hpp"
 
@@ -307,7 +308,7 @@ core::Result<float> movie_letterbox_height(const vfs::Vfs& filesystem) {
         while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.remove_suffix(1);
         if (!text.empty() && (text.back() == 'f' || text.back() == 'F')) text.remove_suffix(1);
         float value{};
-        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+        const auto [end, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
         if (error == std::errc{} && end == text.data() + text.size() && std::isfinite(value)
             && value >= 0.0F && value < 0.5F) return core::Result<float>::success(value);
     }
@@ -326,7 +327,7 @@ std::optional<double> beacon_place_delay(const vfs::Vfs& filesystem) {
     const auto text = core::trim_view(found->raw_text, core::xml_whitespace);
     if (text.empty()) return std::nullopt;
     double value{};
-    const auto [last, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    const auto [last, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
     if (error != std::errc{} || last != text.data() + text.size() || !std::isfinite(value) || value < 0)
         return std::nullopt;
     return value / 1000.0;
@@ -938,7 +939,7 @@ std::optional<data::ui::Rgba8> production_queue_tint(const vfs::Vfs& filesystem)
         std::string token;
         while (stream >> token) {
             int value{};
-            const auto [end, error] = std::from_chars(token.data(), token.data() + token.size(), value);
+            const auto [end, error] = eawr::core::from_chars(token.data(), token.data() + token.size(), value);
             if (error != std::errc{} || end != token.data() + token.size()
                 || count == channels.size() || value < 0 || value > 255) return std::nullopt;
             channels[count++] = value;
@@ -970,7 +971,7 @@ EncyclopediaConstants encyclopedia_constants(const vfs::Vfs& filesystem) {
         const auto raw = core::trim_view(found->raw_text, core::xml_whitespace);
         if (raw.empty()) return invalid();
         double value{};
-        const auto [last, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+        const auto [last, error] = eawr::core::from_chars(raw.data(), raw.data() + raw.size(), value);
         if (error != std::errc{} || last != raw.data() + raw.size() || !std::isfinite(value)
             || (nonnegative && value < 0)) return invalid();
         return value;
@@ -1090,7 +1091,7 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
         if (!field) return std::int32_t{};
         const auto raw = trimmed(field->value.raw_text);
         std::int32_t value{};
-        const auto [last, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
+        const auto [last, error] = eawr::core::from_chars(raw.data(), raw.data() + raw.size(), value);
         return error == std::errc{} && last == raw.data() + raw.size() ? value : 0;
     };
     const auto usage = integer("Population_Value");
@@ -1099,7 +1100,7 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
     if (const data::EffectiveValue* cost = resolved.value().value("Tactical_Build_Cost_Multiplayer")) {
         const std::string digits = trimmed(cost->value.raw_text);
         std::int64_t value{};
-        const auto [end, error] = std::from_chars(digits.data(), digits.data() + digits.size(), value);
+        const auto [end, error] = eawr::core::from_chars(digits.data(), digits.data() + digits.size(), value);
         if (error == std::errc{} && end == digits.data() + digits.size()) out.build_cost = value;
     }
     if (const data::EffectiveValue* id = resolved.value().value("Text_ID")) {

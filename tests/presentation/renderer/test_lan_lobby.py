@@ -463,6 +463,27 @@ def wide_campaign_mod(directory, playable, ai_only, small=0):
     return root
 
 
+def text_overlay_mod(directory, name, pairs):
+    """A made-up overlay mod that carries only a text database (Data/Text/MasterTextFile_English.dat) of `pairs` (#8071, D11 follow-up).
+
+    The text database is one file read from the highest mounted layer, so a mod's file stands for the whole text stack of the room:
+    one that words the AI captions is a stack with strings, one that words none is a stack without. Layout: count, (crc, length,
+    key length) records, UTF-16 values, ASCII keys.
+    """
+    import struct
+    import zlib
+    root = pathlib.Path(directory) / name
+    path = root / "Data" / "Text" / "MasterTextFile_English.dat"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keys = [key.encode("ascii") for key, _ in pairs]
+    values = [value.encode("utf-16-le") for _, value in pairs]
+    blob = struct.pack("<I", len(pairs))
+    for key, value in zip(keys, values):
+        blob += struct.pack("<III", zlib.crc32(key) & 0xFFFFFFFF, len(value) // 2, len(key))
+    path.write_bytes(blob + b"".join(values) + b"".join(keys))
+    return root
+
+
 def four_row_staging_dialog(mod, rows=4):
     """Give the mod a LAN staging dialog that draws only `rows` player rows (a mod may author fewer than retail's nine).
 
@@ -1297,10 +1318,51 @@ class LanLobbyGraphical(unittest.TestCase):
             self.assertEqual(snapshot["credits"], 6500)
             self.assertEqual(snapshot["galactic_options"], {"custom": True, "credits": 6500,
                              "starting_tech": 2, "maximum_tech": 4, "difficulty": "Hard_Default",
-                             "heroes": False, "auto_resolve": 3})
+                             "heroes": False, "auto_resolve": 3,
+                             # owner decision D11: a room opens at 30 s whatever vote timeout the stock data authors (15)
+                             "vote_timeout": 30})
         self.assertEqual(initial["galactic_options"], reset["galactic_options"])
         self.assertFalse(reset["options_open"] or reset["credits_custom"])
+        # #8071: the host's one AI difficulty is what every AI row of the room reads (Hard after the accepted edit, Normal at
+        # the defaults), by the level the campaign's entry stands for.
+        for snapshot, caption in ((accepted, "TEXT_HARD_AI_PLAYER"), (reset_cancelled, "TEXT_HARD_AI_PLAYER"),
+                                  (initial, "TEXT_MEDIUM_AI_PLAYER"), (reset, "TEXT_MEDIUM_AI_PLAYER")):
+            ai_rows = [row for row in snapshot["rows"] if row["kind"] == "ai"]
+            self.assertTrue(ai_rows, "the campaign room seats an AI faction")
+            self.assertEqual({row["name"] for row in ai_rows}, {caption})
+        # The words the room's difficulty shows as (the Difficulty line, the dropdown and the AI rows) on the stock text stack.
+        self.assertEqual({snapshot["difficulty_shown"] for snapshot in (initial, reset)}, {"Medium AI"})
+        self.assertEqual({snapshot["difficulty_shown"] for snapshot in (accepted, reset_cancelled)}, {"Hard AI"})
         self.assertNotIn("ERROR:", completed.stdout)
+
+    def test_the_rooms_difficulty_shows_the_text_stacks_own_words_or_plain_level_names(self):
+        # #8184: a stack that words the AI captions shows its own words for the agreed level ("AI on Spice"); a stack that words none
+        # shows Easy / Normal / Hard. Never the text key and never a raw entry name (Normal_Default, Medium_Skirmish).
+        captions = [("TEXT_EASY_AI_PLAYER", "AI on Kolto"), ("TEXT_MEDIUM_AI_PLAYER", "AI on Spice"),
+                    ("TEXT_HARD_AI_PLAYER", "AI on Death Sticks")]
+        for label, pairs, normal, hard in (
+                ("with-strings", captions, "AI on Spice", "AI on Death Sticks"),
+                ("without-strings", [("TEXT_UNRELATED_KEY", "Unrelated")], "Normal", "Hard")):
+            with self.subTest(stack=label):
+                mod = text_overlay_mod(self.directory, "text_" + label, pairs)
+                name = "gc-difficulty-" + label
+                steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Difficulty words", "wait:staging@60",
+                         "sleep:3", "snapshot", "options:open", "options:difficulty=Hard_Default", "options:accept", "sleep:3",
+                         "snapshot", "shot:" + name, "cancel", "cancel")
+                completed = subprocess.run(
+                    command(self.cache, name, self.pictures, self.pictures / (name + ".png"), "--eawr-lan-name", "Solo",
+                            "--eawr-lan-game-port", "0", "--eawr-mod-root", str(mod),
+                            *[arg for step in steps for arg in ("--eawr-lan-do", step)]),
+                    cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=600)
+                self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
+                initial, accepted = load(self, self.pictures, name, completed.stdout)["snapshots"]
+                self.assertEqual(initial["galactic_options"]["difficulty"], "Normal_Default")
+                self.assertEqual(initial["difficulty_shown"], normal)
+                self.assertEqual(accepted["galactic_options"]["difficulty"], "Hard_Default")
+                self.assertEqual(accepted["difficulty_shown"], hard)
+                for snapshot in (initial, accepted):
+                    self.assertNotRegex(snapshot["difficulty_shown"], r"_|TEXT_")
+                self.assertNotIn("ERROR:", completed.stdout)
 
     def test_campaign_host_and_load_game_never_block_the_ui_thread(self):
         # #5512: Host (Campaign) and the staging Load Game press used to run the campaign content load on the UI thread,

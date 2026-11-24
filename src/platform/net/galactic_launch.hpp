@@ -12,6 +12,8 @@ namespace eawr::presentation::godot_backend {
 // Simulation types remain opaque to the viewer's launch routing.
 struct GalacticLaunch {
     net::GalacticLobbyOptions options;
+    // The level ("easy", "normal", "hard"; empty when the campaign names none) the agreed options.difficulty stands for (#8071).
+    std::string difficulty_level;
     net::LobbySnapshot roster;
     std::uint32_t seat{};
     std::shared_ptr<GalacticLanMatch> match;

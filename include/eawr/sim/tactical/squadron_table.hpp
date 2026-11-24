@@ -3,6 +3,7 @@
 #include "eawr/sim/tactical/types.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -12,6 +13,11 @@
 // The content half of fighter squadrons: what a MotionTable holds by value (docs/behaviour/space-fighters.md).
 // The state and the flight rules are in eawr/sim/tactical/fighters.hpp.
 namespace eawr::sim::tactical {
+
+// The next contiguous team in authored member order. Callers validate maximum > 0.
+[[nodiscard]] constexpr std::size_t squadron_team_size(std::size_t remaining, std::size_t maximum) noexcept {
+    return remaining < maximum ? remaining : maximum;
+}
 
 // Spin_Away_On_Death (#447, docs/behaviour/space-fighter-deaths.md SP-01): the chance that a
 // killed craft spins away before it explodes, and for how long.

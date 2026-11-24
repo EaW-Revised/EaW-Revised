@@ -34,6 +34,7 @@ struct Options {
     std::size_t repeat = 3;
     std::uint64_t seed = 0x5eed;
     std::vector<std::size_t> workers;
+    std::string live_feed; // empty selects the original benchmark; off/coarse/fine select the live driver
     bool dispatch_cost = false;
     bool fog = false;
     bool hash = true;

@@ -8,6 +8,9 @@ Use Python 3.10 or newer for these maintainer tools. Linux and Windows pool host
 3. Run the fresh-user and GPU verification on the exact finished bytes through the rig queue before delivery. That verification requires Windows and a GPU. Owner kits can be compiled and packaged on the Windows pool or on the Linux cross host (see "Linux and Windows kits" for what the two routes share and where they differ).
 4. Publish to invited testers (only when the owner asks for the private channel): `python tools/release/publish_kit.py --kit <out-root>/<kit>.zip --notes <changes file> --dry-run`, read what it prints, then run it again without `--dry-run`. It checks the zip against its `.sha256` and sidecar, refuses a public repository or an existing tag, and creates a `kit-<version>-kit.<n>` release of the private repository (never latest, never a pre-release). See [Private test kits](../../docs/releasing.md#private-test-kits).
 
+Kit numbering restarts after every public release: once `v<X.Y.Z>` is published, main's `config/release-version.json` moves to the
+next patch version and the next kits are `<X.Y.Z+1>-kit1`, `-kit2`, ... (the `--suffix` counter starts again at `-kit1`).
+
 Owner kits are cut with land skirmish ON (`EAWR_ENABLE_LAND_SKIRMISH`) until it ships on by default: the cut adds an overlay of the
 root and viewer `CMakeLists.txt` (a `set(EAWR_ENABLE_LAND_SKIRMISH ON)` line after the option, recorded as overlay files in the plan and
 named in the kit README with `Land skirmish: ON in this kit`). It is a normal variable on purpose: flipping the option default does nothing

@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "galactic_audio.hpp"
 #include "eawr/diagnostics/gc_memory.hpp"
 #include "eawr/core/text.hpp"
@@ -47,7 +48,7 @@ std::string value(std::span<const audio::Field> table, std::string_view tag) {
 float db(double level) { return level <= 0.0001 ? -80.0F : static_cast<float>(20.0 * std::log10(level)); }
 std::optional<double> number(std::string_view text) {
     double result{};
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), result);
+    const auto parsed = eawr::core::from_chars(text.data(), text.data() + text.size(), result);
     return parsed.ec == std::errc{} && std::isfinite(result) ? std::optional<double>{result} : std::nullopt;
 }
 godot::Vector3 render(const audio::Vec3& source) {

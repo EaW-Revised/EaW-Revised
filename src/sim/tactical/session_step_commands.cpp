@@ -552,6 +552,22 @@ core::Result<void> session_detail::Tick::commands() {
         std::cref(world_for), std::cref(plan_approach), std::cref(plan_pending),
         std::cref(pending_empty), std::cref(unit_failure)};
     bool autofire_queued = false;
+    // A script reference (script_creation_namespace bit) names the object a direct creation made in this or an earlier
+    // tick; it is swapped for that object's ID before the command runs. A reference with no live object stays as it
+    // is and is skipped like any unknown unit. Creations only add references, so the index is extended, never rebuilt.
+    std::map<std::uint64_t, EntityId> script_references;
+    EntityId script_references_for = invalid_entity_id;
+    const auto resolve_reference = [&](const EntityId id) -> EntityId {
+        if ((id & script_creation_namespace) == 0) return id;
+        if (script_references_for != staging_->next_id.value()) {
+            script_references.clear();
+            for (const auto& [unit_id, unit] : staged)
+                if (unit.script_view && unit.script_view->identity != 0) script_references.emplace(unit.script_view->identity, unit_id);
+            script_references_for = staging_->next_id.value();
+        }
+        const auto found = script_references.find(id);
+        return found == script_references.end() ? id : found->second;
+    };
     auto& due_end = commands_.value().due_end.emplace(impl_->pending.begin());
     const auto commands_left = [&] {
         return (waypoint_legs && !waypoint_legs->empty()) || !concentrate_batches.empty() || !autofire_commands.empty()
@@ -603,6 +619,9 @@ core::Result<void> session_detail::Tick::commands() {
                 current.units = std::move(holders);
             }
         }
+        for (auto& unit_id : current.units) unit_id = resolve_reference(unit_id);
+        if (auto* attack_target = std::get_if<AttackPayload>(&current.payload)) attack_target->target = resolve_reference(attack_target->target);
+        if (auto* teleport_target = std::get_if<ScriptTeleportPayload>(&current.payload)) teleport_target->target = resolve_reference(teleport_target->target);
         const auto selected_units = current.units;
         if (!waypoint_resume) {
             if (const auto* move = std::get_if<MovePayload>(&current.payload); move && move->append) {
@@ -892,7 +911,7 @@ core::Result<void> session_detail::Tick::commands() {
                 if (found == staged.end()) return;
                 auto view = found->second.script_view.value_or(ScriptViewState{});
                 view.hidden = hide->hidden;
-                found->second.script_view = (view.hidden || view.unselectable) ? std::optional(view) : std::nullopt;
+                found->second.script_view = (view.hidden || view.unselectable || view.identity != 0) ? std::optional(view) : std::nullopt;
             };
             const auto& born_squadrons = staging_->arrived_squadrons.value();
             for (const auto id : command.units) {
@@ -913,7 +932,7 @@ core::Result<void> session_detail::Tick::commands() {
                 if (found == staged.end()) return;
                 auto view = found->second.script_view.value_or(ScriptViewState{});
                 view.unselectable = !selectable->selectable;
-                found->second.script_view = (view.hidden || view.unselectable) ? std::optional(view) : std::nullopt;
+                found->second.script_view = (view.hidden || view.unselectable || view.identity != 0) ? std::optional(view) : std::nullopt;
             };
             const auto& born_squadrons = staging_->arrived_squadrons.value();
             for (const auto id : command.units) {

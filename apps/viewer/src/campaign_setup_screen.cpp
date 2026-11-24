@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "campaign_setup_screen.hpp"
 #include "eawr/core/text.hpp"
 
@@ -67,7 +68,7 @@ std::optional<Color> parse_colour(const std::string_view raw) {
         const auto comma = raw.find(',', at);
         const std::string token = trim(raw.substr(at, comma == std::string_view::npos ? std::string_view::npos : comma - at));
         float value{};
-        const auto parsed = std::from_chars(token.data(), token.data() + token.size(), value);
+        const auto parsed = eawr::core::from_chars(token.data(), token.data() + token.size(), value);
         if (token.empty() || parsed.ec != std::errc{}) return std::nullopt;
         parts[count++] = value;
         if (comma == std::string_view::npos) break;

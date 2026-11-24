@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "model_preview.hpp"
 #include "eawr/core/text.hpp"
 
@@ -607,7 +608,7 @@ Checked<std::vector<float>> parse_floats(const std::string_view text) {
             return (c >= '0' && c <= '9') || c == '.' || c == '-' || c == 'e' || c == 'E';
         });
         float value{};
-        const auto parsed = allowed ? std::from_chars(token.data(), token.data() + token.size(), value)
+        const auto parsed = allowed ? eawr::core::from_chars(token.data(), token.data() + token.size(), value)
                                     : std::from_chars_result{token.data(), std::errc::invalid_argument};
         if (!allowed || parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size() || !finite(value)) {
             return Checked<std::vector<float>>::fail("expected comma-separated finite decimals, got: " + std::string(text));

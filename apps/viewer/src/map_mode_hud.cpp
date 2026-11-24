@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/data/xml.hpp"
@@ -76,7 +77,7 @@ namespace {
             while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) value.remove_suffix(1);
             if (!value.empty() && (value.back() == 'f' || value.back() == 'F')) value.remove_suffix(1);
             float parsed{};
-            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+            const auto [end, error] = eawr::core::from_chars(value.data(), value.data() + value.size(), parsed);
             if (error == std::errc{} && end == value.data() + value.size() && std::isfinite(parsed)) result[i] = parsed;
         }
     }
