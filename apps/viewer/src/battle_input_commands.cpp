@@ -39,8 +39,31 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
                         BattleCamera& space) {
     scene_ = &population;
     if (event.is_null()) return false;
-    // #8182: a view that commands nothing (a spectator) neither selects nor orders: the camera takes every gesture.
-    if (live.view_only()) { clear_selection(); return false; }
+    // A watched battle permits inspection, but never enters the order input path.
+    if (live.view_only()) {
+        if (const auto* motion = Object::cast_to<InputEventMouseMotion>(event.ptr())) {
+            pointer_ = {static_cast<float>(motion->get_position().x), static_cast<float>(motion->get_position().y)};
+            return false;
+        }
+        if (const auto* button = Object::cast_to<InputEventMouseButton>(event.ptr());
+            button && button->get_button_index() == MOUSE_BUTTON_LEFT) {
+            if (!button->is_pressed()) {
+                refresh(live, population, space);
+                const std::array<float, 2> at{static_cast<float>(button->get_position().x),
+                                              static_cast<float>(button->get_position().y)};
+                const auto pick_ray = ray(at[0], at[1]);
+                auto picked = pick_ray ? ui::pick_unit(*pick_ray, units_) : std::nullopt;
+                if (const auto reticle = world_ui_->reticle_at(at)) picked = reticle->entity;
+                else if (const auto icon = world_ui_->icon_at(at)) picked = *icon;
+                selection_.clear();
+                inspect_ = picked;
+                refresh_cards(live);
+                draw();
+            }
+            return true;
+        }
+        return false;
+    }
     if (const auto* modified = Object::cast_to<InputEventWithModifiers>(event.ptr()))
         right_modifiers_ = modifiers_of(*modified);
     // Capture before refreshing/picking; decoding an input may span simulation

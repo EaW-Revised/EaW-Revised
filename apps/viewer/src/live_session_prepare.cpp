@@ -623,6 +623,7 @@ bool LiveSessionView::start(std::string& failure) {
     }
     session_options.scripts = ai_scripts_;
     for (const auto& call : options_.debug_letterbox) session_options.debug_letterbox.push_back({call.tick, call.in, call.seconds});
+    for (const auto& call : options_.debug_story) session_options.debug_story.push_back({call.tick, call.verb, call.arguments});
     if (options_.save_tick) {
         session_options.save_at = *options_.save_tick;
         // The simulation thread writes the file between two ticks; finish() reads the outcome after stop().

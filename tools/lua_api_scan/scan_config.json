@@ -407,6 +407,19 @@
           }
         },
         {
+          "file": "src/script/foc/tactical_presentation_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
           "file": "src/script/foc/plan_bindings.cpp",
           "registrars": {
             "add": "global",
@@ -542,6 +555,19 @@
           }
         },
         {
+          "file": "src/script/foc/tactical_presentation_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
           "file": "src/script/foc/plan_bindings.cpp",
           "registrars": {
             "add": "global",
@@ -608,6 +634,19 @@
         },
         {
           "file": "src/script/foc/tactical_object_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_presentation_bindings.cpp",
           "registrars": {
             "add": "global",
             "register_binding": "global",
@@ -694,6 +733,19 @@
         },
         {
           "file": "src/script/foc/tactical_object_bindings.cpp",
+          "registrars": {
+            "add": "global",
+            "register_binding": "global",
+            "method": "member",
+            "player": "member",
+            "type": "member",
+            "object": "member",
+            "position": "member",
+            "register_method": "member"
+          }
+        },
+        {
+          "file": "src/script/foc/tactical_presentation_bindings.cpp",
           "registrars": {
             "add": "global",
             "register_binding": "global",

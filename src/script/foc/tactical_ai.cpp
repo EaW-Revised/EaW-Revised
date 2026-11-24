@@ -2,6 +2,7 @@
 // FoC tactical space AI host (#79, docs/behaviour/foc-tactical-ai.md "#79 host").
 // Engine rules cite the host rules FH-xx of that note; each names its evidence.
 
+#include "eawr/script/authoritative/story_presentation.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 
 #include "ai_mode.hpp"
@@ -778,6 +779,7 @@ core::Result<PreparedAiSession> prepare_session(
     register_globals(scripts.value(), host, errors);
     register_methods(scripts.value(), host, errors);
     register_battle_object_bindings(scripts.value(), host, errors);
+    register_tactical_presentation(scripts.value(), host, errors);
     register_battle_distribution(scripts.value(), host, errors);
     if (!errors.empty()) return SessionResult::failure(errors.front());
     for (const AiPlayer& player : host->setup.players) {
@@ -830,6 +832,8 @@ core::Result<PreparedAiSession> prepare_session(
             if (auto added = session.register_verb(verb, translate_order); !added) return added;
         }
         if (auto added = session.register_presentation_verb(verb_letter_box); !added) return added;
+        for (const std::string_view verb : {authoritative::verb_story_camera, authoritative::verb_story_fade, authoritative::verb_story_environment})
+            if (auto added = session.register_presentation_verb(verb); !added) return added;
         if (host->setup.perception.campaign_game && host->setup.campaign_can_retreat && host->setup.campaign_retreat_order) {
             auto translate = [host](const authoritative::ScriptCommand& command) -> core::Result<authoritative::TacticalOrder> {
                 using OrderResult = core::Result<authoritative::TacticalOrder>;

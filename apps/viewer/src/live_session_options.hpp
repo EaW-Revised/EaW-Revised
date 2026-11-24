@@ -50,6 +50,14 @@ struct DebugLetterbox final {
     double seconds{};
 };
 
+// One injected tactical-script story call (--eawr-live-story): the verb of story_presentation.hpp and its staged text arguments, at the
+// tick of the script service that makes it.
+struct DebugStory final {
+    std::uint64_t tick{};
+    std::string verb;
+    std::vector<std::string> arguments;
+};
+
 struct ScheduledOrder final {
     std::uint64_t tick{};
     sim::tactical::OrderKind kind{sim::tactical::OrderKind::stop};
@@ -208,6 +216,10 @@ struct Options final {
     // legacy #6634: --eawr-live-letterbox <tick>:<in|out>:<seconds> (repeatable) injects a tactical script's Letter_Box_In / Letter_Box_Out
     // in the script service of that tick, for tests of the battle HUD's bands; the battle must run scripts (the AI on).
     std::vector<DebugLetterbox> debug_letterbox;
+    // --eawr-live-story <tick>:<camera|fade|environment>:<arguments separated by commas> (repeatable) injects a tactical script's story
+    // cinematic, fade or environment call the same way (the arguments are the ones the script host stages, e.g.
+    // 30:camera:start,1 or 60:fade:out,2); the battle must run scripts (the AI on).
+    std::vector<DebugStory> debug_story;
     // A saved battle the host already prepared for exactly this `load_path` (the queue step, skirmish_prepare.hpp). The
     // first load stage takes it only for the same mounted content and path; otherwise it prepares the battle itself.
     std::shared_ptr<SavedBattlePreparation> saved_preparation;

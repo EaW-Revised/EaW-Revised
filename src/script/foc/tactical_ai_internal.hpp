@@ -47,6 +47,9 @@ void register_battle_distribution(authoritative::ScriptScheduler& scripts, const
 // The object methods only a battle scheduler binds (tactical_object_bindings.cpp); a galactic scheduler gets none.
 void register_battle_object_bindings(authoritative::ScriptScheduler& scripts, const HostPtr& host,
     std::vector<core::Diagnostic>& errors);
+// The presentation verbs only a battle scheduler binds (tactical_presentation_bindings.cpp): story camera, fades, environment.
+void register_tactical_presentation(authoritative::ScriptScheduler& scripts, const HostPtr& host,
+    std::vector<core::Diagnostic>& errors);
 core::Result<authoritative::TacticalOrder> translate_order(const authoritative::ScriptCommand& command);
 core::Result<void> load_contrast(detail::Host& host, const std::map<std::string, std::string>& modules);
 // The directories load_contrast's scheduler searches.

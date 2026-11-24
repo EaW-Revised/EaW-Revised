@@ -127,6 +127,12 @@ public:
         return session_ ? session_->take_letterbox_requests() : std::vector<platform::LiveLetterboxRequest>{};
     }
 
+    // The story cinematic camera, screen fade and environment requests of the tactical scripts since the last call, in script
+    // order (docs/behaviour/tactical-story-cinematic.md). Local presentation: nothing here is part of the world, replay or a save.
+    [[nodiscard]] std::vector<platform::LiveStoryRequest> take_story_requests() {
+        return session_ ? session_->take_story_requests() : std::vector<platform::LiveStoryRequest>{};
+    }
+
     class Abilities final : public ui::AbilityState, public ui::AbilityCommands {
     public:
         explicit Abilities(LiveSessionView& view) noexcept : view_(view) {}

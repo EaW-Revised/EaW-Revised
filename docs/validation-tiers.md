@@ -81,6 +81,28 @@ The only computed test list left is the GPU suites of a viewer change: the chang
 The classifier only chooses commands. The merge rules stay the same: if it says `full`, run
 everything; if a command fails, the PR is not ready.
 
+## Focused per-PR tests, full set on bundles (owner rule 2026-11-23)
+
+A PR runs only the tests directly relevant to its changed paths; the full suite runs on merge bundles of `main`.
+The choice is data, never a guess: it is the existing selector `tools/test_index/select_tests.py` (path rules in
+`tests/test_labels.txt`, docs/test-selection.md), the one path-to-label map. Its label expression (always with `core`,
+excluding `batch-only`) is the focused selection; `replay76` is set when save, checkpoint, load or replay paths change.
+A gameplay change (the selector prints "FULL SET") and any selector failure mean the full set, with the reason named.
+
+```powershell
+python tools/ci/validation_tier.py --focused [--base origin/main --head HEAD] [--json]
+python tools/offload/windows_build.py --final --ctest-labels '<the printed expression>' --ctest-exclude-labels batch-only
+python tools/offload/receipt_check.py <PR> <full head sha>    # OK (focused: <labels>)
+```
+
+The job summary records `ctest_regex`, `ctest_labels` and `ctest_exclude_labels`. `receipt_check.py` accepts a receipt
+with a selection only when its labels cover `--focused` for that exact head, with no name regex and every stage passed; a selection it
+cannot prove (wrong labels, excluded labels, a second narrowing filter, a gameplay head) fails closed. Receipts without
+a selection (the full set) work as before. `tests/ci/test_focused_tests.py` covers the mapping and the acceptance.
+
+Bundle full set: MM runs the full set on `main` every 6-10 merges or about every 4 hours. Red: the owning lane
+bisects; the bundle's change is reverted after about 2 hours if not fixed.
+
 ## Rebases keep their receipts only when nothing moved under them
 
 A rebase keeps the compiled validation results ("receipts") of the head that was validated only

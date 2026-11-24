@@ -553,6 +553,9 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
     } else if (name == "--eawr-live-ai") {
         if (text != "on" && text != "off") error = "--eawr-live-ai expects on or off";
         options.ai = text == "on";
+    } else if (name == "--eawr-live-view-only") {
+        if (text != "on" && text != "off") error = "--eawr-live-view-only expects on or off";
+        else options.view_only = text == "on";
     } else if (name == "--eawr-live-reveal") {
         if (text != "on" && text != "off") error = "--eawr-live-reveal expects on or off";
         options.reveal = text == "on";
@@ -787,6 +790,26 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
             error = "--eawr-live-letterbox expects <tick>:<in|out>:<seconds> with a tick of 1 or later";
         } else {
             options.debug_letterbox.push_back({*tick, direction == "in", seconds});
+        }
+    } else if (name == "--eawr-live-story") {
+        // <tick>:<camera|fade|environment>:<arguments separated by commas>
+        const auto first = text.find(':');
+        const auto second = first == std::string::npos ? std::string::npos : text.find(':', first + 1);
+        const auto tick = second == std::string::npos ? std::optional<std::uint64_t>{} : parse_u64(std::string_view(text).substr(0, first));
+        const auto kind = second == std::string::npos ? std::string{} : text.substr(first + 1, second - first - 1);
+        if (!tick || *tick == 0 || (kind != "camera" && kind != "fade" && kind != "environment")) {
+            error = "--eawr-live-story expects <tick>:<camera|fade|environment>:<arguments separated by commas> with a tick of 1 or later";
+        } else {
+            live_session::DebugStory call;
+            call.tick = *tick;
+            call.verb = kind == "camera" ? "foc.story_camera" : kind == "fade" ? "foc.story_fade" : "foc.story_environment";
+            for (std::size_t at = second + 1; at <= text.size();) {
+                const auto comma = text.find(',', at);
+                call.arguments.push_back(text.substr(at, comma == std::string::npos ? std::string::npos : comma - at));
+                if (comma == std::string::npos) break;
+                at = comma + 1;
+            }
+            options.debug_story.push_back(std::move(call));
         }
     } else if (name == "--eawr-live-load") {
         options.load_path = ViewerPath{text}.native();

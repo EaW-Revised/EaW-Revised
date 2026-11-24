@@ -899,6 +899,17 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         bands->hide();
         state.movie_bands = bands;
     }
+    {
+        // TSC-11: a tactical script's screen fade, one full-screen black layer above the bands; clear (hidden) until a call.
+        auto* fade = memnew(ColorRect);
+        fade->set_name("ScriptScreenFade");
+        fade->set_color(Color(0, 0, 0, 1));
+        fade->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        layer->add_child(fade);
+        fade->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+        fade->hide();
+        state.fade_rect = fade;
+    }
     state.hud->setup(std::move(setup), state.options_button);
 
     build_unit_cards(state, filesystem, catalog, hud);

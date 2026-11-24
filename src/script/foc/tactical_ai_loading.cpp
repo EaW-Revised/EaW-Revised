@@ -184,6 +184,7 @@ core::Result<std::vector<ai::PlanDef>> load_plans(const HostPtr& host, const std
     register_globals(scripts.value(), host, errors);
     register_methods(scripts.value(), host, errors);
     register_battle_object_bindings(scripts.value(), host, errors);
+    register_tactical_presentation(scripts.value(), host, errors);
     if (auto added = scripts.value().register_binding("_EAWR_Plan", [loaded](BindingContext& context, const ValueList& arguments) {
             (*loaded)[context.instance()] = arguments;
             return none();
@@ -478,6 +479,7 @@ core::Result<std::vector<PlanInspection>> inspect_plans(const AiSetup& setup,
     register_globals(scripts.value(), host, errors);
     register_methods(scripts.value(), host, errors);
     register_battle_object_bindings(scripts.value(), host, errors);
+    register_tactical_presentation(scripts.value(), host, errors);
     if (!errors.empty()) return InspectResult::failure(errors.front());
     std::vector<PlanInspection> plans;
     std::uint64_t instance = 1;

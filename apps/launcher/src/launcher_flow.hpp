@@ -16,6 +16,10 @@ inline constexpr int kExitError = 2;
 inline constexpr int kExitCancelled = 3;
 inline constexpr int kExitGpuReset = 74; // Viewer/launcher contract: device loss or render-stall watchdog.
 inline constexpr int kExitForceClosed = 75;
+// The mod manager (launcher window) was ended by the watchdog while it was frozen: the player chose Force close on
+// the prompt (76), or it stayed frozen after the prompt and was ended automatically (77). EAWR starts it again.
+inline constexpr int kExitLauncherForceClosed = 76;
+inline constexpr int kExitLauncherAutoEnded = 77;
 // A Godot exit with a non-zero code inside this window gets an error dialog.
 inline constexpr double kEarlyExitSeconds = 60.0;
 inline constexpr const char* kGodotExecutableName = "Godot_v4.7.2-stable_win64.exe";

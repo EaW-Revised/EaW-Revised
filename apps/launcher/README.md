@@ -213,3 +213,17 @@ is lower, owner decision: 4) get a folder of their own and a redirected `APPDATA
 Tests: `launcher_core_contracts` (id parsing, paths, ports, environment block, seeding, claims including stale and
 PID reuse, concurrent claims, golden flag set, flow with a fake runner) and `launcher_smoke` (real EAWR.exe against
 `launcher_fake_godot`: APPDATA and flags of instance 2, three concurrent `--instance auto`, a killed instance).
+
+## A frozen mod manager (watchdog)
+
+The mod manager is a Godot window that draws on the graphics card. After a graphics driver reset it can wait on the driver
+for good, so its window stops answering. EAWR.exe watches it from a thread of its own (a plain Win32 window, no GPU, not
+blocked by anything on the launch loop): when the manager's window has not answered a no-op message for 15 s, "EAWR Mods
+is busy" comes up as a topmost window with a taskbar button that flashes. It takes the focus only when no game runs (a
+running game, fullscreen or not, keeps its focus; the button flashes instead). **Force close** ends only the mod manager's
+job object (the manager and its helpers, never a game) and EAWR starts the manager again. A manager that is still frozen
+60 s after the prompt is ended the same way without asking. The launcher log says which one happened and the exit code:
+76 for Force close, 77 for the automatic end. The whole-session Force close request of the manager's own running panel
+(`force-close.json`) is unchanged and still ends everything.
+
+Test hooks: `EAWR_WATCHDOG_PROMPT_AFTER_MS` and `EAWR_WATCHDOG_AUTO_END_AFTER_PROMPT_MS` shorten the two waits.

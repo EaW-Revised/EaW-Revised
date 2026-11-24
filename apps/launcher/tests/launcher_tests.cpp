@@ -406,6 +406,50 @@ void test_hung_prompt_ignores_a_gap_in_the_samples() {
     CHECK(observe_hang(stuck, true, 4000).hung_ms == 0);
 }
 
+// A launcher still hung kHungAutoEndAfterPromptMs after the prompt is ended automatically: never earlier, never
+// while it answers, and the wait counts from the start of the continuous hang (the sample gap rule still applies).
+void test_hung_launcher_is_ended_automatically_after_the_prompt() {
+    HangTracker tracker;
+    std::uint64_t now = 1000000;
+    const std::uint64_t first_seen = now;
+    bool early_end = false, ended = false;
+    for (; now <= first_seen + kHungPromptAfterMs + kHungAutoEndAfterPromptMs + 5000; now += 1000) {
+        const auto verdict = observe_hang(tracker, true, now);
+        const std::uint64_t hung = now - first_seen;
+        if (hung < kHungPromptAfterMs + kHungAutoEndAfterPromptMs && verdict.auto_end) early_end = true;
+        if (hung >= kHungPromptAfterMs + kHungAutoEndAfterPromptMs) {
+            CHECK(verdict.auto_end && verdict.prompt);
+            ended = true;
+        }
+        CHECK(!verdict.auto_end || verdict.prompt); // No automatic end without the prompt having come first.
+    }
+    CHECK(ended && !early_end);
+    // It answers again: no automatic end, and the next stall starts from zero.
+    CHECK(!observe_hang(tracker, false, now).auto_end);
+    now += 1000;
+    CHECK(!observe_hang(tracker, true, now).auto_end);
+    // A launcher that answers every few seconds is never ended: each answer restarts the hang.
+    HangTracker flickering;
+    now = 2000000;
+    for (int cycle = 0; cycle < 40; ++cycle) {
+        for (int second = 0; second < 10; ++second, now += 1000) CHECK(!observe_hang(flickering, true, now).auto_end);
+        CHECK(!observe_hang(flickering, false, now).auto_end);
+        now += 1000;
+    }
+    // The waits can be shortened (the smoke tests do) and measure the same way.
+    HangTracker shortened;
+    CHECK(!observe_hang(shortened, true, 1000, 2000, 3000).auto_end);
+    CHECK(!observe_hang(shortened, true, 5000, 2000, 3000).auto_end); // 4 s hung: prompt (2 s) but not yet 2 s + 3 s
+    CHECK(!observe_hang(shortened, true, 5900, 2000, 3000).auto_end);
+    CHECK(observe_hang(shortened, true, 6000, 2000, 3000).auto_end);
+}
+
+// With a game running the prompt only shows and flashes; with none it is activated.
+void test_prompt_leaves_focus_to_running_game() {
+    CHECK(choose_prompt_show(true) == PromptShow::flash_only);
+    CHECK(choose_prompt_show(false) == PromptShow::activate);
+}
+
 // The probe timing a report reads: how long the last probe took and how long since a probe last got an answer.
 void test_probe_timing_separates_a_stall_from_a_false_flag() {
     ProbeTiming timing;
@@ -1047,6 +1091,38 @@ void test_flow_stay_open_failures() {
         CHECK_CONTAINS(text, R"("status":"failed")");
         CHECK(!f.ui.errors.empty());
     }
+}
+
+// Ending a frozen mod manager is not an error: EAWR starts it again, bounded, and never asks the player.
+void test_flow_restarts_a_manager_ended_by_the_watchdog() {
+    for (const int code : {kExitLauncherForceClosed, kExitLauncherAutoEnded}) {
+        FlowFixture f;
+        Options options = f.options();
+        options.game_root = f.game;
+        options.mods = true;
+        write_file(f.package / "launcher" / "project.godot", "config_version=5\n");
+        write_file(f.package / "eawr_mods_service.exe", "service stand-in");
+        f.runner.result.exit_code = static_cast<unsigned>(code);
+        f.runner.result.seconds = 120;
+        f.runner.on_run = [&] { if (f.runner.calls >= 2) f.runner.result.exit_code = 0; };
+        CHECK(f.run(options) == kExitOk);
+        CHECK(f.runner.calls == 2);                 // started again after the watchdog ended the first one
+        CHECK(f.ui.errors.empty());                 // and nothing was shown to the player
+        CHECK_CONTAINS(f.log_text(), "ended by the watchdog");
+        CHECK_CONTAINS(f.log_text(), std::string("exit code ") + std::to_string(code));
+    }
+    // A manager that keeps being ended right after it starts is a restart loop and stops (bounded).
+    FlowFixture loop;
+    Options options = loop.options();
+    options.game_root = loop.game;
+    options.mods = true;
+    write_file(loop.package / "launcher" / "project.godot", "config_version=5\n");
+    write_file(loop.package / "eawr_mods_service.exe", "service stand-in");
+    loop.runner.result.exit_code = static_cast<unsigned>(kExitLauncherAutoEnded);
+    loop.runner.result.seconds = 1;
+    CHECK(loop.run(options) == kExitError);
+    CHECK(loop.runner.calls == 17);
+    CHECK_CONTAINS(loop.ui.errors.back(), "stopped restarting");
 }
 
 void test_gpu_reset_and_update_handoff() {
@@ -2317,6 +2393,9 @@ int main(int argc, char** argv) {
     test_state();
     test_hung_prompt_waits_for_a_sustained_hang();
     test_hung_prompt_ignores_a_gap_in_the_samples();
+    test_hung_launcher_is_ended_automatically_after_the_prompt();
+    test_prompt_leaves_focus_to_running_game();
+    test_flow_restarts_a_manager_ended_by_the_watchdog();
     test_hung_prompt_follows_the_probe_not_the_os_flag();
     test_probe_timing_separates_a_stall_from_a_false_flag();
     test_probe_summary_counts_only_real_answers();

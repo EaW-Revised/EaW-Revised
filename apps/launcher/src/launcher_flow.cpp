@@ -691,6 +691,18 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
             return context.fail("EAWR could not start the Godot runtime " + path_to_utf8(godot) + ": " + child.error
                                 + ". Security software or Windows application control may have blocked it.", godot_log);
         }
+        // The watchdog ended a frozen mod manager (the player chose Force close, or it stayed frozen after the
+        // prompt): not an error. Start the manager again; a game that ran meanwhile has already ended with its own job.
+        if (manager && (child.exit_code == static_cast<unsigned>(kExitLauncherForceClosed)
+                        || child.exit_code == static_cast<unsigned>(kExitLauncherAutoEnded))) {
+            log.line(std::string("the mod manager was ended by the watchdog after it stopped answering (")
+                     + (child.exit_code == static_cast<unsigned>(kExitLauncherAutoEnded) ? "automatically" : "Force close")
+                     + ", exit code " + std::to_string(child.exit_code) + ") after " + std::to_string(child.seconds)
+                     + " s; starting it again");
+            if (child.seconds >= kEarlyExitSeconds) rapid_restarts = 0; // A manager that ran a while is not a restart loop.
+            if (++rapid_restarts > 16) return context.fail("EAWR stopped restarting the mod manager. Start EAWR Mods again to continue.");
+            continue;
+        }
         // Consume before interpreting the exit status, including requests left by a failed child.
         const auto action = read_loop_json(next_action);
         error.clear();

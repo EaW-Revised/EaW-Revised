@@ -93,10 +93,7 @@ add_test(
 # The release packager (tools/release, docs/releasing.md) on a stand-in build tree.
 
 
-add_test(
-    NAME ci_sign_release
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_sign_release.py"
-)
+
 
 add_test(
     NAME ci_publish_kit

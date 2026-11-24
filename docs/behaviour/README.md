@@ -35,6 +35,7 @@ Per-document Source tags map as follows: “data” is Confirmed for the value i
 - [Loader numeric strictness, galactic tags](loader-strictness-galactic.md): retail parse rules per parser type and where our GC loaders reject values retail accepts (legacy EAWR-4994)
 - [Loader numeric strictness, land tags](loader-strictness-land.md): how the land loader and content adapter read and apply every value retail accepts (legacy EAWR-4994)
 - [TED environments](p1-effective-environment.md) and [terrain-water selection](terrainwater-technique-selection.md)
+- [Tactical story cinematic camera, screen fades and environment calls](tactical-story-cinematic.md): the Lua key calls, the return to the player's camera, the fades and the environment calls of a battle script, all presentation only
 - [Tactical camera input](tactical-camera-input.md) and [battle selection, orders and the tactical overview](foc-battle-selection.md) (battle camera, selection and orders)
 - [Battle UI in the world: selection circles, bars, squadron icons, hardpoint reticles](foc-battle-world-ui.md) (battle world UI and squadron selection)
 - [Skirmish battle loading screen](loading-screen.md): the load dialog's content from the game data, the bar that follows the battle's preparation and the Begin that starts it

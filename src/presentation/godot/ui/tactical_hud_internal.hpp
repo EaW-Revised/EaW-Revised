@@ -15,6 +15,7 @@
 #include "eawr/data/ui/shell_anchors.hpp"
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/ui/movie_letterbox.hpp"
+#include "eawr/presentation/ui/screen_fade.hpp"
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
 #include "eawr/presentation/ui/project_hud.hpp"
@@ -530,6 +531,9 @@ struct TacticalHud::State final {
     EawrHudButton* beacon_button{};
     std::function<void()> beacon_handler;
     Control* movie_bands{};
+    ColorRect* fade_rect{};          // TSC-11: a tactical script's screen fade
+    model::ScreenFade script_fade;
+    bool story_gui_hidden{};         // TSC-01: a story cinematic is running
     std::optional<float> movie_height;
     std::function<void()> movie_handler;
     std::function<void()> options_handler;

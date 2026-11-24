@@ -9,6 +9,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cfenv>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -230,6 +233,43 @@ void fixture_contracts() {
     expect(bar && bar->integer(Field::max_bar_level) == 10 && bar->flag(Field::smooth_bar), "Bar fields");
 }
 
+void numeric_prefix_contracts() {
+    test::ui::TempTree tree("command-bar-numeric-prefix");
+    test::ui::write_text(tree.root / "data/xml/CommandBarComponentFiles.xml",
+                         "<CommandBar_Component_Files><File>Numbers.xml</File></CommandBar_Component_Files>");
+    test::ui::write_text(tree.root / "data/xml/Numbers.xml", R"(
+<CommandBarComponents>
+  <CommandBarComponent Name="decimal"><Type>Button</Type><Scale>0.1</Scale></CommandBarComponent>
+  <CommandBarComponent Name="rounded"><Type>Button</Type><Scale>+1.00000011920928955078125</Scale></CommandBarComponent>
+  <CommandBarComponent Name="subnormal"><Type>Button</Type><Scale>1e-45</Scale></CommandBarComponent>
+  <CommandBarComponent Name="negativezero"><Type>Button</Type><Scale>-0</Scale></CommandBarComponent>
+  <CommandBarComponent Name="hexprefix"><Type>Button</Type><Scale>0x1p2</Scale></CommandBarComponent>
+  <CommandBarComponent Name="exponent"><Type>Button</Type><Scale>1e+</Scale></CommandBarComponent>
+</CommandBarComponents>)");
+    auto filesystem = mount(tree.root);
+    if (!filesystem) return;
+    const int previous_rounding = std::fegetround();
+    const bool changed_rounding = previous_rounding >= 0 && std::fesetround(FE_UPWARD) == 0;
+    auto loaded = data::ui::load_command_bar(*filesystem);
+    if (changed_rounding) {
+        expect(std::fegetround() == FE_UPWARD, "numeric parsing preserves caller rounding mode");
+        expect(std::fesetround(previous_rounding) == 0, "rounding mode restored after fixture");
+    }
+    expect(static_cast<bool>(loaded), "numeric prefix fixture loads");
+    if (!loaded) return;
+    const auto check = [&](const char* name, const std::uint32_t bits) {
+        const auto* component = loaded.value().catalog.find(name);
+        const auto value = component ? component->number(Field::scale) : std::nullopt;
+        expect(value && std::bit_cast<std::uint32_t>(*value) == bits, std::string(name) + " float bits");
+    };
+    check("decimal", 0x3dcccccdU);
+    check("rounded", 0x3f800001U);
+    check("subnormal", 0x00000001U);
+    check("negativezero", 0x80000000U);
+    check("hexprefix", 0x00000000U);
+    check("exponent", 0x3f800000U);
+}
+
 void failure_contracts() {
     {
         test::ui::TempTree tree("command-bar-empty");
@@ -331,6 +371,7 @@ void command_bar_contracts() {
     schema_contracts();
     alt_contracts();
     fixture_contracts();
+    numeric_prefix_contracts();
     failure_contracts();
     command_bar_corpus();
 }

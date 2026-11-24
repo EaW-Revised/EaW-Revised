@@ -480,6 +480,7 @@ bool MapMode::State::finalize_camera() {
     state.update_tsw_cinematic();
     if (state.retreat_cinematic.active) return state.apply_retreat_pose();
     if (state.tsw_cinematic.active) return state.apply_tsw_pose();
+    if (state.story_cinematic.camera.active()) return state.apply_story_pose();
     if (state.arrival_cinematic.active) return state.apply_arrival_pose();
     if (state.space->live_camera_movie()) return state.apply_movie_pose();
     return state.update_follow_camera(std::nullopt);
@@ -995,6 +996,10 @@ std::optional<int> MapMode::process(const double delta) {
     if (state.hud && state.live_session)
         for (const auto& request : state.live_session->take_letterbox_requests()) state.hud->set_script_letterbox(request.in, request.seconds);
     if (state.hud) state.hud->advance_movie_bands(delta);
+    // TSC-01..TSC-14: a tactical script's story cinematic camera, fades and environment calls, in script order, then this frame's
+    // fade step (render time).
+    state.apply_story_requests();
+    if (state.hud) state.hud->advance_script_fade(delta);
     if (state.space) {
         if (!state.finalize_camera_installed) {
             state.finalize_camera_installed = state.space->set_live_finalize_camera(

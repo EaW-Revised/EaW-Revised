@@ -2380,6 +2380,7 @@ int main(int argc, char** argv) {
     proximity_contracts();
     reveal_all_contracts();
     letter_box_contracts();
+    story_presentation_contracts();
     battle_story_contracts();
     battle_planet_family_contracts();
     economy_inputs();

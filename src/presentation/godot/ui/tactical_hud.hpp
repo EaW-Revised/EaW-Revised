@@ -292,6 +292,13 @@ public:
     void advance_movie_bands(double delta);
     // legacy #6634 (HCB-75): Letter_Box_In (on) / Letter_Box_Out (off) of a tactical script over `seconds` (0 = at once).
     void set_script_letterbox(bool on, double seconds);
+    // TSC-11: a tactical script's Fade_Screen_Out / Fade_Screen_In (over `seconds`), Fade_On / Fade_Off (at once). `op` is "out", "in",
+    // "on" or "off"; anything else is ignored. advance_script_fade is the per-frame step in render time.
+    void set_script_fade(std::string_view op, double seconds);
+    // TSC-01: a running story cinematic hides the game GUI (command bar, radar, overlay) without raising the letterbox bands, which
+    // the script asks for itself (Letter_Box_In).
+    void set_story_cinematic(bool on);
+    void advance_script_fade(double delta);
     void set_order_mode(std::string_view active);
     void set_order_shortcut(std::string_view order, std::string_view caption);
     void set_special_weapon_handler(std::function<void()> handler);

@@ -38,6 +38,7 @@ set(EAWR_PRESENTATION_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/camera/input.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/camera/overview.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/camera/retreat_camera.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/camera/story_cinematic.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/fog/fog.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lighting/lighting.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lighting/scene_bloom.cpp"

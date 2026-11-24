@@ -121,22 +121,24 @@ public:
         }
         CloseHandle(process.hThread);
         // Only the manager (the one child run with a poll) is watched for a not-responding window; a game that
-        // blocks its message loop while it loads must never raise the Force close prompt.
+        // blocks its message loop while it loads must never raise the Force close prompt. The watchdog runs on its
+        // own thread: it ends the manager's job when the player picks Force close (or after it stayed frozen), and
+        // a running game has a job of its own that this never touches.
         active_.push_back({process.hProcess, job.handle, process.dwProcessId, static_cast<bool>(poll)});
+        if (poll) watchdog_.watch_launcher(process.dwProcessId, job.handle);
+        else watchdog_.set_game_running(true);
         while (WaitForSingleObject(process.hProcess, 100) == WAIT_TIMEOUT) {
             // Closing the manager window leaves a running game alone; its trees end when the game does, when
-            // EAWR itself dies (kill-on-close) or when the user picks Force close.
-            std::vector<DWORD> pids;
-            for (const auto& active : active_) {
-                if (active.watched) pids.push_back(active.pid);
-            }
-            if (watchdog_.tick(pids)) {
+            // EAWR itself dies (kill-on-close) or when the session owner asks for the whole session to end.
+            if (watchdog_.session_close_requested()) {
                 session_closed_ = true;
                 for (const auto& active : active_) TerminateJobObject(active.job, kExitForceClosed);
             }
             if (session_closed_) continue;
             if (poll) poll();
         }
+        if (poll) watchdog_.unwatch_launcher();
+        else watchdog_.set_game_running(false);
         active_.pop_back();
         DWORD code = 0;
         if (!GetExitCodeProcess(process.hProcess, &code)) code = 1;

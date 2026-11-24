@@ -2,6 +2,7 @@
 #include "tactical_ai_world.hpp"
 #include "tactical_ai_internal.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/platform/story_request.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -489,6 +491,197 @@ void letter_box_contracts() {
         expect(faulty->diagnostics >= 1 && faulty->fault.find("Letter_Box") != std::string::npos,
             "HCB-75: a faulty call is a named script fault (" + bad + ")");
         expect(faulty->hashes.size() == 16, "HCB-75: a faulty call never aborts the match (" + bad + ")");
+    }
+}
+
+// TSC-01..TSC-14 (docs/behaviour/tactical-story-cinematic.md): the story cinematic camera, the screen fades and the environment calls
+// of a battle script are presentation requests. One scene calls each of the thirteen functions; the requests reach the tick's
+// presentation list in script order (never the world's input, the replay or a save), the statement after each call runs, and the
+// world hashes equal those of a run whose scripts make no call, at 1, 2, 4 and 8 workers. A call with the wrong arguments is a
+// named script fault of that thread; a key whose first value is no position is a warning and the thread goes on.
+void story_presentation_contracts() {
+    namespace t = eawr::sim::tactical;
+    namespace m = eawr::sim::math;
+    namespace sp = eawr::script::authoritative;
+    const auto fixed = [](std::int64_t value) { return m::Fixed::from_integer(value).value(); };
+    {
+        auto host = ai::make_tactical_host();
+        host->ai_world = std::make_shared<ModeWorld>();
+        auth::ModuleManifest manifest;
+        expect(manifest.add("GALACTIC_TSC.LUA", "function Check() assert(Start_Cinematic_Camera == nil and End_Cinematic_Camera == nil and Set_Cinematic_Camera_Key == nil and Set_Cinematic_Target_Key == nil and Transition_Cinematic_Camera_Key == nil and Transition_Cinematic_Target_Key == nil and Transition_To_Tactical_Camera == nil and Fade_On == nil and Fade_Off == nil and Fade_Screen_In == nil and Fade_Screen_Out == nil and Set_New_Environment == nil and Set_Cinematic_Environment == nil) end").has_value(), "TSC: galactic module loads");
+        auth::SessionConfig config;
+        config.tick_duration = {1, 30};
+        auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+        expect(scripts.has_value(), "TSC: galactic scheduler starts");
+        if (scripts) {
+            std::vector<eawr::core::Diagnostic> errors;
+            foc::tactical_ai_detail::register_tactical_presentation(scripts.value(), host, errors);
+            expect(errors.empty() && scripts.value().create_instance(1, "GALACTIC_TSC.LUA").has_value(), "TSC: galactic registration succeeds");
+            auth::ScriptEvent event;
+            event.key = {1, auth::first_simulation_producer, 1, 0};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Check";
+            expect(scripts.value().submit_event(std::move(event)).has_value(), "TSC: galactic check queues");
+            const auto result = scripts.value().service(eawr::sim::InlineExecutor{});
+            expect(result.has_value() && result.value().diagnostics.empty(), "TSC: galactic mode exposes no story verbs");
+        }
+    }
+    t::TacticalSetup setup;
+    setup.players = {{1, 1, 100, 1}, {2, 2, 200, 1}};
+    setup.units = {{10, 100, 1, {fixed(50), fixed(-50), {}}}, {20, 200, 2, {fixed(450), fixed(-450), {}}}};
+    const t::FogRules rules{{}, {}, fixed(100), 6, 6};
+    struct Run {
+        std::vector<std::string> hashes;
+        std::vector<std::pair<std::uint64_t, eawr::platform::StoryRequest>> requests;
+        std::size_t recorded{}, dropped{}, diagnostics{}, other_presentation{};
+        std::string fault;
+        std::vector<int> marks;
+    };
+    const auto run = [&](const std::size_t workers, const bool calls, const std::string& bad) -> std::optional<Run> {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto made = t::TacticalSession::create(setup, {}, {}, {}, rules);
+        if (!made) { expect(false, "TSC: tactical world starts"); return std::nullopt; }
+        auto host = ai::make_tactical_host();
+        host->world = &made.value();
+        host->view = foc::detail::build_view(made.value(), *made.value().snapshot());
+        auth::ModuleManifest manifest;
+        // Mark(n) follows every call; the run without calls makes the same Mark calls.
+        const std::string scene = calls
+            ? "function Scene(step, unit)\n"
+              " if step == 1 then Start_Cinematic_Camera(false) Mark(1)\n"
+              "  Set_Cinematic_Camera_Key({100, 200, 300}, 1940, 0, 91.5, 1, 0, 0, 0) Mark(2)\n"
+              "  Set_Cinematic_Target_Key(unit, 0, 0, 0, 0, unit, 1, 1) Mark(3)\n"
+              " elseif step == 2 then Transition_Cinematic_Camera_Key({0, 0, 0}, 6, 500, 10, 97, 1, 0, 0, 0) Mark(4)\n"
+              "  Transition_Cinematic_Target_Key(unit, 4, 1, 2, 3, 0, 0, 0, 0) Mark(5)\n"
+              " elseif step == 3 then Transition_To_Tactical_Camera(2) Mark(6) End_Cinematic_Camera() Mark(7)\n"
+              " elseif step == 4 then Fade_Screen_Out(0.5) Mark(8) Fade_Screen_In(1.25) Mark(9) Fade_On() Mark(10) Fade_Off() Mark(11)\n"
+              " elseif step == 5 then Set_New_Environment(1) Mark(12) Set_Cinematic_Environment(true) Mark(13)\n"
+              "  Set_Cinematic_Environment(false) Mark(14) Set_New_Environment(2.9) Mark(15) end\nend\n"
+            : "function Scene(step, unit)\n"
+              " if step == 1 then Mark(1) Mark(2) Mark(3) elseif step == 2 then Mark(4) Mark(5)\n"
+              " elseif step == 3 then Mark(6) Mark(7) elseif step == 4 then Mark(8) Mark(9) Mark(10) Mark(11)\n"
+              " elseif step == 5 then Mark(12) Mark(13) Mark(14) Mark(15) end\nend\n";
+        expect(manifest.add("TSC.LUA", scene + "function Bad() " + bad + " Mark(99) end\n").has_value(), "TSC: story module loads");
+        auth::SessionConfig config;
+        config.tick_duration = {1, 30};
+        auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+        if (!scripts) { expect(false, "TSC: scheduler starts"); return std::nullopt; }
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::tactical_ai_detail::register_globals(scripts.value(), host, errors);
+        foc::tactical_ai_detail::register_tactical_presentation(scripts.value(), host, errors);
+        Run out;
+        expect(scripts.value().register_binding("Mark", [&out](auth::BindingContext&, const auth::ValueList& args) -> eawr::core::Result<auth::ValueList> {
+            const auto* number = args.size() == 1 ? std::get_if<eawr::script::numeric::LuaNumber>(&args[0].data) : nullptr;
+            if (number != nullptr) out.marks.push_back(static_cast<int>(*number));
+            return eawr::core::Result<auth::ValueList>::success({});
+        }).has_value(), "TSC: the Mark test binding registers");
+        expect(errors.empty() && scripts.value().create_instance(1, "TSC.LUA").has_value(), "TSC: bindings register");
+        std::uint64_t tick_of_step = 2;
+        for (const int step : {1, 2, 3, 4, 5}) {
+            auth::ScriptEvent event;
+            event.key = {tick_of_step, auth::first_simulation_producer, 1, tick_of_step};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Scene";
+            event.arguments = {auth::Value::number(eawr::script::numeric::LuaNumber(static_cast<std::int64_t>(step))),
+                auth::Value{auth::Handle{foc::handle_game_object, 10}}};
+            expect(scripts.value().submit_event(std::move(event)).has_value(), "TSC: scene event queues");
+            tick_of_step += 3;
+        }
+        if (!bad.empty()) {
+            auth::ScriptEvent event;
+            event.key = {20, auth::first_simulation_producer, 1, 20};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Bad";
+            expect(scripts.value().submit_event(std::move(event)).has_value(), "TSC: bad call queues");
+        }
+        auto linked = auth::ScriptedTacticalSession::create(std::move(made).value(), std::move(scripts).value());
+        if (!linked) { expect(false, "TSC: scripted world links"); return std::nullopt; }
+        auto& session = linked.value();
+        for (const auto verb : {sp::verb_story_camera, sp::verb_story_fade, sp::verb_story_environment})
+            expect(session.register_presentation_verb(verb).has_value(), "TSC: the story verbs register as presentation");
+        for (std::uint64_t tick = 0; tick < 24; ++tick) {
+            host->world = &session.world();
+            host->view = foc::detail::build_view(session.world(), *session.world().snapshot());
+            const auto stepped = session.step(executor);
+            if (!stepped) { expect(false, "TSC: story world steps"); return std::nullopt; }
+            out.hashes.push_back(stepped.value().world.state_sha256);
+            for (const auto& input : stepped.value().script_input) if (!input.submitted) ++out.dropped;
+            out.diagnostics += stepped.value().scripts.diagnostics.size();
+            for (const auto& diagnostic : stepped.value().scripts.diagnostics) out.fault += diagnostic.message + "|";
+            for (const auto& command : stepped.value().presentation) {
+                const auto request = eawr::platform::parse_story_command(command);
+                if (!request) { ++out.other_presentation; continue; }
+                out.requests.push_back({stepped.value().world.completed_tick, *request});
+            }
+            expect(session.pending_script_commands() == 0, "TSC: a presentation request never becomes next tick's world input");
+        }
+        out.recorded = session.record().commands.size();
+        return out;
+    };
+    const auto close = [](const double a, const double b) { return std::abs(a - b) < 1e-4; };
+    using K = eawr::platform::StoryRequestKind;
+    std::optional<Run> baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const auto with = run(workers, true, "");
+        const auto without = run(workers, false, "");
+        if (!with || !without) return;
+        std::vector<int> expected_marks;
+        for (int i = 1; i <= 15; ++i) expected_marks.push_back(i);
+        expect(with->marks == expected_marks, "TSC: the statement after each call runs (no call ends the script)");
+        expect(without->marks == expected_marks, "TSC: the run without calls makes the same Mark calls");
+        expect(with->requests.size() == 15, "TSC: fifteen calls make fifteen requests");
+        if (with->requests.size() == 15) {
+            const auto& r = with->requests;
+            expect(r[0].second.kind == K::camera_start && !r[0].second.flag, "TSC-01: Start_Cinematic_Camera(false) starts without the story music");
+            const auto& a = r[1].second;
+            expect(a.kind == K::camera_key && !a.transition && close(a.position[0], 100) && close(a.position[1], 200) && close(a.position[2], 300)
+                && close(a.distance, 1940) && close(a.pitch, 0) && close(a.yaw, 91.5) && a.euler && !a.object && !a.use_object_rotation && !a.bounds_center,
+                "TSC-02: Set_Cinematic_Camera_Key carries the position and the distance, pitch, yaw and euler flag");
+            const auto& b = r[2].second;
+            expect(b.kind == K::target_key && !b.transition && close(b.position[0], 50) && close(b.position[1], -50) && !b.euler && b.object == 10U
+                && b.use_object_rotation && b.bounds_center,
+                "TSC-02: an object as the position gives its position; an object argument attaches, the two flags are read");
+            const auto& c = r[3].second;
+            expect(c.kind == K::camera_key && c.transition && close(c.seconds, 6) && close(c.distance, 500) && close(c.pitch, 10) && close(c.yaw, 97) && c.euler,
+                "TSC-03: Transition_Cinematic_Camera_Key reads its time before the offset");
+            const auto& d = r[4].second;
+            expect(d.kind == K::target_key && d.transition && close(d.seconds, 4) && close(d.distance, 1) && close(d.pitch, 2) && close(d.yaw, 3) && !d.euler,
+                "TSC-03: Transition_Cinematic_Target_Key likewise");
+            expect(r[5].second.kind == K::to_tactical && close(r[5].second.seconds, 2), "TSC-04: Transition_To_Tactical_Camera(2)");
+            expect(r[6].second.kind == K::camera_end, "TSC-01: End_Cinematic_Camera");
+            expect(r[7].second.kind == K::fade_screen_out && close(r[7].second.seconds, 0.5), "TSC-11: Fade_Screen_Out(0.5)");
+            expect(r[8].second.kind == K::fade_screen_in && close(r[8].second.seconds, 1.25), "TSC-11: Fade_Screen_In(1.25)");
+            expect(r[9].second.kind == K::fade_on && r[10].second.kind == K::fade_off, "TSC-11: Fade_On and Fade_Off");
+            expect(r[11].second.kind == K::environment_index && r[11].second.index == 1, "TSC-12: Set_New_Environment(1)");
+            expect(r[12].second.kind == K::environment_cinematic && r[12].second.flag && r[13].second.kind == K::environment_cinematic && !r[13].second.flag,
+                "TSC-12: Set_Cinematic_Environment(true / false)");
+            expect(r[14].second.kind == K::environment_index && r[14].second.index == 2, "TSC-12: Set_New_Environment(2.9) truncates to 2");
+            expect(r[0].first == r[1].first && r[1].first == r[2].first && r[2].first < r[3].first, "TSC: requests come in tick order, one script's calls in call order");
+        }
+        expect(with->other_presentation == 0, "TSC: the presentation list holds only story requests here");
+        expect(with->recorded == 0 && without->recorded == 0, "TSC: the replay records no story command");
+        expect(with->dropped == 0 && with->diagnostics == 0, "TSC: the calls are neither dropped as unroutable nor a fault");
+        expect(without->requests.empty(), "TSC: no call, no request");
+        expect(with->hashes == without->hashes, "TSC: the story calls move no world hash");
+        if (!baseline) baseline = with;
+        else expect(with->hashes == baseline->hashes && with->requests == baseline->requests, "TSC: equal at 1/2/4/8 workers");
+    }
+    // Wrong arguments are a named script fault of that thread: no request, the valid calls run on, the match goes on.
+    for (const std::string bad : {"Set_Cinematic_Camera_Key({1,2,3}, 1)", "Transition_Cinematic_Camera_Key({1,2,3}, 1, 2, 3, 4, 5, 6, 7)",
+             "Set_Cinematic_Target_Key({1,2,3}, 'a', 0, 0, 0, 0, 0, 0)", "Transition_Cinematic_Target_Key({1,2,3}, nil, 0, 0, 0, 0, 0, 0, 0)",
+             "Transition_To_Tactical_Camera()", "Transition_To_Tactical_Camera('x')", "Fade_Screen_In()", "Fade_Screen_Out('x')",
+             "Start_Cinematic_Camera(5)", "Set_New_Environment()", "Set_New_Environment(true)", "Set_Cinematic_Environment(1)",
+             "Set_Cinematic_Environment()"}) {
+        const auto faulty = run(1, true, bad);
+        if (!faulty) return;
+        expect(faulty->requests.size() == 15, "TSC: a faulty call makes no request (" + bad + ")");
+        expect(faulty->marks.size() == 15, "TSC: the faulty call ends only its own thread (" + bad + ")");
+        expect(faulty->diagnostics >= 1, "TSC: a faulty call is a named script fault (" + bad + ")");
+        expect(faulty->hashes.size() == 24, "TSC: a faulty call never aborts the match (" + bad + ")");
+    }
+    // A key whose first value is no position is a warning, not a fault: the thread goes on, no request is made.
+    for (const std::string warned : {"Set_Cinematic_Camera_Key('nope', 1, 2, 3, 1, 0, 0, 0)", "Transition_Cinematic_Target_Key(nil, 1, 2, 3, 4, 0, 0, 0, 0)"}) {
+        const auto result = run(1, true, warned);
+        if (!result) return;
+        expect(result->requests.size() == 15, "TSC: a key without a position makes no request (" + warned + ")");
+        expect(result->marks.size() == 16 && result->marks.back() == 99, "TSC: and the thread goes on past it (" + warned + ")");
     }
 }
 
