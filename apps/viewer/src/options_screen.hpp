@@ -90,12 +90,18 @@ public:
 
     // Loads the dialog catalogue, skin, fonts and text and the settings. False with failure() set
     // when the data could not be read; the screen then cannot be shown.
+    enum class BuildProgress { pending, ready, failed };
+    void begin_build(Options options);
+    [[nodiscard]] BuildProgress advance_build();
     [[nodiscard]] bool build(Options options);
+    [[nodiscard]] bool built() const noexcept { return built_; }
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     [[nodiscard]] const std::vector<std::string>& notes() const noexcept { return notes_; }
 
     // Adds the screen to `parent` (a CanvasLayer of its own, above the world and the HUD) and opens
     // `start`. Emits `closed` once the player leaves the hub; the screen is then out of the tree.
+    [[nodiscard]] bool prewarm_theme(godot::Node& parent, bool finish = true);
+    void set_game_actions(Options options);
     void show(godot::Node& parent, Page start = Page::hub);
     [[nodiscard]] bool shown() const noexcept { return shown_; }
     [[nodiscard]] Page page() const noexcept { return page_; }
@@ -141,6 +147,7 @@ private:
     struct Resources;
     struct PageState;
 
+    void reload_settings();
     void rebuild_page();
     void clear_page();
     void wire_page();
@@ -186,6 +193,7 @@ private:
     std::unique_ptr<PageState> state_;
     Options options_;
     SettingsStore store_;
+    int build_stage_{};
     presentation::ui::PlayerSettings committed_;
     presentation::ui::PlayerSettings draft_;
     ApplyReport last_apply_;

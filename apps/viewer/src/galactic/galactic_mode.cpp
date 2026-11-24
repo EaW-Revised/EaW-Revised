@@ -1324,6 +1324,7 @@ bool GalacticMode::ready(Node3D& host) {
         return order.has_value();
     };
     state.save_controls = std::make_unique<GalacticSaveControls>(state);
+    static_cast<void>(state.save_controls->prepare_options(true));
     if (state.options.restore_save && !state.save_controls->restore_at_start(state.options.restore_save->name)) return fail();
     if (const std::string perf_error = parse_perf_overlay_argument(OS::get_singleton()->get_cmdline_user_args(), state.perf_requested);
         !perf_error.empty()) {

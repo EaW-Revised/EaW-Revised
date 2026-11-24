@@ -379,6 +379,8 @@ struct FrontEndMode::State final {
     // pointer is only trusted while the instance id is still valid.
     int64_t options_id{};
     bool options_open{};
+    bool options_prewarm_done{};
+    bool options_prewarm_failed{};
     EawrLoadGameScreen* load_screen{};
     int64_t load_id{};
     bool campaign_started{};
@@ -430,6 +432,7 @@ struct FrontEndMode::State final {
     std::uint32_t frames_after_battle{};
 
     bool build();
+    bool prepare_options(bool finish);
     void build_campaign_screen();
     void refresh_single_player();
     std::filesystem::path save_directory() const;
@@ -880,26 +883,13 @@ void FrontEndMode::State::show_screen() {
     }
     case model::FrontEndScreen::network_options:
     case model::FrontEndScreen::options: {
-        if (options_screen == nullptr) {
-            options_screen = memnew(EawrOptionsScreen);
-            options_id = static_cast<int64_t>(options_screen->get_instance_id());
-            EawrOptionsScreen::Options screen_options;
-            // The content this load already mounted, so the screen reads the same files.
-            if (const auto content = setup->content()) screen_options.filesystem = content->filesystem;
-            screen_options.game_root = options.game_root;
-            screen_options.mod_root = options.mod_root;
-            screen_options.context = EawrOptionsScreen::Context::main_menu;
-            screen_options.settings_file = options.settings_file;
-            // A pinned capture window is not resized by a saved video setting.
-            screen_options.apply_window = !options.test && options.capture_path.empty();
-            if (!options_screen->build(std::move(screen_options))) {
-                UtilityFunctions::printerr("EAWR front end: the settings screen could not be built: ",
-                                           text(options_screen->failure()));
-                memdelete(options_screen);
-                options_screen = nullptr;
-                static_cast<void>(nav.back());
-                break;
-            }
+        options_prewarm_failed = false;
+        static const bool timing = OS::get_singleton()->has_environment("EAWR_OPTIONS_TIMING");
+        if (!options_prewarm_done && timing)
+            UtilityFunctions::print("EAWR options timing fallback");
+        if (!prepare_options(true)) {
+            static_cast<void>(nav.back());
+            break;
         }
         options_screen->show(*host, screen == model::FrontEndScreen::network_options ? EawrOptionsScreen::Page::network : EawrOptionsScreen::Page::hub);
         options_open = true;
@@ -1612,6 +1602,39 @@ bool FrontEndMode::close() {
     return state.report_ok;
 }
 
+bool FrontEndMode::State::prepare_options(const bool finish) {
+    if (!live_options()) {
+        options_prewarm_done = false;
+        options_screen = memnew(EawrOptionsScreen);
+        options_id = static_cast<int64_t>(options_screen->get_instance_id());
+        EawrOptionsScreen::Options screen_options;
+        if (const auto content = setup->content()) screen_options.filesystem = content->filesystem;
+        screen_options.game_root = options.game_root;
+        screen_options.mod_root = options.mod_root;
+        screen_options.context = EawrOptionsScreen::Context::main_menu;
+        screen_options.settings_file = options.settings_file;
+        screen_options.apply_window = !options.test && options.capture_path.empty();
+        options_screen->begin_build(std::move(screen_options));
+    }
+    if (!options_screen->built()) {
+        auto progress = options_screen->advance_build();
+        while (finish && progress == EawrOptionsScreen::BuildProgress::pending) progress = options_screen->advance_build();
+        if (progress == EawrOptionsScreen::BuildProgress::failed) {
+            UtilityFunctions::printerr("EAWR front end: the settings screen could not be built: ", text(options_screen->failure()));
+            memdelete(options_screen);
+            options_screen = nullptr;
+            options_prewarm_failed = true;
+            return false;
+        }
+        if (!finish) return false;
+    }
+    if (!options_prewarm_done) {
+        if (!options_screen->prewarm_theme(*host, finish)) return false;
+        options_prewarm_done = true;
+    }
+    return true;
+}
+
 bool FrontEndMode::ready(Node3D& host, SkirmishSetupMode& setup) {
     State& state = *state_;
     state.host = &host;
@@ -1751,6 +1774,8 @@ std::optional<int> FrontEndMode::process() {
         else static_cast<void>(state.nav.back());
     }
     state.show_screen();
+    if (state.frames > 1 && state.nav.current() == model::FrontEndScreen::main_menu
+        && !state.options_prewarm_done && !state.options_prewarm_failed) static_cast<void>(state.prepare_options(false));
     state.sync_attract();
     if (MenuTimeline::active() && state.frames >= 600
         && (!state.attract || !state.attract->running() || state.attract->visible()))

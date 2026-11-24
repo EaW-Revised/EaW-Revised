@@ -88,6 +88,11 @@ The choice is data, never a guess: it is the existing selector `tools/test_index
 `tests/test_labels.txt`, docs/test-selection.md), the one path-to-label map. Its label expression (always with `core`,
 excluding `batch-only`) is the focused selection; `replay76` is set when save, checkpoint, load or replay paths change.
 A gameplay change (the selector prints "FULL SET") and any selector failure mean the full set, with the reason named.
+A diff that makes `windows_build.py` add a test to the stage (a `tests/` CMake edit adds `ci_registration` and `ci_test_index`, a
+`tests/ci` edit the whole `ci-tools` label, `tools/offload` or viewer CMake paths their own tests) also adds that test's least populated label
+to the expression, so the label selection covers it and the job stays on the cross route. For a full-set head the command is
+`python tools/offload/windows_build.py --final` with no `--ctest-labels` and no `--ctest-exclude-labels` (batch-only tests included): a label
+list that names every label is routed as a full set (the fullSetHosts pin) but `receipt_check.py` refuses it for a full-set head.
 
 ```powershell
 python tools/ci/validation_tier.py --focused [--base origin/main --head HEAD] [--json]

@@ -264,6 +264,42 @@ std::string MapMode::State::perf_report_json() const {
 
 // MNU-19: the in-game menu opens while the battle runs and pauses it (UI-S1); a multiplayer battle
 // cannot pause, so its menu opens over the running game. Resume and Esc close it.
+bool MapMode::State::prepare_game_menu(const bool finish) {
+    if (menu_handler || menu_host == nullptr || !filesystem || !live_session) return false;
+    if (game_menu != nullptr && !UtilityFunctions::is_instance_id_valid(game_menu_id)) game_menu = nullptr;
+    if (game_menu == nullptr) {
+        auto* screen = memnew(EawrOptionsScreen);
+        EawrOptionsScreen::Options screen_options;
+        screen_options.filesystem = filesystem;
+        screen_options.game_root = options.game_root;
+        screen_options.mod_root = options.mod_root;
+        screen_options.context = EawrOptionsScreen::Context::in_game;
+        screen_options.multiplayer = live_session->observer_multiplayer();
+        screen_options.apply_window = options.capture_path.empty();
+        screen->begin_build(std::move(screen_options));
+        game_menu = screen;
+        game_menu_id = static_cast<int64_t>(screen->get_instance_id());
+        game_menu_warm_done = false;
+    }
+    if (!game_menu->built()) {
+        auto progress = game_menu->advance_build();
+        while (finish && progress == EawrOptionsScreen::BuildProgress::pending) progress = game_menu->advance_build();
+        if (progress == EawrOptionsScreen::BuildProgress::failed) {
+            UtilityFunctions::printerr("EAWR in-game menu: ", String::utf8(game_menu->failure().c_str()));
+            memdelete(game_menu);
+            game_menu = nullptr;
+            game_menu_warm_failed = true;
+            return false;
+        }
+        if (!finish) return false;
+    }
+    if (!game_menu_warm_done) {
+        if (!game_menu->prewarm_theme(*menu_host, finish)) return false;
+        game_menu_warm_done = true;
+    }
+    return true;
+}
+
 bool MapMode::State::open_game_menu() {
     if (options.attract || !live_session) return false;
     if (live_session->phase() != LiveSessionView::Phase::running || live_session->time().ended()) return false;
@@ -275,38 +311,25 @@ bool MapMode::State::open_game_menu() {
     if (menu_host == nullptr || !filesystem) return false;
     if (game_menu != nullptr && !UtilityFunctions::is_instance_id_valid(game_menu_id)) game_menu = nullptr;
     if (game_menu != nullptr && game_menu->shown()) return true;
-    if (game_menu == nullptr) {
-        auto* screen = memnew(EawrOptionsScreen);
-        EawrOptionsScreen::Options screen_options;
-        screen_options.filesystem = filesystem;
-        screen_options.game_root = options.game_root;
-        screen_options.mod_root = options.mod_root;
-        screen_options.context = EawrOptionsScreen::Context::in_game;
-        screen_options.multiplayer = live_session->observer_multiplayer();
-        screen_options.apply_window = options.capture_path.empty();
-        if (live_session->can_save()) {
-            // #3989: a local single-player skirmish saves from its menu.
-            screen_options.save_names = [directory = player_save_directory()] {
-                std::vector<std::string> names;
-                if (const auto listed = platform::list_saved_games(directory)) {
-                    for (const auto& slot : listed.value()) names.push_back(slot.name);
-                }
-                return names;
-            };
-            screen_options.save_game = [this](const std::string& name, const bool overwrite) {
-                return save_battle(name, overwrite);
-            };
-            screen_options.load_directory = player_save_directory();
-            screen_options.load_game = options.battle_load;
-        }
-        if (!screen->build(std::move(screen_options))) {
-            UtilityFunctions::printerr("EAWR in-game menu: ", String::utf8(screen->failure().c_str()));
-            memdelete(screen);
-            return false;
-        }
-        game_menu = screen;
-        game_menu_id = static_cast<int64_t>(screen->get_instance_id());
+    game_menu_warm_failed = false;
+    if (!prepare_game_menu(true)) return false;
+    EawrOptionsScreen::Options screen_options;
+    if (live_session->can_save()) {
+        // #3989: a local single-player skirmish saves from its menu.
+        screen_options.save_names = [directory = player_save_directory()] {
+            std::vector<std::string> names;
+            if (const auto listed = platform::list_saved_games(directory)) {
+                for (const auto& slot : listed.value()) names.push_back(slot.name);
+            }
+            return names;
+        };
+        screen_options.save_game = [this](const std::string& name, const bool overwrite) {
+            return save_battle(name, overwrite);
+        };
+        screen_options.load_directory = player_save_directory();
+        screen_options.load_game = options.battle_load;
     }
+    game_menu->set_game_actions(std::move(screen_options));
     menu_paused = false;
     if (!options.lan && !live_session->time().paused()) {
         live_session->press_pause();
@@ -389,6 +412,7 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
     // #558: the overlay's parent; `--eawr-perf-overlay on` shows it from the first frame.
     perf_host = &host;
     menu_host = &host;
+    if (!options.attract && live_session && !menu_handler) static_cast<void>(prepare_game_menu(true));
     if (perf_requested) set_perf_overlay(true);
     if (!hud_options) return true;
     if (live_session && !hud_faction_given) {

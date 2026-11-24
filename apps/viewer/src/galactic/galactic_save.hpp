@@ -25,6 +25,7 @@ public:
     void activate_slot(std::int64_t index);
     // The options screen opened from the menu's Options button closed: the menu shows again.
     void options_closed();
+    bool prepare_options(bool finish);
     // The HUD's options button: the same menu Escape opens.
     void open_menu() { open(); }
     // #3035: the same validation and owner replacement as an in-campaign load, before the
@@ -64,6 +65,8 @@ private:
     godot::Control* modal_root_{};
     EawrOptionsScreen* options_{};
     std::int64_t options_id_{};
+    bool options_warm_done_{};
+    bool options_warm_failed_{};
     godot::ItemList* save_slots_{}, *load_slots_{};
     godot::Ref<godot::Tween> fade_;
     Screen screen_{Screen::escape};

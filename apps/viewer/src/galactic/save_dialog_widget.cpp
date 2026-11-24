@@ -188,9 +188,8 @@ bool GalacticSaveControls::build_widgets() {
     root_->hide(); return true;
 }
 // MNU-19: the menu's Options button shows the in-game options hub; its Back returns to the menu.
-void GalacticSaveControls::open_options() {
+bool GalacticSaveControls::prepare_options(const bool finish) {
     if (options_ != nullptr && !UtilityFunctions::is_instance_id_valid(options_id_)) options_ = nullptr;
-    if (options_ != nullptr && options_->shown()) return;
     if (options_ == nullptr) {
         auto* screen = memnew(EawrOptionsScreen);
         EawrOptionsScreen::Options screen_options;
@@ -199,15 +198,35 @@ void GalacticSaveControls::open_options() {
         screen_options.mod_root = state_.options.mod_root;
         screen_options.context = EawrOptionsScreen::Context::in_game;
         screen_options.apply_window = state_.options.capture_path.empty();
-        if (!screen->build(std::move(screen_options))) {
-            widget_failure_ = screen->failure();
-            memdelete(screen);
-            return;
-        }
+        screen->begin_build(std::move(screen_options));
         options_ = screen; options_id_ = static_cast<int64_t>(screen->get_instance_id());
+        options_warm_done_ = false;
         options_->connect("closed", callable_mp_static(&options_closed_thunk)
             .bind(reinterpret_cast<int64_t>(this)));
     }
+    if (!options_->built()) {
+        auto progress = options_->advance_build();
+        while (finish && progress == EawrOptionsScreen::BuildProgress::pending) progress = options_->advance_build();
+        if (progress == EawrOptionsScreen::BuildProgress::failed) {
+            widget_failure_ = options_->failure();
+            memdelete(options_);
+            options_ = nullptr;
+            options_warm_failed_ = true;
+            return false;
+        }
+        if (!finish) return false;
+    }
+    if (!options_warm_done_) {
+        if (!options_->prewarm_theme(*state_.host, finish)) return false;
+        options_warm_done_ = true;
+    }
+    return true;
+}
+void GalacticSaveControls::open_options() {
+    if (options_ != nullptr && !UtilityFunctions::is_instance_id_valid(options_id_)) options_ = nullptr;
+    if (options_ != nullptr && options_->shown()) return;
+    options_warm_failed_ = false;
+    if (!prepare_options(true)) return;
     escape_dialog_->frame->hide();
     options_->show(*state_.host, EawrOptionsScreen::Page::hub);
 }

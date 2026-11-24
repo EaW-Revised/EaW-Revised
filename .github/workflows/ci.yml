@@ -158,7 +158,7 @@ jobs:
           if errorlevel 1 exit /b 1
           cmake --preset windows-clang-ninja -DCMAKE_LINKER:FILEPATH=lld-link
           if errorlevel 1 exit /b 1
-          findstr /i /b /c:"CMAKE_LINKER:FILEPATH=" out\build\windows-clang-ninja\CMakeCache.txt | findstr /i /c:"lld-link"
+          python -c "import ntpath,pathlib,sys; p=pathlib.Path('out/build/windows-clang-ninja/CMakeCache.txt'); print('Expected linker: lld-link or lld-link.exe'); lines=[s for s in p.read_text(encoding='utf-8').splitlines() if s.startswith('CMAKE_LINKER:')] if p.is_file() else []; print('Cache entry: ' + ('; '.join(lines) if lines else '<missing>')); sys.exit(0 if len(lines)==1 and lines[0].split('=',1)[0] in ('CMAKE_LINKER:STRING','CMAKE_LINKER:FILEPATH') and ntpath.basename(lines[0].split('=',1)[-1].strip().strip(chr(34))).lower() in ('lld-link','lld-link.exe') else 1)"
           if errorlevel 1 exit /b 1
           cmake --build --preset windows-clang-ninja --target tests core_perf_diag_tests core_flat_id_map_tests
           if errorlevel 1 exit /b 1
