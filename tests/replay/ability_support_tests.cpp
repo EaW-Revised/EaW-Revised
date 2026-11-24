@@ -922,7 +922,9 @@ void test_peacebringer_blast_session() {
                 expect(poll != executor.names.end() && hull != executor.names.end() && poll < hull,
                     "FS-34/FSC-60: the completion phase runs before hull constraints in the live tick");
             }
-            const auto& status = step.value().snapshot->instances().front().abilities.front();
+            const auto& snapshot = step.value().snapshot;
+            const auto& instance = snapshot->instances().front();
+            const auto& status = instance.abilities.front();
             if (frame == 3) expect(status.blast_charged_presentation == enabled,
                 "FSC-58: admitted zero-gun completion publishes exactly once; disabled initiation stays absent");
             if (frame == 4) expect(!status.blast_charged_presentation,
@@ -1345,7 +1347,9 @@ void test_hardpoint_dependencies() {
                 const auto step = world.step(executor);
                 expect(static_cast<bool>(step), "WHD: dependency tick succeeds"); if (!step) break;
                 hashes.push_back(step.value().state_sha256);
-                const auto& status = step.value().snapshot->instances().front().abilities.front();
+                const auto& snapshot = step.value().snapshot;
+                const auto& instance = snapshot->instances().front();
+                const auto& status = instance.abilities.front();
                 if (frame == 0) {
                     expect(kind == K::blast ? world.ability_state(1)->charged_blast.has_value()
                         : status.active == !activation_tick_loss,

@@ -368,7 +368,10 @@ LanLobbyMode::Options LanLobbyMode::from_command_line() {
         else if (argument == "--eawr-online-password") options.online_passwords.push_back(value);
         else if (argument == "--eawr-online-list-failed") options.online_list_failed = value == "true" || value == "1";
         else if (argument == "--eawr-lan-fake") options.fake = value;
-        else if (argument == "--eawr-lan-fault") options.fault_listing_hang = options.fault_listing_hang || value == "listing-hang";
+        else if (argument == "--eawr-lan-fault") {
+            options.fault_listing_hang = options.fault_listing_hang || value == "listing-hang";
+            options.fixture_waiting_banner = options.fixture_waiting_banner || value == "waiting-banner";
+        }
         else if (argument == "--eawr-lan-listing-timeout-ms") options.listing_timeout_ms = std::max(0, std::atoi(value.c_str()));
         else if (argument == "--eawr-lan-do") options.actions.push_back(value);
         else if (argument == "--eawr-ui-rules") options.rules = value;
@@ -624,6 +627,7 @@ bool LanLobbyMode::ready(Node3D& host) {
     }
     if (state.options.game_port) screen_options.game_port = *state.options.game_port;
     screen_options.fault_listing_hang = state.options.fault_listing_hang;
+    screen_options.fixture_waiting_banner = state.options.fixture_waiting_banner;
     screen_options.listing_timeout_ms = state.options.listing_timeout_ms;
     screen_options.silent = true;
     if (!state.options.fake.empty()) screen_options.match = make_fake_lan_match(state.options.fake);

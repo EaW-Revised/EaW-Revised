@@ -549,6 +549,7 @@ struct EawrLanLobby::Impl final {
     std::optional<GalacticLobbyBackend::CheckpointCandidate> checkpoint_candidate;
     std::vector<net::SetupSeat> checkpoint_bindings;
     std::string logged_room_players; // the last per-player state line written to the log (ready, mod check), to log only changes
+    std::string logged_start_reason; // last reason observed, so its explanation is logged only on change
     std::vector<net::PeerIndex> checkpoint_bound_peers; // the room's peers the bindings were fitted to (#6121)
     std::string checkpoint_description, checkpoint_date, checkpoint_problem;
     // #7858: what the host is busy with (reading the save, waiting for content, a cancelled restore), shown as a plain line: only

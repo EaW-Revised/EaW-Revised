@@ -46,6 +46,7 @@ bool GalacticMode::State::build_destruction_hud() {
     // WGCH-186: alternate textures are choices, not a default icon. The shared
     // galaxy action preview retains the template's Icon_Texture_Name, if any.
     state.slot->set_order_icon(texture(data::ui::Field::icon_texture_name), false);
+    state.slot->set_icon_fit(presentation::ui::IconFitMode::contain);
     state.slot->set_tooltip_text(String::utf8(battle_text("TEXT_TOOLTIP_ABILITY_DESTROY_PLANET_NAME").c_str()));
     // WGCH-154: a click is only consumed; this surface is neither a drag source
     // nor a confirmation button. EawrFleetDrag owns the left-release route.
@@ -163,6 +164,7 @@ void GalacticMode::State::position_destruction_hud(galactic_view::ObjectId plane
             // an empty ellipse beside RAID, only the dragged unit's icon over it). The ALT list's raid entry
             // (rebel emblem with its own R box) is not drawn here, so no icon is set.
             slot.button->set_order_icon({}, false);
+            slot.button->set_icon_fit(presentation::ui::IconFitMode::contain);
             slot.button->set_action([this] { static_cast<void>(map_input.hud_event()); });
             slot.text = memnew(Label); slot.button->add_child(slot.text);
             slot.text->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
@@ -202,6 +204,7 @@ void GalacticMode::State::position_destruction_hud(galactic_view::ObjectId plane
             slot.button->set_texture_normal(texture(data::ui::Field::blank_texture_name));
             slot.button->set_texture_hover(texture(data::ui::Field::mouse_over_texture_name));
             slot.button->set_order_icon(texture(data::ui::Field::icon_texture_name), false);
+            slot.button->set_icon_fit(presentation::ui::IconFitMode::contain);
             slot.button->set_action([this] { static_cast<void>(map_input.hud_event()); });
             slot.text = memnew(Label); slot.button->add_child(slot.text);
             slot.text->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);

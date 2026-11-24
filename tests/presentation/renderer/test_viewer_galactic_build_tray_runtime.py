@@ -584,6 +584,8 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
         self.assertTrue(headers and entries, (name, "the tray shows category labels over entries", tray))
         # GBT-05: no two identical headers in one tray (a class group worded like a category is merged into it, #8160).
         texts = tray["header_texts"]
+        # GBT-05 (#8361): the stock trays keep their fine rows, never the broad fallback.
+        self.assertIs(tray["broad_rows"], False, (name, "the stock tray fell back to the broad rows", texts))
         self.assertEqual(len(texts), len(headers), (name, texts))
         self.assertEqual(len(texts), len({text.lower() for text in texts}), (name, "two labels read the same", texts))
         for header in headers:

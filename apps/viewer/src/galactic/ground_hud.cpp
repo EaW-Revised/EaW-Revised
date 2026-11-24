@@ -724,6 +724,10 @@ void GalacticMode::State::update_ground_hud() {
         button->set_position({static_cast<float>(rect.x),static_cast<float>(rect.y)});
         button->set_size({static_cast<float>(rect.width),static_cast<float>(rect.height)});
         button->set_hit_rect({{},button->get_size()});
+        // #8366 (#7956): retail draws a pad's company icon and a structure slot's building icon at their own size (viewport
+        // scale only), centred in the slot, never stretched to it (retail capture of Remake 4.0 Fondor, out/eyecheck/gc-8366).
+        if (std::size_t slot{}; name.starts_with("Pad_") || structure_slot(name, slot))
+            button->set_icon_fit(presentation::ui::IconFitMode::natural, static_cast<float>(placement.scale));
         if (name.starts_with("Pad_")) {
             const auto* company = index < layout.size() && layout[index] ? &roster.companies[*layout[index]] : nullptr;
             button->set_visible(roster.accessible);

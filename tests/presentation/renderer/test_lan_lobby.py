@@ -972,7 +972,7 @@ class LanLobbyGraphical(unittest.TestCase):
                     self.assertEqual(control[key], template[key], (field, row, key))
                 self.assertEqual(control["rect"][2:], template["rect"][2:], (field, row, "size"))
         self.assertFalse(staging["start"]["enabled"], "connecting/failed pairs keep Start unavailable")
-        self.assertIn("connections between players", staging["start"]["reason"])
+        self.assertEqual(staging["start"]["reason"], "Waiting for all players to connect")
         self.assertTrue(staging["map"], "the shared map list remains available with nine humans")
         self.assertEqual(len(opened["connections"]), 9)
         self.assertNotIn("human seats)", str(staging["rows"]))
@@ -1173,6 +1173,25 @@ class LanLobbyGraphical(unittest.TestCase):
                     for actual, authored in zip(team["rect"], team["authored"]):
                         self.assertAlmostEqual(actual, authored, delta=0.5)
             assert_dialog_rectangles(self, geometry)
+
+    def test_galactic_waiting_banner(self):
+        for resolution in ("1280x720", "2560x1080"):
+            name = "gc-waiting-" + resolution
+            steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN",
+                     "host:Waiting room", "wait:staging@60", "wait:room@60", "sleep:30", "snapshot",
+                     "shot:" + name + "-staging", "sleep:30", "snapshot", "cancel", "cancel")
+            args = command(self.cache, name, self.pictures, self.pictures / (name + ".png"),
+                           "--eawr-lan-fault", "waiting-banner",
+                           "--eawr-lan-name", "Solo", "--eawr-lan-game-port", "0", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                           *[arg for step in steps for arg in ("--eawr-lan-do", step)], resolution=resolution)
+            completed = subprocess.run(args, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600, check=False)
+            self.assertEqual(completed.returncode, 0, completed.stdout[-5000:])
+            snapshots = load(self, self.pictures, name, completed.stdout)["snapshots"]
+            for snapshot in snapshots:
+                self.assertEqual(snapshot["start"]["reason"], "Waiting for all players to connect")
+                self.assertIn("Waiting for all players to connect", snapshot["pointer"]["header"])
+            self.assertEqual(completed.stdout.count("Every pair must connect before Start; My connections shows only your own links."), 1)
+            self.assertTrue((self.pictures / (name + "-staging.png")).is_file())
 
     def test_galactic_room_wide_campaign_names_the_rows_it_cannot_draw(self):
         # Eight player factions and four AI factions on the dialog's nine rows: the host's row, seven claimable rows, one line.

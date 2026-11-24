@@ -110,7 +110,7 @@ bool GalacticMode::State::build_corruption_hud() {
             auto* button = memnew(EawrHudButton);
             button->set_sounds(*component, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
             button->set_name(String::utf8(anchor.name.c_str()));
-            if (!close) button->set_order_icon({},false);
+            if (!close) { button->set_order_icon({},false); button->set_icon_fit(presentation::ui::IconFitMode::contain); }
             button->set_texture_normal(command_texture(first(*component,data::ui::Field::icon_texture_name)));
             button->set_texture_hover(command_texture(first(*component,data::ui::Field::mouse_over_texture_name)));
             button->set_texture_pressed(command_texture(first(*component,data::ui::Field::selected_texture_name)));

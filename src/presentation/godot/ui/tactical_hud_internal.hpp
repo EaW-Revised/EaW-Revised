@@ -18,6 +18,7 @@
 #include "eawr/presentation/ui/screen_fade.hpp"
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/presentation/ui/fonts.hpp"
+#include "eawr/presentation/ui/icon_fit.hpp"
 #include "eawr/presentation/ui/project_hud.hpp"
 #include "eawr/presentation/ui/theme.hpp"
 
@@ -266,7 +267,15 @@ public:
     void set_order_shift_pixels(float pixels) { order_shift_pixels_ = pixels; }
     void set_icon_texture(const Ref<Texture2D>& texture) {
         if (order_icon_) order_icon_->set_texture(texture);
+        refit_icon();
         if (portrait_cell_) queue_redraw();
+    }
+    // #8366 (#7956): the one fit rule for a slot's icon (presentation::ui::fit_icon_rect): the icon keeps its aspect
+    // ratio and is centred in the button; `mode` and `scale` (the authored Scale times the viewport scale) say how big.
+    // It follows the button's size and the icon, so call it once, with the slot's rule.
+    void set_icon_fit(const presentation::ui::IconFitMode mode, const float scale = 1.0F) {
+        icon_fit_ = IconFit{mode, scale};
+        refit_icon();
     }
     [[nodiscard]] Ref<Texture2D> icon_texture() const { return order_icon_ ? order_icon_->get_texture() : Ref<Texture2D>(); }
     // Keep the button's existing hit mask and press/drag ownership; share its drawing cell.
@@ -369,6 +378,7 @@ public:
         if (flash_ != nullptr) flash_->set_visible(on);
     }
     void _notification(const int what) {
+        if (what == NOTIFICATION_RESIZED) refit_icon();
         if (what != NOTIFICATION_PROCESS || !flashing_ || flash_ == nullptr) return;
         // TM-08: additive flash art fades every half second even while the sim is stopped.
         flash_remaining_ -= get_process_delta_time();
@@ -387,6 +397,17 @@ protected:
     }
 
 private:
+    struct IconFit final { presentation::ui::IconFitMode mode{}; float scale{1.0F}; };
+    void refit_icon() {
+        if (!icon_fit_ || !order_icon_) return;
+        const auto texture = order_icon_->get_texture();
+        if (texture.is_null()) return;
+        const auto box = presentation::ui::fit_icon_rect(get_size().x, get_size().y,
+            static_cast<float>(texture->get_width()), static_cast<float>(texture->get_height()),
+            icon_fit_->scale, icon_fit_->mode);
+        set_cell_portrait_box(Rect2(box.x, box.y, box.width, box.height));
+    }
+    std::optional<IconFit> icon_fit_;
     struct CellArt final { HudButtonArt art; Vector2 centre; float scale{1.0F}; };
     [[nodiscard]] Ref<Texture2D> cell_state_texture() const {
         const auto& art = cell_art_->art;

@@ -559,8 +559,13 @@ void EawrLanLobby::apply_checkpoint_selection() {
 
 void EawrLanLobby::refresh_checkpoint_staging() {
     Impl& impl = *impl_;
-    const auto room = match_->lobby_state();
+    auto room = match_->lobby_state();
     if (!room || !state_->dialog || !impl.galactic_backend) return;
+    if (options_.fixture_waiting_banner && impl.host) {
+        room->connections_pending = true;
+        room->start_enabled = false;
+        room->start_reason = lobby_connections_waiting;
+    }
     const bool staging = room->snapshot.phase == net::LobbyPhase::staging;
     // #6121: a guest who joins, leaves or leaves and rejoins after Load Game changes which peers hold the room's seats. The assignment
     // is fitted to the room again, keeping the host's choices, so every human has a saved seat and the combo, Apply and Retry all

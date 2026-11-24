@@ -71,6 +71,12 @@ void EawrLanLobby::refresh_staging_connections(Impl& impl, const LanView& view, 
 void EawrLanLobby::refresh_staging_status(Impl& impl, PageState& state, Resources& resources,
                                           const LanView& view, bool online,
                                           const std::optional<LanLobbyState>& room) {
+    const std::string reason = impl.host && room ? room->start_reason : std::string{};
+    if (reason != impl.logged_start_reason) {
+        impl.logged_start_reason = reason;
+        if (reason == lobby_connections_waiting)
+            UtilityFunctions::print(text("EAWR lobby: " + reason + ". " + std::string(lobby_connections_explanation)));
+    }
     // A new status line becomes a chat notice; a line that only counts on (seconds, files) does not add one per change.
     if (auto* options = EAWR_CONTROL(EawrUiButton, "IDC_SELECT_OPTIONS"))
         options->set_disabled(!impl.host || state.options_panel == nullptr
@@ -567,7 +573,9 @@ void EawrLanLobby::refresh_staging_start(Impl& impl, Resources& resources, const
         }
         start->set_disabled(!enabled || impl.launch.has_value());
         impl.start_reason = room ? (impl.host ? room->start_reason : room->ready_reason) : online ? view.message : std::string{};
-        start->set_tooltip_text(text(impl.start_reason));
+        const auto tooltip = impl.start_reason == lobby_connections_waiting
+            ? impl.start_reason + ". " + std::string(lobby_connections_explanation) : impl.start_reason;
+        start->set_tooltip_text(text(tooltip));
         impl.start_enabled = enabled;
         impl.start_caption = utf8(start->get_text());
     }

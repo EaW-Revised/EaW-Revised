@@ -191,7 +191,7 @@ std::string handle_label(const std::string_view caption, const std::size_t omitt
 
 std::vector<Group> classify(const std::span<const std::string> choice_types, const TypeIndex& types,
     const CategoryEnum& categories, const GroupDefinition& definition,
-    const std::span<const std::pair<std::string, std::string>> category_headers) {
+    const std::span<const std::pair<std::string, std::string>> category_headers, const bool split_by_class) {
     struct Placed final {
         Group group;
         std::uint64_t order{};
@@ -289,7 +289,7 @@ std::vector<Group> classify(const std::span<const std::string> choice_types, con
             if (std::none_of(classes.begin(), classes.end(), [&](const auto& label) { return equal(label, entry.class_label); }))
                 classes.push_back(entry.class_label);
         }
-        if (classes.size() < 2) continue;
+        if (!split_by_class || classes.size() < 2) continue;
         std::vector<Placed::Entry> rest;
         std::vector<Placed> split(classes.size());
         for (std::size_t index = 0; index < classes.size(); ++index) {
@@ -560,6 +560,28 @@ FitResult fit_to_height(const std::vector<Group>& groups, const Metrics& full, c
         if (fits) break;
     }
     return result;
+}
+
+std::size_t other_entries(const Packed& packed) noexcept {
+    std::size_t count = packed.omitted;
+    if (packed.misc_mode)
+        for (const auto& group : packed.groups) if (group.kind == GroupKind::misc) count += group.choices.size();
+    return count;
+}
+
+FitResult fit_with_fallback(const std::vector<Group>& fine, const std::vector<Group>& broad, const Metrics& full,
+    const Metrics& compact, const PackOptions& options, const float available_height) {
+    auto result = fit_to_height(fine, full, compact, options, available_height);
+    const bool split = std::any_of(fine.begin(), fine.end(), [](const Group& group) { return !group.label.empty(); });
+    if (!split) return result;
+    std::size_t units{};
+    for (const auto& group : fine) if (group.kind != GroupKind::buildings) units += group.choices.size();
+    const auto other = other_entries(result.packed);
+    if (other * 4 <= units) return result;
+    auto fallback = fit_to_height(broad, full, compact, options, available_height);
+    if (other_entries(fallback.packed) >= other) return result;
+    fallback.broad = true;
+    return fallback;
 }
 
 float automatic_width(const std::vector<Group>& groups, Metrics metrics, const PackOptions& options,

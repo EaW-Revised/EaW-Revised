@@ -304,7 +304,7 @@ std::optional<LanLobbyState> TcpLanMatch::lobby_state() const  {
         if (state.start_reason.empty() && !match_startable)
             state.start_reason = "Starting a campaign match needs the galactic lockstep driver, which this build does not have yet.";
         else if (state.start_reason.empty() && state.connections_pending) {
-            state.start_reason = "Waiting for connections between players. Every pair must connect before Start; My connections shows only your own links.";
+            state.start_reason = lobby_connections_waiting;
         }
         else if (state.start_reason.empty() && !all_ready) state.start_reason = "Waiting for every player to accept the current setup.";
         const bool start_pending = lobby_->start_pending();

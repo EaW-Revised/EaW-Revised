@@ -1106,6 +1106,7 @@ void GalacticMode::State::update_fleet_controls(const presentation::ui::ShellPla
             // GHUD-C06: mixed-owner q4 icon arbitration is not sourced; retain
             // its aggregate count without choosing a first-owner faction icon.
             if (one_owner) {
+                button->set_icon_fit(presentation::ui::IconFitMode::contain);
                 button->set_icon_texture(fleet_faction_texture(card->owner, false));
                 button->set_texture_hover(fleet_faction_texture(card->owner, false, true));
             } else button->set_texture_hover({});

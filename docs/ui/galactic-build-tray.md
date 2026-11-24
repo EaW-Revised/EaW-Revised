@@ -162,6 +162,18 @@ The tray never repurposes a bar slot.
   no class stay in the category's own group, last, under the category's header. Only category groups split: the buildings group, misc and the extra groups of GBT-12 never do. The
   split is data, not a list: no class name is known to the code, and a class whose text the mod lacks shows its key.
   The row packing, the row budget and the fold into misc (GBT-06) treat each class group as a group of its own.
+- **Fallback to the broad rows when Other grows too big** (owner decision of 2026-11-24, no setting) (legacy EAWR-8361): when the
+  class split leaves more than a quarter of the unit choices (every group but the buildings) in the misc row after the fold
+  (GBT-06), and the broad rows put fewer there, the tray shows the broad rows: the category groups as they were before the
+  class split (one group per category, headed by the category's caption; the groups of GBT-12 as always). Otherwise the fine
+  rows stay, so a list the fold does not touch, a split that leaves Other small, and a list too long for any grouping (the
+  broad rows would leave as many in Other) keep them. The test runs on the list the tray is given, per call: a mod's own
+  filter button that narrows the list (GBT-09) gets the fine rows again as soon as they fit. Checked on the data
+  (every type a faction can buy with everything unlocked, 16 entries per line): stock and Republic at War space never
+  fold anything into Other; Remake 4.0 space does from about 80 choices (46 percent in Other with the class split, 31 percent
+  with the broad rows); Republic at War's ground tray with everything unlocked leaves 24 of 61 (39 percent) in Other with
+  the class split, none with the broad rows, so it takes the broad rows. A better class mapping (a hull-size guess for
+  unmapped classes, a per-mod class table) is not part of this rule.
 - A choice with no `CategoryMask`, or only names its enum file does not define, goes to misc.
 - Considered and rejected: guessing a missing size class from `Population_Value` or
   `Build_Cost_Credits`, relative to the other units of the mod. Tested on space units that do

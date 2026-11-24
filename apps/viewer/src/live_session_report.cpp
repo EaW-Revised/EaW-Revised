@@ -708,6 +708,7 @@ void LiveSessionView::write_report_battle_start(std::ostream& output) const {
                   }
                   return rows;
               }() << "]"
+           << ", \"colours_before_toggle\": [" << gc_colours_before_toggle_ << "]"
            << ", \"rendered_colours\": [" << [&] {
                   std::string rows;
                   for (const auto& ship : placed_ships_) {

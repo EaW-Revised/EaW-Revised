@@ -272,7 +272,12 @@ void EawrLanLobby::refresh_galactic_staging() {
     const LanView view = match_->view();
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
     refresh_staging_connections(impl, view, online);
-    const auto room = match_->lobby_state();
+    auto room = match_->lobby_state();
+    if (options_.fixture_waiting_banner && impl.host && room) {
+        room->connections_pending = true;
+        room->start_enabled = false;
+        room->start_reason = lobby_connections_waiting;
+    }
     refresh_staging_status(impl, state, resources, view, online, room);
     std::vector<model::StagingRow> rows(dialog_rows);
     const skirmish::SetupMap* map = nullptr;
