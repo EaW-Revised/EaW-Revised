@@ -36,8 +36,9 @@ bool playable_starter(const data::galactic::GalacticData& data, const std::strin
 // the AI seats only, finds the chosen entry in one of them, and refuses an entry that those types map to two levels. So:
 //  - a faction that is never a player (any faction of a single-player entry but its starter, a multiplayer entry's
 //    non-playable factions) always has an AI seat, and runs its AI_Player_Control type; neutral factions have none;
-//  - a multiplayer entry's playable factions run their Basic_AI only when the host leaves them to the AI, which the
-//    catalog cannot know: with no always-AI type, an entry must be carried by every such type to be safe;
+//  - a multiplayer entry's playable factions run the entry's own AI_Player_Control type for them, else their Basic_AI
+//    (ai_controller_choice), only when the host leaves them to the AI, which the catalog cannot know: with no always-AI
+//    type, an entry must be carried by every such type to be safe;
 //  - an entry any of those types maps to two levels is left out.
 // Per level the entry most always-AI types share wins, the first seen on a tie. No type known: no list.
 std::array<std::string, 3> campaign_difficulties(const data::galactic::GalacticData& data, const data::galactic::Campaign& campaign,
@@ -52,8 +53,7 @@ std::array<std::string, 3> campaign_difficulties(const data::galactic::GalacticD
         if (faction.neutral) continue;
         if (faction.playable) {
             // A single-player entry's starter is the human side; a multiplayer entry's playable row may or may not be.
-            if (multiplayer)
-                if (const auto* record = data.faction(faction.name)) add(maybe, record->basic_ai);
+            if (multiplayer) add(maybe, std::string(ai_controller_choice(data, campaign, CampaignRulesFlavour::multiplayer, faction.name).type));
             continue;
         }
         const auto assigned = std::find_if(campaign.ai_player_control.begin(), campaign.ai_player_control.end(),
@@ -192,6 +192,14 @@ AiControllerChoice ai_controller_choice(const data::galactic::GalacticData& data
     if (!faction) return {{}, "AI faction relations"};
     if (faction->is_neutral.value_or(false)) return {};
     if (rules == CampaignRulesFlavour::multiplayer && faction->is_playable.value_or(false)) {
+        // #8289: an AI seat on a playable faction runs the same galactic AI single player gives that faction: the type the
+        // entry's AI_Player_Control names for it. The entry's starter row names the human side's type, never an AI's, and a
+        // multiplayer entry that authors no row for the faction (stock authors none) falls back to the faction's Basic_AI.
+        const auto row = std::find_if(campaign.ai_player_control.begin(), campaign.ai_player_control.end(),
+            [&](const auto& candidate) { return upper(candidate.faction) == upper(faction_name); });
+        if (row != campaign.ai_player_control.end() && !row->name.empty()
+            && upper(campaign.starting_active_player) != upper(faction_name))
+            return {row->name, {}};
         if (faction->basic_ai.empty()) return {{}, "multiplayer playable faction Basic_AI"};
         return {faction->basic_ai, {}};
     }

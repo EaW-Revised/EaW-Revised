@@ -128,8 +128,7 @@ class SettingsFirstOpenMeasurement(unittest.TestCase):
         (path / 'viewer.log').write_text(result.stdout + result.stderr, encoding='utf-8')
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr)[-6000:])
         self.assertEqual(len(json.loads(trace.read_text(encoding='utf-8'))), 2)
-        if os.environ.get('EAWR_JOB_EXPECT_FALLBACK') == '1':
-            self.assertIn('EAWR options timing fallback', result.stdout)
+        self.assertIn('EAWR options timing fallback', result.stdout)
 
     def test_settings_changed_after_prewarm_are_read_on_open(self):
         path = front.ROOT.parent / 'out' / 'tmp' / 'pf8312-settings-refresh'

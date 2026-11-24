@@ -317,6 +317,12 @@ void bars() {
 
     expect(close_to(ui::bar_scale(3000.0F, 1500.0F, 1.0F), 1.0F), "far away the bar keeps its size");
     expect(close_to(ui::bar_scale(750.0F, 1500.0F, 1.0F), 2.0F), "at half Health_Bar_Scale it doubles");
+    const float small_width = ui::bar_width(ui::BarSize::small);
+    const float close_scale = ui::bar_scale(1.0F, 1500.0F, 1.0F);
+    expect(close_to(small_width * ui::bounded_bar_scale(close_scale, small_width, 1280.0F), 320.0F),
+           "a close camera bounds a small ship bar to a quarter of the viewport");
+    expect(close_to(ui::bounded_bar_scale(2.0F, small_width, 1280.0F), 2.0F),
+           "the bound preserves authored scaling when the bar fits");
 
     expect(ui::bar_level(1.0F) == 10 && ui::bar_level(0.0F) == 0, "full and empty levels");
     expect(ui::bar_level(0.91F) == 10 && ui::bar_level(0.9F) == 9, "the level is the ceiling of ten times the fraction");

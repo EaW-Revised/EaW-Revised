@@ -48,7 +48,7 @@ open_staging = staging.split('void EawrLanLobby::open_staging(', 1)[1].split('\n
 assert 'host_mod_notice' not in open_staging, 'open_staging must not clear a notice raised at room open'
 leave_staging = staging.split('void EawrLanLobby::leave_staging()', 1)[1].split('\nvoid EawrLanLobby::', 1)[0]
 assert 'host_mod_notice.clear()' in leave_staging
-host_game = galactic.split('std::optional<std::string> EawrLanLobby::host_galactic_game(', 1)[1].split('\nvoid EawrLanLobby::refresh_galactic_staging()', 1)[0]
+host_game = galactic.split('EawrLanLobby::host_galactic_game(', 1)[1].split('\nvoid EawrLanLobby::refresh_galactic_staging()', 1)[0]
 assert host_game.index('host_mod_notice.clear()') < host_game.index('report_host_mod_list_not_shared('), 'a room starts clean, then may raise a notice'
 assert 'viewer::host_mod_list_unsendable_reason(encoded)' in host_game
 begin_hosting = staging.index('if (const auto refusal = host_galactic_game())')

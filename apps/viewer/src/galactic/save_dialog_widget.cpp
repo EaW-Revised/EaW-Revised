@@ -211,7 +211,6 @@ bool GalacticSaveControls::prepare_options(const bool finish) {
             widget_failure_ = options_->failure();
             memdelete(options_);
             options_ = nullptr;
-            options_warm_failed_ = true;
             return false;
         }
         if (!finish) return false;
@@ -225,7 +224,6 @@ bool GalacticSaveControls::prepare_options(const bool finish) {
 void GalacticSaveControls::open_options() {
     if (options_ != nullptr && !UtilityFunctions::is_instance_id_valid(options_id_)) options_ = nullptr;
     if (options_ != nullptr && options_->shown()) return;
-    options_warm_failed_ = false;
     if (!prepare_options(true)) return;
     escape_dialog_->frame->hide();
     options_->show(*state_.host, EawrOptionsScreen::Page::hub);

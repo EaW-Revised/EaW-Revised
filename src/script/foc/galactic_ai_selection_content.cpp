@@ -1,6 +1,7 @@
 #include "galactic_ai_selection_content.hpp"
 #include "galactic_ai_selection_work.hpp"
 #include "eawr/core/gc_profile.hpp"
+#include "eawr/sim/tactical/types.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -529,6 +530,19 @@ GalacticFreestoreSelectionProvider stock_freestore_reader(std::shared_ptr<const 
             if (!contrast) return Result::failure(contrast.error());
         }
         return Result::success(std::move(rows));
+    };
+}
+GalacticStageSpeedReader galactic_stage_speed_reader(std::shared_ptr<const GalacticSelectionContent> content) {
+    return [content = std::move(content)](tactical::PlayerId player, const sim::galactic::GalacticSnapshot& snapshot,
+                                          tactical::TypeId type) -> core::Result<Real> {
+        const auto object = content->types.find(type);
+        const auto faction = content->faction_speed.find(player);
+        if (object == content->types.end() || faction == content->faction_speed.end() || !snapshot.movement())
+            return core::Result<Real>::failure(unavailable("synchronized staging type/faction/mode speed"));
+        const auto speed = to_single(to_single(to_single(object->second.hyperspace_speed * faction->second)
+            * real(sim::tactical::logical_frames_per_second))
+            * script::numeric::from_fixed(snapshot.movement()->mode_modifier));
+        return core::Result<Real>::success(speed);
     };
 }
 }

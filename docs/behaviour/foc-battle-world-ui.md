@@ -59,6 +59,9 @@ Nothing here reaches the simulation.
   bar is about 100 reference pixels wide (68 x 1.5). A close camera therefore draws large bars:
   a craft's small bar is 51 reference pixels at distance 1000 and six times its width at 250
   (eye check judged at FoC's default distance).
+  Project safeguard: the displayed scale is capped so the authored bar width occupies at
+  most one quarter of the viewport width; height scales with width. This limit is a presentation
+  choice, not a verified retail maximum, and the authored scale and minimum still apply below it.
 - WU-14. A bar shows level ceil(10 x fraction) of 0..10; the filled part is fraction x width from
   the left over the black back (`i_bar_control_wide*`) with a black outline of one pixel.
 - WU-15. The health bar's colour is its level's texture: black 0, red 1 to 3, orange 4 and 5, yellow

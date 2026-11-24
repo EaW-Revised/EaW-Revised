@@ -66,7 +66,6 @@ private:
     EawrOptionsScreen* options_{};
     std::int64_t options_id_{};
     bool options_warm_done_{};
-    bool options_warm_failed_{};
     godot::ItemList* save_slots_{}, *load_slots_{};
     godot::Ref<godot::Tween> fade_;
     Screen screen_{Screen::escape};

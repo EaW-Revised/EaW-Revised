@@ -230,10 +230,6 @@ EawrOptionsScreen::BuildProgress EawrOptionsScreen::advance_build() {
     Resources& resources = *resources_;
     switch (build_stage_) {
     case 0: {
-        store_ = SettingsStore(options_.settings_file);
-        break;
-    }
-    case 1: {
         resources.filesystem = options_.filesystem;
         if (!resources.filesystem) {
             if (options_.game_root.empty()) {
@@ -272,7 +268,7 @@ EawrOptionsScreen::BuildProgress EawrOptionsScreen::advance_build() {
         }
         break;
     }
-    case 2: {
+    case 1: {
         auto catalog = data::load_dialog_catalog(*resources.filesystem);
         if (!catalog) {
             failure_ = core::format_diagnostic(catalog.error());
@@ -281,7 +277,7 @@ EawrOptionsScreen::BuildProgress EawrOptionsScreen::advance_build() {
         resources.catalog.emplace(std::move(catalog.value()));
         break;
     }
-    case 3: {
+    case 2: {
         auto atlas = assets::load_mega_texture_atlas(*resources.filesystem,
             "data/art/textures/" + resources.catalog->skin.texture_file + ".mtd");
         if (!atlas) {
@@ -296,7 +292,7 @@ EawrOptionsScreen::BuildProgress EawrOptionsScreen::advance_build() {
         }
         break;
     }
-    case 4: {
+    case 3: {
         if (auto text_database = data::load_language_text_database(*resources.filesystem, "ENGLISH")) {
             resources.text_database.emplace(std::move(text_database.value()));
             resources.text.emplace(*resources.text_database);
@@ -305,7 +301,7 @@ EawrOptionsScreen::BuildProgress EawrOptionsScreen::advance_build() {
         }
         break;
     }
-    case 5: {
+    case 4: {
         const std::filesystem::path cache = default_font_cache(options_.font_cache);
         const vfs::MountSpec mount{.layer_id = "font-cache", .data_root = cache,
                                    .loose_logical_prefix = std::string(model::font_cache_prefix), .active_archives = {}};
@@ -338,7 +334,7 @@ void EawrOptionsScreen::set_game_actions(Options options) {
     options_.load_game = std::move(options.load_game);
 }
 
-bool EawrOptionsScreen::prewarm_theme(Node& parent, const bool finish) {
+bool EawrOptionsScreen::prewarm_theme(Node& parent, const bool finish, const bool preload_standalone) {
     OptionsTiming timing("theme");
     if (!built_ || parent.get_viewport() == nullptr) return false;
     Resources& resources = *resources_;
@@ -365,6 +361,30 @@ bool EawrOptionsScreen::prewarm_theme(Node& parent, const bool finish) {
         resources.theme_task = std::make_unique<ThemeBuildTask>(*resources.theme_model, *resources.textures, *resources.fonts);
     }
 
+    if (preload_standalone && resources.theme_task) {
+        // Standalone images can require a large decode and upload in one indivisible
+        // operation. Prepare them while loading, using the mod's actual theme model.
+        const auto prepare = [&](const model::ThemeStyle& style) {
+            for (const auto& slot : style.textures) {
+                if (slot.origin == model::TextureOrigin::standalone) {
+                    static const bool timing = OS::get_singleton()->has_environment("EAWR_OPTIONS_TIMING");
+                    const auto start = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                    static_cast<void>(resources.textures->texture(slot, resources.theme_model->scale_x,
+                                                                  resources.theme_model->scale_y));
+                    if (timing) {
+                        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - start).count();
+                        if (us >= 10000) UtilityFunctions::print("EAWR options slow theme texture: style ", text(style.name),
+                            "; slot ", text(slot.slot), "; texture ", text(slot.texture), "; path ", text(slot.logical_path), "; us ", us);
+                    }
+                }
+            }
+        };
+        prepare(resources.theme_model->defaults);
+        for (const auto& style : resources.theme_model->variations) prepare(style);
+        return false;
+    }
+
     if (resources.theme_task) {
         bool done = false;
         for (int step = 0; step < 8 && !done; ++step) done = resources.theme_task->step();
@@ -377,6 +397,10 @@ bool EawrOptionsScreen::prewarm_theme(Node& parent, const bool finish) {
 }
 
 void EawrOptionsScreen::reload_settings() {
+    if (settings_save_failed_) {
+        draft_ = committed_;
+        return;
+    }
     store_ = SettingsStore(options_.settings_file);
     // The settings: a missing file is the defaults, an unreadable one the defaults with notes.
     file_existed_ = store_.exists();
@@ -396,8 +420,6 @@ void EawrOptionsScreen::reload_settings() {
             static_cast<void>(model::clamp_settings(committed_));
         }
     }
-    draft_ = committed_;
-
     const vfs::Vfs& filesystem = *resources_->filesystem;
     model::apply_selection_config(committed_, filesystem);
     {
@@ -1819,7 +1841,8 @@ void EawrOptionsScreen::commit_page(const bool leave) {
     }
     draft_ = committed_;
     std::string error;
-    if (!store_.save(committed_, error)) notes_.push_back("settings not saved: " + error);
+    settings_save_failed_ = !store_.save(committed_, error);
+    if (settings_save_failed_) notes_.push_back("settings not saved: " + error);
     apply_committed(previous_video);
     // The viewer's other readers (the next battle's buses, the live speed step) see the same record.
     ActiveSettings::set(committed_);
