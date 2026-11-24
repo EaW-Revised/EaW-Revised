@@ -97,6 +97,7 @@ LiveUnit TacticalSession::Impl::live_at(const EntityId id, const entt::entity ha
         result.garrison_unit = registry.all_of<GarrisonUnit>(handle);
         result.script_invulnerable = registry.all_of<ScriptInvulnerable>(handle);
         result.hold_fire = registry.all_of<HoldFire>(handle);
+        result.suspended_locomotor = registry.all_of<SuspendedLocomotor>(handle);
         if (const auto* route = registry.try_get<Waypoints>(handle)) result.waypoints = route->value;
         if (const auto* history = registry.try_get<PositionHistoryComponent>(handle)) result.position_history = history->value;
         return result;
@@ -139,6 +140,7 @@ void TacticalSession::Impl::rebuild(const std::vector<LiveUnit>& units, const bo
             if (unit.garrison_unit) emplace_component<GarrisonUnit>(handle);
             if (unit.script_invulnerable) emplace_component<ScriptInvulnerable>(handle);
             if (unit.hold_fire) emplace_component<HoldFire>(handle);
+            if (unit.suspended_locomotor) emplace_component<SuspendedLocomotor>(handle);
             emplace_component<Identity>(handle, state.type_id, state.owner, state.purchase_type,
                 state.purchase_token, state.barrage_source, state.garrison_enabled, state.controller_seat, state.control);
             emplace_component<Placement>(handle, state.position, state.rotation);
@@ -229,8 +231,9 @@ enum CommitBit : std::uint32_t {
     commit_corrupt = 1U << 12, commit_waypoints = 1U << 13, commit_history = 1U << 14,
     commit_vulnerable = 1U << 15, commit_upgraded = 1U << 16, commit_script_invulnerable = 1U << 17,
     commit_hold_fire = 1U << 18, commit_script_view = 1U << 19,
-    commit_every_component = (1U << 20) - 1U,
-    commit_new_entity = 1U << 20,
+    commit_suspended_locomotor = 1U << 20,
+    commit_every_component = (1U << 21) - 1U,
+    commit_new_entity = 1U << 21,
 };
 
 // One optional component in the phase: assign a changed value in place (the pool is not restructured), or flag
@@ -280,6 +283,7 @@ core::Result<void> TacticalSession::Impl::commit_units(std::vector<LiveUnit>& un
         auto& garrison_storage = registry.storage<GarrisonUnit>();
         auto& script_invulnerable_storage = registry.storage<ScriptInvulnerable>();
         auto& hold_fire_storage = registry.storage<HoldFire>();
+        auto& suspended_locomotor_storage = registry.storage<SuspendedLocomotor>();
         auto& carried_storage = registry.storage<CarriedHeroes>();
         auto& health_storage = registry.storage<Health>();
         auto& asteroid_storage = registry.storage<AsteroidContact>();
@@ -340,6 +344,7 @@ core::Result<void> TacticalSession::Impl::commit_units(std::vector<LiveUnit>& un
                 if (unit.garrison_unit != garrison_storage.contains(handle)) mask |= commit_garrison;
                 if (unit.script_invulnerable != script_invulnerable_storage.contains(handle)) mask |= commit_script_invulnerable;
                 if (unit.hold_fire != hold_fire_storage.contains(handle)) mask |= commit_hold_fire;
+                if (unit.suspended_locomotor != suspended_locomotor_storage.contains(handle)) mask |= commit_suspended_locomotor;
                 if (carried_storage.contains(handle)) {
                     if (state.contained.empty()) mask |= commit_carried;
                     else if (auto& current = carried_storage.get(handle); current.value != state.contained) {
@@ -459,6 +464,13 @@ core::Result<void> TacticalSession::Impl::commit_units(std::vector<LiveUnit>& un
                         ++writes;
                     }
                 }
+                if ((op.mask & commit_suspended_locomotor) != 0U) {
+                    if (unit.suspended_locomotor != registry.all_of<SuspendedLocomotor>(handle)) {
+                        if (unit.suspended_locomotor) emplace_component<SuspendedLocomotor>(handle);
+                        else registry.remove<SuspendedLocomotor>(handle);
+                        ++writes;
+                    }
+                }
                 if ((op.mask & commit_carried) != 0U) {
                     auto carried = state.contained.empty() ? std::optional<std::vector<CarriedObject>>{} : std::optional(state.contained);
                     commit_optional<CarriedHeroes>(handle, carried, writes);
@@ -570,6 +582,11 @@ void TacticalSession::Impl::commit_units_reference(std::vector<LiveUnit>& units,
             if (unit.script_invulnerable != registry.all_of<ScriptInvulnerable>(handle)) {
                 if (unit.script_invulnerable) emplace_component<ScriptInvulnerable>(handle);
                 else registry.remove<ScriptInvulnerable>(handle);
+                ++writes;
+            }
+            if (unit.suspended_locomotor != registry.all_of<SuspendedLocomotor>(handle)) {
+                if (unit.suspended_locomotor) emplace_component<SuspendedLocomotor>(handle);
+                else registry.remove<SuspendedLocomotor>(handle);
                 ++writes;
             }
             commit_optional<CarriedHeroes>(handle, carried, writes);

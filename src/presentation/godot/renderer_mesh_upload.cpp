@@ -276,7 +276,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
 
 [[nodiscard]] bool GodotRenderer::Impl::upload_mesh(
     RenderingServer& rendering, const ModelView& source, Resource& target, const bool authored_binormals,
-    const bool resident) {
+    const bool resident, const bool bone_space_normals) {
     core::load_profile::Scope scope(core::load_profile::Phase::mesh_upload);
     target.category_triangles = 0;
     target.diagnostic_surface_names.clear();
@@ -327,6 +327,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
     std::optional<animation::Pose> rest;
     detail::ContentDigest mesh_digest;
     mesh_digest.scalar(authored_binormals);
+    mesh_digest.scalar(bone_space_normals);
     std::uint64_t mesh_bytes{};
     for (const auto& mesh : source.meshes) {
         if (!mesh.visible) continue;
@@ -391,7 +392,9 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
                 const assets::Vertex vertex = rigid_bind
                     ? animation::Player::rigid_vertex_to_bind(*rigid_bind, submesh.vertices[index])
                     : submesh.vertices[index];
-                const Vector3 normal = axis_convert(vertex.normal).normalized();
+                // A rigid mesh's stored normal is in its bone's space; a family that reads it there keeps it.
+                const Vector3 normal = axis_convert(bone_space_normals ? submesh.vertices[index].normal : vertex.normal)
+                                           .normalized();
                 if (render_categories::ablation != "off") {
                     const auto point = axis_convert(vertex.position);
                     if (!target.diagnostic_bounds) target.diagnostic_bounds = AABB(point, Vector3());

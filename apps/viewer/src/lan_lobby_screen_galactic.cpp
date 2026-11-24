@@ -127,8 +127,8 @@ bool EawrLanLobby::prefetch_galactic_content(const bool needs_mod_digests) {
 // A fresh host does not wait for the mod content digests, Load Game does (galactic_press_gate).
 void EawrLanLobby::finish_pending_galactic() {
     Impl& impl = *impl_;
-    // The host options page shows the number of humans the room opens for: once the campaign list is known, it is the campaign's
-    // playable factions unless the host chose another number.
+    // The host options page shows the number of humans the room opens for: once the campaign list is known, it is the default (two)
+    // unless the host chose another number.
     if (page_ == Page::host_options && impl.host_options.game_type == galactic_game_type && !impl.galactic_humans_chosen
         && !impl.galactic_humans_defaulted && impl.galactic_backend && impl.galactic_backend->content_ready()) fill_host_seats();
     if (!impl.host_pending && !impl.load_pending) { impl.load_digest_wait.reset(); impl.pending_text.clear(); impl.content_wait_since.reset(); return; }

@@ -54,6 +54,7 @@ inline constexpr std::uint64_t first_object_instance = std::uint64_t{1} << 36;
 
 // Script commands the bindings issue (ScriptCommand::verb), translated to tactical orders.
 inline constexpr std::string_view verb_move = "foc.move";     // issuer, unit, x, y, z
+inline constexpr std::string_view verb_suspend_locomotor = "foc.suspend_locomotor"; // issuer, unit, bool
 inline constexpr std::string_view verb_face = "foc.face";     // issuer, unit, x, y, z
 inline constexpr std::string_view verb_attack = "foc.attack"; // issuer, unit, target
 // #452 orders (space-orders OR-12, OR-14): issuer, unit, then a target object or x, y, z.

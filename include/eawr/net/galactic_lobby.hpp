@@ -66,11 +66,14 @@ inline constexpr std::size_t galactic_lobby_max_human_sides = sim::galactic::gal
 // (the transport's seats) and the human seat ceiling (eight), so a room is never opened for a number the campaign cannot start with.
 [[nodiscard]] std::uint32_t galactic_lobby_max_humans(const sim::galactic::MpLobbyCampaign& campaign, std::uint32_t seat_limit) noexcept;
 
-// The number of humans a new campaign room opens for when the host has not chosen one (D8: every playable faction row is
-// claimable, so no joiner finds the room full): a multiplayer campaign's playable factions (galactic_lobby_max_humans), a co-op
-// campaign two (all on one side, as co-op seats). The host's "Human players" choice still caps the room.
+// The number of humans a new campaign room opens for when the host has not chosen one: two. A room waits for every seat it opens
+// with (its mesh is fixed), so a larger default left two players unable to start a multi-faction campaign; this holds until rooms can
+// start with fewer humans than seats (#8130). The host's "Human players" choice raises it up to galactic_lobby_max_humans.
 [[nodiscard]] std::uint32_t galactic_lobby_default_humans(const sim::galactic::MpLobbyCampaign& campaign, std::uint32_t seat_limit) noexcept;
 
+// What the host reads while a campaign room that opened for `capacity` players has only `seated` of them: Start stays off until the
+// room is full (its mesh is fixed; #8130), so the text names the missing players and how to start sooner. Empty when the room is full.
+[[nodiscard]] std::string galactic_room_waiting_text(std::size_t seated, std::uint32_t capacity);
 
 enum class LobbyGameMode : std::uint8_t { skirmish, galactic };
 // Which text the room's options carry. An empty or unrecognised option blob is a skirmish room (its own codec refuses it).

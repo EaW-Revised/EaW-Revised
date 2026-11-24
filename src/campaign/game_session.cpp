@@ -651,10 +651,11 @@ const galactic::GalacticSession& GameSession::Impl::world() const { return scrip
 
 galactic::GalacticSession& GameSession::Impl::world() { return scripts ? scripts->parent_world() : galaxy; }
 
-core::Result<std::string> GameSession::Impl::galaxy_hash() {
+core::Result<std::string> GameSession::Impl::galaxy_hash(bool final_barrier) {
     auto digest = core::Result<std::string>::success(world().cached_state_hash().get());
     if (scripts) {
-        auto script_digest = scripts->uses_sync_hash() ? scripts->script_sync_hash() : scripts->script_state_hash();
+        auto script_digest = final_barrier ? scripts->script_hash_for_final_barrier(scripts->uses_sync_hash())
+            : scripts->uses_sync_hash() ? scripts->script_sync_hash() : scripts->script_state_hash();
         if (!script_digest) return script_digest;
         digest = core::Result<std::string>::success(authoritative::authoritative_state_sha256(
             world().completed_tick(), digest.value(), script_digest.value()));
@@ -885,9 +886,9 @@ std::string GameSession::Impl::child_context_hash() const {
     return queued_context(core::sha256_hex(bytes));
 }
 
-core::Result<std::string> GameSession::Impl::base_hash() {
+core::Result<std::string> GameSession::Impl::base_hash(bool final_barrier) {
     if (!child) {
-        auto galaxy_digest = galaxy_hash();
+        auto galaxy_digest = galaxy_hash(final_barrier);
         if (!galaxy_digest) return galaxy_digest;
         if (!admission) return core::Result<std::string>::success(queued_context(galaxy_digest.value()));
         auto record_digest = campaign::conflict_hash(admission->conflict);

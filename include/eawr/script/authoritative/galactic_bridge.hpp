@@ -183,9 +183,16 @@ public:
     [[nodiscard]] ScriptScheduler* object_scheduler() noexcept;
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] std::size_t pending_script_commands() const noexcept;
+    // Conservative generation for pending script commands and seat routing cursors; not saved or hashed.
+    [[nodiscard]] std::uint64_t script_routing_revision() const noexcept;
     [[nodiscard]] sim::galactic::GalacticReplay record() const;
     [[nodiscard]] core::Result<std::string> script_state_hash();
     [[nodiscard]] core::Result<std::string> script_sync_hash();
+    // Only the campaign's final tick barrier may reuse the just-serviced scheduler digests.
+    [[nodiscard]] core::Result<std::string> script_hash_for_final_barrier(bool sync_ai);
+    // Verification-only diagnostics; neither value enters saved or hashed state.
+    [[nodiscard]] std::uint64_t verified_script_hash_reuse_count() const noexcept;
+    [[nodiscard]] bool script_hash_reuse_verification_enabled() const noexcept;
     [[nodiscard]] bool uses_sync_hash() const noexcept;
     // Separate shared-scheduler persistence blobs, at the completed barrier.
     [[nodiscard]] core::Result<std::string> save_story();

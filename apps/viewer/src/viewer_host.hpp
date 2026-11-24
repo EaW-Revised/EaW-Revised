@@ -19,6 +19,7 @@
 #include "eawr/presentation/camera/camera.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
 #include "eawr/presentation/ui/input_routing.hpp"
+#include "eawr/presentation/ui/build_label.hpp"
 #include "eawr/sim/snapshot.hpp"
 
 #include <iosfwd>
@@ -72,6 +73,8 @@ private:
     void read_host_options(const godot::PackedStringArray& arguments);
     bool configure_preview_render_overrides(const godot::PackedStringArray& arguments);
     void apply_preview_render_overrides();
+    static void write_window_title(const std::string& title);
+    eawr::presentation::ui::OwnedTitle window_title_;
     void record_render_categories();
     std::optional<int> preview_vsync_;
     std::optional<int> preview_max_fps_;

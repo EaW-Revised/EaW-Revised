@@ -1321,7 +1321,7 @@ core::Result<GameTick> GameSession::finish_step(StepContext& tick_context) {
             out.state_hash = sim::StateHash(out.state_sha256);
         }
     } else if (out.mode == SessionMode::battle || impl.conflict_services || impl.world().victory() || impl.admission || !impl.waiting_admissions.empty() || impl.conflict_pause || out.result || impl.return_state != TacticalReturnState{}) {
-        auto digest = impl.base_hash();
+        auto digest = impl.base_hash(true);
         if (digest) {
             auto native = impl.native_hash();
             if (!native) digest = native;

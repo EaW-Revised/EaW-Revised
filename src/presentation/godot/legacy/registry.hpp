@@ -157,4 +157,10 @@ inline constexpr Family families[]{
     return family != nullptr && family->authored_binormals;
 }
 
+// Whether the material's legacy/ family reads the normal in the mesh's authored space.
+[[nodiscard]] inline bool bone_space_normals(const MaterialDescription& material) noexcept {
+    const Family* family = find_family(material);
+    return family != nullptr && family->bone_space_normals;
+}
+
 } // namespace eawr::presentation::godot_backend::legacy

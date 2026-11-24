@@ -40,7 +40,7 @@ namespace eawr::presentation::godot_backend {
 [[nodiscard]] inline std::string engine_signature() { return presentation::current_engine_signature().display; }
 [[nodiscard]] inline bool engine_is_patched() { return presentation::current_engine_signature().patched; }
 
-// True for an editor or debug-template engine (the engine itself titles those windows "(DEBUG)").
+// True for an editor or debug-template engine (the engine titles windows it writes itself "(DEBUG)"; the viewer title does not).
 [[nodiscard]] inline bool engine_debug_enabled() {
     auto* os = godot::OS::get_singleton();
     return os != nullptr && (os->has_feature("editor") || os->is_debug_build());

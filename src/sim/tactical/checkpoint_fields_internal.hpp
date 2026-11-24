@@ -242,6 +242,7 @@ template <> struct Fields<session_detail::LiveUnit> {
         a(v.upgraded_durability, v.asteroid_contact, v.nebula, v.corrupt, v.waypoints, v.garrison_unit, v.sighting, v.position_history);
         if (a.script_invulnerable) a(v.script_invulnerable);
         if (a.hold_fire) a(v.hold_fire);
+        if (a.suspended_locomotor) a(v.suspended_locomotor);
         if (a.script_view) a(v.script_view);
     }
 };

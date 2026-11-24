@@ -9,6 +9,7 @@ project(
 )
 
 include(CTest)
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyScriptHashReuse.cmake")
 
 option(EAWR_WARNINGS_AS_ERRORS "Treat warnings in EAWR project code as errors" ON)
 option(EAWR_ENABLE_SHADER_BRIDGE_GATE "Build the external-DLL shader bridge experiment" OFF)

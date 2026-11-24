@@ -444,6 +444,12 @@
     "constant": "opcode_script_selectable",
     "name": "script selectable",
     "documented": true
+   },
+   {
+    "value": 49,
+    "constant": "opcode_script_suspend_locomotor",
+    "name": "script suspend locomotor",
+    "documented": true
    }
   ]
  },
@@ -696,6 +702,11 @@
   {
    "tag": "SHFR",
    "constant": "hold_fire_tag",
+   "documented": true
+  },
+  {
+   "tag": "SLOC",
+   "constant": "suspended_locomotor_tag",
    "documented": true
   },
   {

@@ -58,3 +58,4 @@ add_test(NAME foc_contrast_module_admission COMMAND foc_contrast_module_admissio
 
 # Tier labels (cmake/EawrTestTiers.cmake).
 eawr_label_tests()
+eawr_verify_script_hash_reuse_tests(ALL)

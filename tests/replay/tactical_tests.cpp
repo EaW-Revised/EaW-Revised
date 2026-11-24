@@ -1193,7 +1193,7 @@ void test_human_seat_admission() {
             std::variant_alternative_t<Index, tactical::CommandPayload>{}}) == tactical::PayloadAuthority::engine_only), ...);
         return engine_count;
     };
-    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 17U,
+    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 18U,
         "CP-1: every payload is classified, including script invulnerability, script despawn and change-owner as engine-only");
     tactical::SeatBinding binding{{1}, 2};
     tactical::SeatCommand intent{{0, {1}, 0}, 2, {10}, tactical::StopPayload{}};
@@ -1226,6 +1226,7 @@ void test_human_seat_admission() {
         tactical::CommandPayload{tactical::ScriptTeleportPositionPayload{}}, tactical::CommandPayload{tactical::ScriptHidePayload{}},
         tactical::CommandPayload{tactical::ScriptHyperspaceInPayload{}},
         tactical::CommandPayload{tactical::ScriptSelectablePayload{}},
+        tactical::CommandPayload{tactical::ScriptSuspendLocomotorPayload{}},
         tactical::CommandPayload{tactical::ScriptCancelHyperspacePayload{}},
         tactical::CommandPayload{tactical::BuyPayload{1, true}},
         tactical::CommandPayload{tactical::ReinforcePayload{1, {}, 99}},

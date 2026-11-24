@@ -1585,6 +1585,71 @@ void test_final_facing() {
     }
 }
 
+void test_suspend_locomotor() {
+    for (const bool replace : {false, true}) {
+        tactical::TacticalReplay replay;
+        replay.setup = setup({{1, corvette_type, 1, at(0, 0, -20), yaw(0), {}}});
+        replay.final_tick_count = 250;
+        replay.commands = {
+            command(0, 1, 0, 1, tactical::MovePayload{at(3000, 0, -20)}),
+            command(10, 1, 1, 1, tactical::ScriptSuspendLocomotorPayload{true}),
+            command(15, 1, 2, 1, tactical::ScriptSuspendLocomotorPayload{true}),
+        };
+        if (replace) {
+            replay.commands.push_back(command(20, 1, 3, 1, tactical::MovePayload{at(-3000, 0, -20)}));
+            replay.commands.push_back(command(25, 1, 4, 1, tactical::MovePayload{at(0, 3000, -20)}));
+        }
+        replay.commands.push_back(command(40, 1, 5, 1, tactical::ScriptSuspendLocomotorPayload{false}));
+        replay.commands.push_back(command(45, 1, 6, 1, tactical::ScriptSuspendLocomotorPayload{false}));
+        const auto encoded = tactical::write_replay(replay);
+        expect(static_cast<bool>(encoded), "locomotor hold: replay writes");
+        if (encoded) {
+            const auto parsed = tactical::parse_replay(encoded.value());
+            expect(parsed && parsed.value().commands == replay.commands, "locomotor hold: replay commands round trip");
+        }
+        std::optional<std::vector<std::string>> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto created = tactical::TacticalSession::from_replay(replay, {}, {}, foc_table());
+            expect(static_cast<bool>(created), "locomotor hold: session creates");
+            if (!created) return;
+            auto world = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::vector<math::Vec3> positions;
+            std::optional<tactical::TacticalSession> restored;
+            for (std::uint64_t tick = 0; tick < replay.final_tick_count; ++tick) {
+                const auto stepped = world.step(executor);
+                expect(static_cast<bool>(stepped), "locomotor hold: session advances");
+                if (!stepped) return;
+                hashes.push_back(stepped.value().state_sha256);
+                positions.push_back(world.units().front().position);
+                if (restored) {
+                    const auto resumed = restored->step(executor);
+                    expect(resumed && resumed.value().state_sha256 == stepped.value().state_sha256,
+                        "locomotor hold: restored continuation matches");
+                }
+                if (tick == 25) {
+                    auto saved = world.save_checkpoint_state();
+                    auto fresh = tactical::TacticalSession::from_replay(replay, {}, {}, foc_table());
+                    expect(saved && fresh && fresh.value().load_checkpoint_state(saved.value()), "locomotor hold: held checkpoint restores");
+                    if (saved && fresh) {
+                        expect(world.canonical_state_bytes() == fresh.value().canonical_state_bytes(),
+                            "locomotor hold: checkpoint preserves canonical state");
+                        restored.emplace(std::move(fresh).value());
+                    }
+                }
+            }
+            for (std::size_t tick = 12; tick <= 40; ++tick)
+                expect(positions[tick] == positions[11], "locomotor hold: position remains fixed");
+            expect(positions[65] != positions[40], "locomotor hold: release resumes movement");
+            if (replace) expect(positions.back().y > positions[40].y, "locomotor hold: the last held move replaces earlier destinations");
+            else expect(positions.back().x > positions[40].x, "locomotor hold: the interrupted path resumes");
+            if (reference) expect(*reference == hashes, "locomotor hold: hashes match across worker counts");
+            else reference = std::move(hashes);
+        }
+    }
+}
+
 } // namespace
 
 int main(const int argc, char** argv) {
@@ -1595,6 +1660,7 @@ int main(const int argc, char** argv) {
     }
     test_waypoints();
     test_final_facing();
+    test_suspend_locomotor();
     test_validation();
     test_motion_normalization();
     test_motion_boundaries();

@@ -404,7 +404,8 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
     bool mesh_uploaded = false;
     if (texture_uploaded && material_uploaded == MaterialUpload::success) {
         core::load_profile::DetailScope mesh_scope(core::load_profile::Phase::upload_mesh);
-        mesh_uploaded = upload_mesh(*rendering, model, resource, legacy::authored_binormals(description), resident);
+        mesh_uploaded = upload_mesh(*rendering, model, resource, legacy::authored_binormals(description), resident,
+            legacy::bone_space_normals(description));
     }
     if (!texture_uploaded || material_uploaded != MaterialUpload::success || !mesh_uploaded) {
         free_resource(*rendering, resource);
@@ -542,7 +543,8 @@ bool GodotRenderer::Impl::admit_resource(RenderingServer& rendering, const sim::
                 + recipe.model.source().logical_path + "' no longer reloads to its uploaded content digest");
         }
         ready = model.has_value()
-            && upload_mesh(rendering, model->view(), resource, legacy::authored_binormals(resource.description));
+            && upload_mesh(rendering, model->view(), resource, legacy::authored_binormals(resource.description), true,
+                   legacy::bone_space_normals(resource.description));
     }
     if (!ready) {
         evict_resource(rendering, asset, resource);

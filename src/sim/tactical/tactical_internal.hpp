@@ -71,7 +71,8 @@ inline constexpr std::uint8_t opcode_script_hide = 45; // Lua Hide: flag and zer
 inline constexpr std::uint8_t opcode_script_cancel_hyperspace = 46; // Lua Cancel_Hyperspace: two zero reserved words
 inline constexpr std::uint8_t opcode_script_hyperspace_in = 47; // Lua Cinematic_Hyperspace_In: frames and zero reserved word
 inline constexpr std::uint8_t opcode_script_selectable = 48; // Lua Set_Selectable: flag and zero reserved word
-inline constexpr std::uint8_t max_command_opcode = opcode_script_selectable;
+inline constexpr std::uint8_t opcode_script_suspend_locomotor = 49; // flag and zero reserved word
+inline constexpr std::uint8_t max_command_opcode = opcode_script_suspend_locomotor;
 
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,

@@ -59,6 +59,9 @@ struct Family final {
     // product, so it survives skinning; Godot's own BINORMAL is always
     // cross(NORMAL, TANGENT), which authored frames often are not (#199).
     bool authored_binormals{};
+    // The vertex stage reads the normal as authored in the mesh's own space (the shield edge term reads its
+    // third component there), not the bind-model-space normal a rigid bone-attached mesh is uploaded with.
+    bool bone_space_normals{};
     // The adapter source for a render pass the family admits.
     std::string_view (*shader)(RenderPass pass) noexcept {};
     // Why the authored bindings cannot reach this adapter, or nullopt. The

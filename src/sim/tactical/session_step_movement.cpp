@@ -747,6 +747,7 @@ core::Result<void> session_detail::Tick::movement() {
     movement_.emplace();
     auto& craft_steps = movement_.value().craft_steps.emplace(moving.size());
     std::vector<std::optional<core::Diagnostic>> move_errors(moving.size());
+    std::vector<std::vector<std::pair<EntityId, math::Vec3>>> released_teams(tick_partition_count);
     const auto moved = executor.execute_phase("movement", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, moving.size());
         for (auto index = range.begin; index < range.end; ++index) {
@@ -775,6 +776,39 @@ core::Result<void> session_detail::Tick::movement() {
                 continue;
             }
             const auto squadron = craft_squadron.find(unit.state.entity_id);
+            if (unit.suspended_locomotor) {
+                const auto group = std::lower_bound(impl_->squadrons.begin(), impl_->squadrons.end(), unit.state.entity_id,
+                    [](const auto& row, const EntityId id) { return row.container < id; });
+                if (group != impl_->squadrons.end() && group->container == unit.state.entity_id) {
+                    const bool member_held = std::any_of(group->members.begin(), group->members.end(), [&](const EntityId id) {
+                        const auto handle = impl_->handles.find(id);
+                        return handle != impl_->handles.end() && impl_->registry.all_of<SuspendedLocomotor>(handle->second);
+                    });
+                    if (!member_held) {
+                        unit.suspended_locomotor = false;
+                        unit.state.order = {};
+                        if (unit.motion) *unit.motion = MotionState{};
+                        unit.speed = {};
+                        unit.formation.reset();
+                        released_teams[partition].emplace_back(unit.state.entity_id, unit.state.position);
+                        continue;
+                    }
+                }
+                // Motion plans use absolute frames. Move their clock with the hold so that the
+                // next sample resumes at the same point, while orders can still replace the plan.
+                if (unit.motion && unit.motion->kind != MotionKind::none) {
+                    bool valid = unit.motion->start_tick != std::numeric_limits<std::uint64_t>::max();
+                    if (valid) ++unit.motion->start_tick;
+                    for (auto& node : unit.motion->nodes) {
+                        math::Fixed shifted;
+                        if (!math::try_add(node.frame, math::Fixed::from_raw(math::Fixed::scale), shifted)) { valid = false; break; }
+                        node.frame = shifted;
+                    }
+                    if (!valid) move_errors[index] = detail::diagnostic(diagnostic_codes::worker_failure,
+                        "suspended locomotor path frame overflow");
+                }
+                continue;
+            }
             // WIN-02, WMS-02: a queued formation plan cannot bypass the deployment lock.
             if (unit.abilities && ability_movement_disabled(*impl_->abilities.find(unit.state.type_id), *unit.abilities)) {
                 if (unit.motion) unit.motion = MotionState{};
@@ -861,6 +895,12 @@ core::Result<void> session_detail::Tick::movement() {
         if (error) {
             return core::Result<void>::failure(std::move(*error));
         }
+    }
+    // Team releases are rare ordered commits; their members continue to use the normal parallel movement phase.
+    auto& minds = craft_prep_.value().minds.value();
+    for (const auto& partition : released_teams) for (const auto& [id, position] : partition) {
+        const auto found = minds.find(id);
+        if (found != minds.end()) apply_squadron_order(minds.at(id), MovePayload{position}, position, impl_->motion.squadrons);
     }
     for (const auto builds : movement_builds) tick_work.level_matrix_builds += builds;
     for (const auto& work : avoidance_work) {

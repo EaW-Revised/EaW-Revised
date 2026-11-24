@@ -29,3 +29,4 @@ add_subdirectory(foc)
 eawr_add_python_contract(python_script_acceptance_p007_fixtures tests.script.acceptance.test_p007_fixtures)
 
 eawr_label_tests()
+eawr_verify_script_hash_reuse_tests(ALL)

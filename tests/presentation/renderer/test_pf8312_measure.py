@@ -2,9 +2,12 @@
 import os
 import json
 import subprocess
+import sys
 from pathlib import Path
 import unittest
-import test_front_end as front
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import test_front_end as front  # noqa: E402
 
 DRIVER = r"""extends SceneTree
 var scene

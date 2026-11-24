@@ -37,3 +37,4 @@ add_test(NAME checkpoint_field_completeness_contracts
 
 # Tier labels (cmake/EawrTestTiers.cmake).
 eawr_label_tests()
+eawr_verify_script_hash_reuse_tests(ALL)

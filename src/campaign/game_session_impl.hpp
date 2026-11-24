@@ -129,7 +129,7 @@ public:
     static std::string with_native(const std::string& base, const std::string& native);
     const galactic::GalacticSession& world() const;
     galactic::GalacticSession& world();
-    core::Result<std::string> galaxy_hash();
+    core::Result<std::string> galaxy_hash(bool final_barrier = false);
     std::uint64_t tick{};
     AutoResolveOutcomeServices outcome_services;
     std::array<std::optional<AutoResolveOutcomeApplication>, 8> outcome_history{};
@@ -227,7 +227,7 @@ public:
     bool role_pending() const;
     std::string queued_context(std::string digest) const;
     std::string child_context_hash() const;
-    core::Result<std::string> base_hash();
+    core::Result<std::string> base_hash(bool final_barrier = false);
     core::Result<std::string> hash();
     // The inputs of hash(), named, for a refusal that reports which one differs (never called on the success path).
     std::string hash_components();

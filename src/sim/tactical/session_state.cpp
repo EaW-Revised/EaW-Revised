@@ -73,12 +73,14 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
             return unit.abilities && unit.abilities->deploy_pose.has_value();
         });
         out.hold_fire = std::any_of(live.begin(), live.end(), [](const auto& unit) { return unit.hold_fire; });
+        out.suspended_locomotor = std::any_of(live.begin(), live.end(), [](const auto& unit) { return unit.suspended_locomotor; });
         out.script_view = std::any_of(live.begin(), live.end(), [](const auto& unit) { return unit.script_view.has_value(); });
         // SSU-03: domain 37 base includes direct-creation references and positions.
         // +1 fire range; +2 script invulnerability; +4 final facing; +8 deploy clips; +16 hold fire; +32 random-hardpoint projectiles; +64 script view flags; +128 combat-modifier projectiles. Older layouts are refused.
         out(std::uint32_t{37U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)
             + (out.final_facing ? 4U : 0U) + (out.deploy_poses ? 8U : 0U) + (out.hold_fire ? 16U : 0U)
-            + (out.random_hardpoints ? 32U : 0U) + (out.script_view ? 64U : 0U) + (out.combat_mods ? 128U : 0U)});
+            + (out.random_hardpoints ? 32U : 0U) + (out.script_view ? 64U : 0U) + (out.combat_mods ? 128U : 0U)
+            + (out.suspended_locomotor ? 256U : 0U)});
         checkpoint_detail::Access::state(out, std::as_const(*impl_));
         out(live);
         out(checkpoint_detail::Access::visibility(*impl_));
@@ -126,7 +128,7 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         checkpoint_detail::Reader in(bytes);
         std::uint32_t version{};
         in(version);
-        if (version < 37U || version > 292U) throw checkpoint_detail::Invalid("unsupported child state domain");
+        if (version < 37U || version > 548U) throw checkpoint_detail::Invalid("unsupported child state domain");
         in.fire_range_bonuses = (version - 37U) % 2U == 1U;
         in.script_invulnerable = (version - 37U) % 4U >= 2U;
         in.final_facing = (version - 37U) % 8U >= 4U;
@@ -135,6 +137,7 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         in.random_hardpoints = (version - 37U) % 64U >= 32U;
         in.script_view = (version - 37U) % 128U >= 64U;
         in.combat_mods = (version - 37U) % 256U >= 128U;
+        in.suspended_locomotor = (version - 37U) % 512U >= 256U;
         const auto cursors = impl_->last_submitted;
         checkpoint_detail::Access::state(in, *impl_);
         // SAE-10: a reinforcement whose search failed advanced its issuer's cursor but is never recorded, so the
@@ -174,6 +177,9 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         if (in.hold_fire && std::none_of(live.begin(), live.end(), [](const auto& unit) {
                 return unit.hold_fire;
             })) throw checkpoint_detail::Invalid("noncanonical empty hold-fire domain");
+        if (in.suspended_locomotor && std::none_of(live.begin(), live.end(), [](const auto& unit) {
+                return unit.suspended_locomotor;
+            })) throw checkpoint_detail::Invalid("noncanonical empty suspended-locomotor domain");
         if (in.script_view && std::none_of(live.begin(), live.end(), [](const auto& unit) {
                 return unit.script_view.has_value();
             })) throw checkpoint_detail::Invalid("noncanonical empty script-view domain");
@@ -921,6 +927,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.garrison_marks"); append_canonical_garrison_marks_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.script_invulnerable"); append_canonical_script_invulnerable_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.hold_fire"); append_canonical_hold_fire_state(bytes, units, counts); }
+        { core::tick_profile::Scope section_scope("serial.tactical.finish.section.suspended_locomotor"); append_canonical_suspended_locomotor_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.script_view"); append_canonical_script_view_state(bytes, units, counts); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.craft"); append_canonical_craft_state(bytes, parts(&CanonicalEncoding::crafts)); }
         { core::tick_profile::Scope section_scope("serial.tactical.finish.section.squadron_orders"); append_canonical_squadron_orders_state(bytes, parts(&CanonicalEncoding::minds)); }

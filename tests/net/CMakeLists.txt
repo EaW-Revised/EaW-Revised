@@ -434,3 +434,4 @@ eawr_target_project_warnings(net_gns_stun_list_tests)
 add_test(NAME net_gns_stun_list_contracts COMMAND net_gns_stun_list_tests)
 
 eawr_label_tests()
+eawr_verify_script_hash_reuse_tests()

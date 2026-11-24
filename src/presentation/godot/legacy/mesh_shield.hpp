@@ -103,6 +103,7 @@ inline constexpr Family family{
     .transparent = true,
     .receives_shadows = false,
     .binding_textures = textures,
+    .bone_space_normals = true,
     .shader = &shader,
     .binding_problem = &binding_problem,
     .uniforms = &uniforms,

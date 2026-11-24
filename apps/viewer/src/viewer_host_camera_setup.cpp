@@ -284,6 +284,10 @@ void ViewerHost::close_active_modes() {
 
 void ViewerHost::_notification(const int what) {
     switch (what) {
+    case NOTIFICATION_TRANSLATION_CHANGED:
+        // The engine rewrites the main window title (adding its own "(DEBUG)") on this; put ours back.
+        window_title_.reapply(write_window_title);
+        break;
     case NOTIFICATION_EXIT_TREE:
         // Engine-driven quits (including --quit-after and the preview close driver) still
         // have a tree here. Persist before predelete, while a failed report can set exit 2.

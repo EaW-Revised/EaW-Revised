@@ -1234,6 +1234,48 @@ void check_guard_band(const Fixed guarded_speed, const std::string& label) {
 }
 
 void test_guard_speed() {
+    for (const bool hold_member : {false, true}) {
+        tactical::TacticalSetup start;
+        start.seed = seed;
+        start.players = players();
+        start.units = {unit(10, squadron_a, empire, at(0, 0)), unit(11, craft_type, empire, at(0, 0))};
+        start.squadrons = {{10, {11}}};
+        auto table = motion();
+        table.squadrons.spawners.clear();
+        table.squadrons.squadrons.front().members.resize(1);
+        table.squadrons.squadrons.front().offsets.resize(1);
+        auto created = tactical::TacticalSession::create(start, sensors(), durability(), table, std::nullopt, combat());
+        expect(static_cast<bool>(created), "locomotor: team fixture creates");
+        if (created) {
+            auto world = std::move(created).value();
+            expect(static_cast<bool>(world.submit({{0, empire, 1}, {10}, tactical::MovePayload{at(1500, 800)}})),
+                "locomotor: team move submits");
+            if (hold_member) expect(static_cast<bool>(world.submit({{0, empire, 2}, {11}, tactical::ScriptSuspendLocomotorPayload{true}})),
+                "locomotor: member hold submits");
+            expect(static_cast<bool>(world.submit({{1, empire, 3}, {10}, tactical::ScriptSuspendLocomotorPayload{true}})),
+                "locomotor: team hold submits");
+            expect(static_cast<bool>(world.submit({{5, empire, 4}, {10}, tactical::MovePayload{at(2500, 0)}})),
+                "locomotor: later team move submits");
+            const eawr::platform::ThreadWorkerAdapter executor(1);
+            std::optional<math::Vec3> before;
+            for (int tick = 0; tick < 80; ++tick) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "locomotor: team advances");
+                if (!step) break;
+                const auto units = world.units();
+                const auto container = std::find_if(units.begin(), units.end(), [](const auto& u) { return u.entity_id == 10; });
+                expect(container != units.end(), "locomotor: team container exists");
+                if (container == units.end()) break;
+                if (tick == 2 && !hold_member)
+                    expect(container->order.kind == tactical::OrderKind::none, "locomotor: auto-release clears the prior team order");
+                if (tick == 5) before = container->position;
+                if (tick == 79 && before) {
+                    if (hold_member) expect(container->position == *before, "locomotor: team remains held while a member is held");
+                    else expect(container->position != *before, "locomotor: released team can move on a later order");
+                }
+            }
+        }
+    }
     // The mod-scale case: the corvette flies 3.1, faster than the craft's Min_Speed; the cap is 6.2,
     // above the craft's own maximum, so the craft fly flat out until they hold beside it.
     check_guard_speed(Fixed::from_raw(one * 31 / 10), 4.0, "FM-20 guard of a 3.1 corvette");
