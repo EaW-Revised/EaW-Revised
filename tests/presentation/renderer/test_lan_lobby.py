@@ -1133,6 +1133,25 @@ class LanLobbyGraphical(unittest.TestCase):
             self.assertGreaterEqual(len(shown), 3, "stock multiplayer entries have three playable factions")
             self.assertTrue(all(row["kind"] == "ai" for row in shown[1:3]), [row["kind"] for row in shown])
             self.assertFalse(any(row["kind"] == "more" for row in snapshot["rows"]), "the stock factions fit the dialog")
+            geometry = snapshot["rectangles"]
+            controls = {item["id"]: item for item in geometry["controls"]}
+            combos = {item["id"]: item for item in geometry["combos"]}
+            for row, roster_row in enumerate(snapshot["rows"]):
+                if not roster_row["visible"]:
+                    continue
+                name = controls[f"IDC_PLAYER_NAME_{row}"]
+                faction = controls[f"IDC_PLAYER_FACTION_{row}"]
+                colour = combos[f"IDC_PLAYER_COLOR_{row}"]
+                extra = colour["rect"][2] / 2
+                self.assertAlmostEqual(name["rect"][0], name["authored"][0], delta=0.5)
+                self.assertAlmostEqual(name["rect"][2], name["authored"][2] + extra, delta=0.5)
+                self.assertAlmostEqual(faction["rect"][0], faction["authored"][0] + extra, delta=0.5)
+                self.assertAlmostEqual(faction["rect"][2], faction["authored"][2] + extra, delta=0.5)
+                if row == 0:
+                    team = controls[f"IDC_PLAYER_TEAM_{row}"]
+                    for actual, authored in zip(team["rect"], team["authored"]):
+                        self.assertAlmostEqual(actual, authored, delta=0.5)
+            assert_dialog_rectangles(self, geometry)
 
     def test_galactic_room_wide_campaign_names_the_rows_it_cannot_draw(self):
         # Eight player factions and four AI factions on the dialog's nine rows: the host's row, seven claimable rows, one line.

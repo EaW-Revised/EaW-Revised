@@ -3,6 +3,7 @@
 #include "eawr/platform/tactical_feed.hpp"
 #include "eawr/presentation/camera/arrival_camera.hpp"
 #include "eawr/presentation/camera/retreat_camera.hpp"
+#include "eawr/presentation/camera/story_cinematic.hpp"
 #include "eawr/presentation/camera/tsw_camera.hpp"
 #include "eawr/presentation/camera/retreat_flight.hpp"
 #include "eawr/presentation/ui/time_controls.hpp"
@@ -411,6 +412,21 @@ struct MapMode::State final {
         std::uint64_t handled_tick{};       // the newest power-up event tick already looked at
         std::optional<presentation::camera::TswCameraInput> input;
     } tsw_cinematic;
+    // TSC-01..TSC-14: a tactical script's story cinematic camera, screen fades and environment calls
+    // (docs/behaviour/tactical-story-cinematic.md). The session hands over the requests the script service made; the camera is a
+    // function of the presented battle tick and the requests (presentation::camera::StoryCinematic) and drives the same movie-camera
+    // path the battle cameras use. Presentation only: no state, no hash, no replay byte, nothing saved (a restored battle starts
+    // without one).
+    struct StoryCinematicState final {
+        presentation::camera::StoryCinematic camera;
+        std::uint64_t requests{};              // calls handled in this battle (the report)
+        std::uint64_t environment_requests{};  // Set_New_Environment / Set_Cinematic_Environment calls (TSC-12: kept, not drawn)
+        std::optional<std::int64_t> environment_index;
+        bool environment_cinematic{};
+    } story_cinematic;
+    void apply_story_requests();
+    bool apply_story_pose();
+    void end_story_cinematic();
     void update_tsw_cinematic();
     void resolve_tsw_dish_bones();
     [[nodiscard]] static std::optional<TswDishBone> read_tsw_dish_bone(const LiveSessionView& live,
@@ -419,7 +435,7 @@ struct MapMode::State final {
     void end_tsw_cinematic();
     // A campaign or super weapon cinematic owns the camera, the battle UI and the world input.
     [[nodiscard]] bool cinematic_owns_camera() const noexcept {
-        return retreat_cinematic.active || arrival_cinematic.active || tsw_cinematic.active;
+        return retreat_cinematic.active || arrival_cinematic.active || tsw_cinematic.active || story_cinematic.camera.active();
     }
     // --eawr-perf-movers diagnostics (report path only; nothing reads it without the trace): what aimed the drawn camera.
     struct PerfCameraNote final {

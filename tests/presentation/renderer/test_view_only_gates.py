@@ -1,4 +1,4 @@
-"""#8182: a watched (view-only) battle view issues no order, selects no unit and shows no order control.
+"""#8182: a watched (view-only) battle view issues no order and shows no order control.
 
 The viewer cannot run headless here, so each gate is pinned at the function that would issue the order: the body of every
 order entry point must test the view-only flag before it does anything. Dropping one gate fails the test of that entry point.
@@ -71,16 +71,29 @@ class ViewOnlyGates(unittest.TestCase):
         ):
             with self.subTest(signature=signature):
                 self.assert_gated(path, signature, 520)
-        # No unit of a watched view is ever ours: not selectable, not a build pad.
+        # No unit of a watched view is commandable or a build pad.
         self.assertIn("!live.view_only()", source_text(INPUT))
+
+    def test_watched_input_tracks_hover_and_inspects_without_ordering(self):
+        opening = body(INPUT_COMMANDS, "bool BattleInput::input(", 2500)
+        branch = opening[opening.index("if (live.view_only())"):opening.index("if (const auto* modified")]
+        self.assertIn("InputEventMouseMotion", branch)
+        self.assertIn("pointer_ =", branch)
+        self.assertIn("ui::pick_unit", branch)
+        self.assertIn("inspect_ = picked", branch)
+        self.assertIn("refresh_cards(live)", branch)
+        self.assertNotIn("world_command", branch)
+        self.assertNotIn("right_release", branch)
+        self.assertIn("set_world_hover", source_text(MAP_HUD))
 
     def test_hud_hides_every_order_control_including_the_gift_control(self):
         gift = body(HUD, "void TacticalHud::set_gift(", 1500)
         self.assertIn("state.view_only ||", gift, "set_gift must not re-show the gift control in a watched view")
         hide = body(HUD, "void TacticalHud::set_view_only(", 900)
-        for control in ("order_buttons", "special_button", "retreat_button", "beacon_button", "gift_button", "cards",
+        for control in ("order_buttons", "special_button", "retreat_button", "beacon_button", "gift_button",
                         "heroes", "abilities", "production"):
             self.assertIn(control, hide)
+        self.assertNotIn("state.cards,", hide)
         text = source_text(MAP_HUD)
         for signature in ("void MapMode::State::sync_cards() {", "void MapMode::State::sync_production() {",
                           "void MapMode::State::sync_battle_hud() {"):

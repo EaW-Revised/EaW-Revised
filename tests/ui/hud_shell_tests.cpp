@@ -13,6 +13,7 @@
 #include "eawr/presentation/ui/world_encyclopedia.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/presentation/ui/movie_letterbox.hpp"
+#include "eawr/presentation/ui/screen_fade.hpp"
 #include "eawr/presentation/ui/retreat_button.hpp"
 #include "ui_test_support.hpp"
 
@@ -1277,6 +1278,42 @@ void hud_shell_contracts() {
         expect(!both.wanted() && both.visible() && both.slide_seconds() == 0.5, "overlap: the script's Out then lowers over the script's seconds");
         run(both, 0.6);
         expect(both.progress() == 0.0F, "overlap: and the bands are gone when it ends");
+    }
+    {
+        // TSC-11: a tactical script's screen fade. Fade_Screen_Out(t) goes clear to opaque over t seconds, Fade_Screen_In(t) opaque
+        // to clear, Fade_On / Fade_Off are at once, a zero time ends at once, and the state stays until the next call.
+        ui::ScreenFade fade;
+        expect(!fade.visible() && fade.opacity() == 0.0F && !fade.active(), "TSC-11: a screen starts clear");
+        fade.fade_out(2.0);
+        expect(fade.active() && fade.opacity() == 0.0F, "TSC-11: Fade_Screen_Out starts from clear");
+        fade.advance(1.0);
+        expect(near(fade.opacity(), 0.5) && fade.visible(), "TSC-11: half the time is half black");
+        fade.advance(0.5);
+        expect(near(fade.opacity(), 0.75), "TSC-11: the fade is linear in time");
+        fade.advance(5.0);
+        expect(fade.opacity() == 1.0F && !fade.active(), "TSC-11: the fade ends opaque and stays");
+        fade.advance(1.0);
+        expect(fade.opacity() == 1.0F, "TSC-11: a faded-out screen stays black until the script says otherwise");
+        fade.fade_in(1.0);
+        expect(fade.opacity() == 1.0F && fade.active(), "TSC-11: Fade_Screen_In starts from black");
+        fade.advance(0.25);
+        expect(near(fade.opacity(), 0.75), "TSC-11: and lightens linearly");
+        fade.advance(1.0);
+        expect(fade.opacity() == 0.0F && !fade.visible() && !fade.active(), "TSC-11: it ends clear");
+        fade.on();
+        expect(fade.opacity() == 1.0F && !fade.active(), "TSC-11: Fade_On is black at once");
+        fade.off();
+        expect(fade.opacity() == 0.0F && !fade.visible(), "TSC-11: Fade_Off is clear at once");
+        fade.fade_in(0.0);
+        expect(fade.opacity() == 0.0F && !fade.active(), "TSC-11: Fade_Screen_In(0) is clear at once");
+        fade.fade_out(0.0);
+        expect(fade.opacity() == 1.0F && !fade.active(), "TSC-11: Fade_Screen_Out(0) is black at once");
+        fade.fade_in(2.0);
+        fade.advance(1.0);
+        fade.fade_out(1.0);
+        expect(fade.opacity() == 0.0F && fade.active(), "TSC-11: a new fade restarts from its own end (the original clears or blackens first)");
+        fade.fade_in(-1.0);
+        expect(fade.opacity() == 0.0F && !fade.active(), "TSC-11: a negative time is at once");
     }
     {
         test::ui::TempTree tree("beacon-delay");

@@ -327,10 +327,32 @@ void TacticalHud::set_script_letterbox(const bool on, const double seconds) {
     refresh_cinematic();
     if (seconds == 0.0) advance_movie_bands(0.0); // at once: the anchors follow before the next frame
 }
+// TSC-11: a tactical script's screen fade over the whole battle picture (the HUD included, as the original's fade layer is a
+// screen effect). The layer keeps its state until the next call; the opacity is a pure function of the calls and the frames.
+void TacticalHud::set_script_fade(const std::string_view op, const double seconds) {
+    auto& state = *state_;
+    if (op == "out") state.script_fade.fade_out(seconds);
+    else if (op == "in") state.script_fade.fade_in(seconds);
+    else if (op == "on") state.script_fade.on();
+    else if (op == "off") state.script_fade.off();
+    else return;
+    advance_script_fade(0.0); // a zero time (and the first frame of a timed one) shows before the next frame
+}
+void TacticalHud::set_story_cinematic(const bool on) {
+    state_->story_gui_hidden = on;
+    refresh_cinematic();
+}
+void TacticalHud::advance_script_fade(const double delta) {
+    auto& state = *state_;
+    state.script_fade.advance(delta);
+    if (!state.fade_rect) return;
+    state.fade_rect->set_modulate(Color(1, 1, 1, state.script_fade.opacity()));
+    state.fade_rect->set_visible(state.script_fade.visible());
+}
 // The GUI follows the target at once; the bands follow the slide (advance_movie_bands).
 void TacticalHud::refresh_cinematic() {
     auto& state = *state_;
-    const bool cinematic = state.bands.wanted();
+    const bool cinematic = state.bands.wanted() || state.story_gui_hidden;
     if (state.mask) state.mask->set_visible(!state.overview && !cinematic);
     if (state.movie_bands) {
         // CanvasLayer supplies no parent Control rectangle for full-rect anchors.
@@ -356,7 +378,7 @@ void TacticalHud::set_view_only(const bool on) {
     if (!on) return;
     for (const auto& entry : state.order_buttons) entry.second->hide();
     for (Control* control : std::initializer_list<Control*>{state.special_button, state.retreat_button, state.sl_button,
-            state.sl_card, state.ds_button, state.beacon_button, state.gift_button, state.gift_scroll, state.cards,
+            state.sl_card, state.ds_button, state.beacon_button, state.gift_button, state.gift_scroll,
             state.heroes, state.abilities, state.production})
         if (control) control->hide();
     for (auto& cell : state.gift_cells) cell.button->hide();

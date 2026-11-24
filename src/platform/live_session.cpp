@@ -6,6 +6,7 @@
 #include "eawr/platform/live_scripts.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/letter_box.hpp"
+#include "eawr/script/authoritative/story_presentation.hpp"
 #include "eawr/script/authoritative/tactical_bridge.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/world.hpp"
@@ -690,6 +691,11 @@ public:
         return std::exchange(letterbox_requests_, {});
     }
 
+    std::vector<LiveStoryRequest> take_story_requests() {
+        const std::lock_guard lock(letterbox_mutex_);
+        return std::exchange(story_requests_, {});
+    }
+
 private:
     [[nodiscard]] const tactical::TacticalSession& world() const {
         return scripted_ ? scripted_->world() : *session_;
@@ -1234,6 +1240,7 @@ private:
             sequence = std::max(sequence, routed.key.sequence + 1U);
         }
         publish_letterbox(result.presentation, result.world.completed_tick);
+        publish_story(result.presentation, result.world.completed_tick);
         if (!options_.debug_letterbox.empty()) {
             std::vector<script::authoritative::ScriptCommand> injected;
             for (const auto& request : options_.debug_letterbox) {
@@ -1248,6 +1255,17 @@ private:
                 injected.push_back(std::move(command));
             }
             publish_letterbox(injected, result.world.completed_tick);
+        }
+        if (!options_.debug_story.empty()) {
+            std::vector<script::authoritative::ScriptCommand> injected;
+            for (const auto& call : options_.debug_story) {
+                if (call.tick != result.world.completed_tick) continue;
+                script::authoritative::ScriptCommand command;
+                command.verb = call.verb;
+                for (const auto& argument : call.arguments) command.arguments.push_back(script::authoritative::Value::text(argument));
+                injected.push_back(std::move(command));
+            }
+            publish_story(injected, result.world.completed_tick);
         }
         std::int64_t load = 0;
         for (const auto& entry : result.scripts.loads) load += entry.instructions;
@@ -1286,6 +1304,22 @@ private:
             letterbox_requests_.erase(letterbox_requests_.begin(), letterbox_requests_.end() - static_cast<std::ptrdiff_t>(keep));
     }
 
+    // The story cinematic, fade and environment calls (the three story verbs); one that does not read back is dropped.
+    void publish_story(const std::vector<script::authoritative::ScriptCommand>& commands, const std::uint64_t tick) {
+        std::vector<LiveStoryRequest> made;
+        for (const auto& command : commands) {
+            if (!script::authoritative::is_story_verb(command.verb)) continue;
+            if (auto request = parse_story_command(command)) made.push_back({tick, std::move(*request)});
+        }
+        if (made.empty()) return;
+        const std::lock_guard lock(letterbox_mutex_);
+        story_requests_.insert(story_requests_.end(), std::make_move_iterator(made.begin()), std::make_move_iterator(made.end()));
+        // A viewer that never takes them (headless runs) cannot grow the list without bound: the newest are the ones that count.
+        constexpr std::size_t keep = 256;
+        if (story_requests_.size() > keep)
+            story_requests_.erase(story_requests_.begin(), story_requests_.end() - static_cast<std::ptrdiff_t>(keep));
+    }
+
     std::unique_lock<std::mutex>* active_driver_lock_{};
     std::vector<tactical::PlayerCommand> driver_input_;
     std::vector<std::pair<sim::EntityId, sim::EntityId>> land_roster_;
@@ -1297,6 +1331,7 @@ private:
     LiveScriptReport script_report_;
     std::mutex letterbox_mutex_; // legacy #6634: guards letterbox_requests_ only, so the UI never waits for a step
     std::vector<LiveLetterboxRequest> letterbox_requests_;
+    std::vector<LiveStoryRequest> story_requests_; // guarded by letterbox_mutex_ too
     double ai_ms_{}; // #957: the last scripted step's AI step and Lua service, for the cost phases
     double lua_ms_{};
     double world_ms_{};
@@ -1604,6 +1639,7 @@ void LiveSession::request_save(SaveSink sink) { impl_->request_save(std::move(si
 diagnostics::MemoryCapacity LiveSession::memory_capacity() const { return impl_->memory_capacity(); }
 LiveScriptReport LiveSession::script_report() const { return impl_->script_report(); }
 std::vector<LiveLetterboxRequest> LiveSession::take_letterbox_requests() { return impl_->take_letterbox_requests(); }
+std::vector<LiveStoryRequest> LiveSession::take_story_requests() { return impl_->take_story_requests(); }
 void LiveSession::stop() { impl_->stop(); }
 std::vector<std::string> LiveSession::tick_hashes() const { return impl_->tick_hashes(); }
 void LiveSession::require_tick_hashes() { impl_->require_tick_hashes(); }

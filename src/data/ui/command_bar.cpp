@@ -10,6 +10,15 @@
 #include <string>
 #include <utility>
 
+#if defined(__APPLE__)
+#include <cerrno>
+#include <cfenv>
+#include <cmath>
+#include <cstdlib>
+#include <type_traits>
+#include <xlocale.h>
+#endif
+
 namespace eawr::data::ui {
 namespace {
 
@@ -192,14 +201,44 @@ std::string element_text(const pugi::xml_node node) {
 template <typename T>
 std::optional<T> numeric_prefix(std::string_view token, bool& clean) {
     if (!token.empty() && token.front() == '+') token.remove_prefix(1);
-    T value{};
-    const auto [end, error] = std::from_chars(token.data(), token.data() + token.size(), value);
-    if (error != std::errc{} || end == token.data()) {
-        clean = false;
-        return std::nullopt;
+#if defined(__APPLE__)
+    if constexpr (std::is_same_v<T, float>) {
+        // Older Apple C++ libraries do not expose floating-point from_chars.
+        // Use a fixed C locale and the same decimal-prefix rules.
+        if (token.empty() || token.front() == '+') { clean = false; return std::nullopt; }
+        const auto digit_start = token.front() == '-' ? 1U : 0U;
+        auto input = std::string(token);
+        if (input.size() > digit_start + 1 && input[digit_start] == '0' &&
+            (input[digit_start + 1] == 'x' || input[digit_start + 1] == 'X')) {
+            input.resize(digit_start + 1);
+        }
+        static const locale_t numeric_locale = newlocale(LC_NUMERIC_MASK, "C", nullptr);
+        if (!numeric_locale) { clean = false; return std::nullopt; }
+        const int rounding = std::fegetround();
+        if (rounding < 0 || std::fesetround(FE_TONEAREST) != 0) { clean = false; return std::nullopt; }
+        char* end = nullptr;
+        errno = 0;
+        const float value = strtof_l(input.c_str(), &end, numeric_locale);
+        const int parse_errno = errno;
+        const bool restored = std::fesetround(rounding) == 0;
+        if (!restored || end == input.c_str() || (parse_errno == ERANGE && (value == 0.0F || std::isinf(value)))) {
+            clean = false;
+            return std::nullopt;
+        }
+        if (static_cast<std::size_t>(end - input.c_str()) != token.size()) clean = false;
+        return value;
+    } else
+#endif
+    {
+        T value{};
+        const auto [end, error] = std::from_chars(token.data(), token.data() + token.size(), value);
+        if (error != std::errc{} || end == token.data()) {
+            clean = false;
+            return std::nullopt;
+        }
+        if (end != token.data() + token.size()) clean = false;
+        return value;
     }
-    if (end != token.data() + token.size()) clean = false;
-    return value;
 }
 
 std::optional<bool> parse_flag(const std::string_view value) {

@@ -638,6 +638,12 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
         if (name != nullptr) {
             name->set_text_overrun_behavior(TextServer::OVERRUN_TRIM_ELLIPSIS);
             place(name, "IDC_PLAYER_NAME_" + suffix);
+            if (const auto* authored_name = find_gadget(*state.dialog, "IDC_PLAYER_NAME_" + suffix))
+                if (const auto* authored_colour = find_gadget(*state.dialog, "IDC_PLAYER_COLOR_" + suffix)) {
+                    auto size = local_rect(*state.dialog, *authored_name).size;
+                    size.x += local_rect(*state.dialog, *authored_colour).size.x / 2.0F;
+                    name->set_size(size);
+                }
             if (stacked) {
                 fill_stack(*name, 0U);
                 const auto shown_text = cell_text(*name, players[0]);
@@ -666,7 +672,8 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
                 state.controls[line_id] = cell;
             }
             cell->set_visible(used);
-            if (!used) continue;
+            if (!used || name == nullptr) continue;
+            cell->set_size(name->get_size());
             place(cell, "IDC_PLAYER_NAME_" + suffix);
             cell->set_position(cell->get_position() + Vector2(0.0F, static_cast<float>(j) * pitch));
             fill_stack(*cell, j);
@@ -722,6 +729,15 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             place(kick, "IDC_BUTTON_KICK_PLAYER" + suffix);
         }
         place(faction, "IDC_PLAYER_FACTION_" + suffix);
+        if (faction != nullptr)
+            if (const auto* authored_faction = find_gadget(*state.dialog, "IDC_PLAYER_FACTION_" + suffix))
+                if (const auto* authored_colour = find_gadget(*state.dialog, "IDC_PLAYER_COLOR_" + suffix)) {
+                    const float extra = local_rect(*state.dialog, *authored_colour).size.x / 2.0F;
+                    auto size = local_rect(*state.dialog, *authored_faction).size;
+                    size.x += extra;
+                    faction->set_size(size);
+                    faction->set_position(faction->get_position() + Vector2(extra, 0.0F));
+                }
         place(colour, "IDC_PLAYER_COLOR_" + suffix);
         place(team, "IDC_PLAYER_TEAM_" + suffix);
         const auto icon = state.accept_icons.find("IDC_ACCEPT_PLAYER_" + suffix);

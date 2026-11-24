@@ -3,6 +3,7 @@
 #include "eawr/platform/land_debug_overlay.hpp"
 
 #include "eawr/diagnostics/memory_capacity.hpp"
+#include "eawr/platform/story_request.hpp"
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/result.hpp"
@@ -58,6 +59,13 @@ struct LiveLetterboxRequest {
     std::uint64_t tick{}; // the tick whose script service made the call
     bool in{};
     double seconds{};
+};
+
+// A tactical script's story cinematic camera, screen fade or environment call (docs/behaviour/tactical-story-cinematic.md). Local
+// presentation only, like the letterbox: not part of the world, the replay, a save or a hash, and a headless replay makes none.
+struct LiveStoryRequest {
+    std::uint64_t tick{}; // the tick whose script service made the call
+    StoryRequest request;
 };
 
 // One order for the session's command queue (scripted and debug orders; a local player's input
@@ -343,6 +351,15 @@ public:
         // Diagnostics (legacy #6634): letterbox requests injected as if a tactical script had made them in the service of
         // the tick each names, through the same path (text arguments, parsing, the request list). Scripted sessions only.
         std::vector<LiveLetterboxRequest> debug_letterbox{};
+        // Diagnostics (docs/behaviour/tactical-story-cinematic.md): story calls injected as if a tactical script had made them in
+        // the service of the tick each names, through the same path (the staged text arguments of the three story verbs, parsed
+        // by the session). `verb` is the verb of story_presentation.hpp. Scripted sessions only.
+        struct DebugStory {
+            std::uint64_t tick{};
+            std::string verb;
+            std::vector<std::string> arguments;
+        };
+        std::vector<DebugStory> debug_story{};
     };
 
     // The pool size of the game build: the hardware threads minus the Godot main and render
@@ -469,6 +486,8 @@ public:
     [[nodiscard]] LiveScriptReport script_report() const;
     // The tactical scripts' letterbox requests made since the last call, in script order. Never blocks on a running step.
     [[nodiscard]] std::vector<LiveLetterboxRequest> take_letterbox_requests();
+    // The story cinematic, fade and environment requests made since the last call, in script order. Never blocks on a running step.
+    [[nodiscard]] std::vector<LiveStoryRequest> take_story_requests();
 
     // Stops and joins the simulation thread; idempotent. The session keeps its last state.
     void stop();

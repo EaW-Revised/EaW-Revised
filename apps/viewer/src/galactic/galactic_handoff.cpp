@@ -585,7 +585,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         const bool begin_barrier = map.loading_begin_barrier;
         map.borrowed_battle = prepared; map.borrowed_feed = feed;
         map.borrowed_player = view_player;
-        map.borrowed_view_only = spectating; // #8182: watched only, no selection, orders or order controls
+        map.borrowed_view_only = spectating; // #8182: watched only, no orders or order controls
         map.controller_seat = sim::SeatId{galaxy->local.seat};
         if (frame.latest) copy_colour_roster(map, *frame.latest);
         for (const auto& identity : options.lan_players)

@@ -77,7 +77,7 @@ class WatchdogSmoke(unittest.TestCase):
                 kernel.WaitForSingleObject(handle, 5000)
             kernel.CloseHandle(handle)
 
-    def start(self, manager=False, show_window=False, healthy_state="", prompt_after_ms=None):
+    def start(self, manager=False, show_window=False, healthy_state="", prompt_after_ms=None, auto_end_after_prompt_ms=None):
         p = self.package
         if manager:
             (p.package / "launcher").mkdir(exist_ok=True)
@@ -90,6 +90,9 @@ class WatchdogSmoke(unittest.TestCase):
         environment = dict(os.environ, EAWR_FAKE_TREE_DIR=str(self.tree), APPDATA=str(p.appdata))
         environment["EAWR_FAKE_HEALTHY_STATE"] = healthy_state
         environment.pop("EAWR_WATCHDOG_PROMPT_AFTER_MS", None)
+        environment.pop("EAWR_WATCHDOG_AUTO_END_AFTER_PROMPT_MS", None)
+        if auto_end_after_prompt_ms is not None:  # Shortens the wait after the prompt before a hung launcher is ended (60 s in the product).
+            environment["EAWR_WATCHDOG_AUTO_END_AFTER_PROMPT_MS"] = str(auto_end_after_prompt_ms)
         if prompt_after_ms is not None:  # Shortens the sustained-hang wait; the default (15 s) is the product value.
             environment["EAWR_WATCHDOG_PROMPT_AFTER_MS"] = str(prompt_after_ms)
         for key in ("EAWR_EAW_GAME_ROOT", "EAWR_GODOT_EXECUTABLE"):
@@ -247,9 +250,51 @@ class WatchdogSmoke(unittest.TestCase):
         self.assertEqual(ntdll.NtSuspendProcess(self.handles[0]), 0)
         hwnd = wait_for(self.watchdog_window)
         self.assertIn("Force close", windows.child_texts(hwnd))
+        old = read(self.tree / "manager.json")["pid"]
         self.assertTrue(windows.user32.PostMessageW(hwnd, 0x0010, 0, 0))  # WM_CLOSE on the native fallback.
-        self.process.wait(timeout=5)
-        self.assert_tree_gone()
+        # Force close ends the frozen launcher's tree only; EAWR itself stays and starts the launcher again.
+        self.assert_launcher_tree_ended()
+        self.assertEqual(self.launcher_log().count("ended by the watchdog"), 1)
+        self.assertIn("Force close, exit code 76", self.launcher_log())
+        self.assertNotEqual(wait_for(lambda: self.new_manager(old))["pid"], old)
+        self.assertIsNone(self.process.poll(), "Force close ended the whole session")
+
+    def launcher_log(self):
+        try:
+            return (self.package.user_data / "launcher" / "launcher.log").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+
+    def new_manager(self, old_pid):
+        record = read(self.tree / "manager.json")
+        return record if record.get("pid") not in (None, old_pid) else None
+
+    def assert_launcher_tree_ended(self, seconds=20):
+        for handle in self.handles[:3]:
+            self.assertEqual(kernel.WaitForSingleObject(handle, seconds * 1000), 0, "the frozen launcher tree was not ended")
+
+    @needs_desktop
+    def test_hung_launcher_is_ended_automatically_and_started_again(self):
+        self.start(manager=True, prompt_after_ms=1000, auto_end_after_prompt_ms=2000)  # No prompt window: nobody clicks; the probe still needs a window it can enumerate.
+        old = read(self.tree / "manager.json")["pid"]
+        self.assertEqual(ntdll.NtSuspendProcess(self.handles[0]), 0)
+        self.assert_launcher_tree_ended()
+        wait_for(lambda: read(self.watchdog_state / "watchdog.json").get("ended") == "auto")
+        self.assertIn("automatically, exit code 77", wait_for(lambda: self.launcher_log() if "exit code 77" in self.launcher_log() else ""))
+        self.assertNotEqual(wait_for(lambda: self.new_manager(old))["pid"], old, "the launcher was not started again")
+        self.assertIsNone(self.process.poll(), "the automatic end ended the whole session")
+
+    @needs_desktop
+    def test_ending_a_hung_launcher_leaves_a_running_game_alone(self):
+        self.start(manager=True, prompt_after_ms=1000, auto_end_after_prompt_ms=2000)
+        publish(self.state / "next-action.json", {"action": "launch-profile", "profile": "sample", "stay_open": True})
+        self.capture("game")
+        self.assertEqual(ntdll.NtSuspendProcess(self.handles[0]), 0)
+        self.assert_launcher_tree_ended()
+        time.sleep(2)
+        for handle in self.handles[3:]:
+            self.assertEqual(kernel.WaitForSingleObject(handle, 0), 258, "ending the launcher killed the running game")
+        self.assertIsNone(self.process.poll(), "ending the launcher ended the session while its game runs")
 
     def test_explicit_update_helper_survives_the_old_session(self):
         manager = self.start(manager=True)

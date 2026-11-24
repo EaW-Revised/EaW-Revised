@@ -20,11 +20,25 @@ struct HangTracker {
     std::uint64_t last_ms = 0;   // The last sample time.
 };
 
+// A launcher that is still hung this long after the prompt came up is ended without asking: it is only the mod
+// manager (a running game is a separate job and is not touched), the player may be away from the screen, and the
+// frozen window can otherwise sit there for hours (a GPU reset left it waiting on the graphics driver for good).
+inline constexpr std::uint64_t kHungAutoEndAfterPromptMs = 60000;
+
 struct HangVerdict {
     bool hung = false;           // The last probe of the window timed out.
     std::uint64_t hung_ms = 0;   // How long it has been continuously hung as observed (0 when responding).
     bool prompt = false;         // Show the Force close prompt.
+    bool auto_end = false;       // End the hung launcher now: still hung kHungAutoEndAfterPromptMs after the prompt.
 };
+
+// How the prompt window comes up. While a game runs it must never take the focus away from it (a fullscreen game
+// would be minimised or lose its input): the window then only shows and flashes its taskbar button. With no game
+// it is activated so the player sees it at once.
+enum class PromptShow { activate, flash_only };
+[[nodiscard]] constexpr PromptShow choose_prompt_show(bool game_running) {
+    return game_running ? PromptShow::flash_only : PromptShow::activate;
+}
 
 // How long one probe waits for the window to answer a no-op message before the probe counts as failed.
 inline constexpr std::uint64_t kProbeTimeoutMs = 2000;
@@ -60,7 +74,8 @@ template <typename Handle, typename Probe>
 // Pure: feed one sample (`hung_now` from the probe, `now_ms` from a monotonic clock) and get the verdict.
 // The prompt shows once the hang has lasted `prompt_after_ms`, and goes away the moment the window responds.
 [[nodiscard]] inline HangVerdict observe_hang(HangTracker& tracker, bool hung_now, std::uint64_t now_ms,
-                                              std::uint64_t prompt_after_ms = kHungPromptAfterMs) {
+                                              std::uint64_t prompt_after_ms = kHungPromptAfterMs,
+                                              std::uint64_t auto_end_after_prompt_ms = kHungAutoEndAfterPromptMs) {
     const bool gap = tracker.last_ms != 0 && now_ms > tracker.last_ms && now_ms - tracker.last_ms > kHungSampleGapMs;
     tracker.last_ms = now_ms;
     if (!hung_now) {
@@ -72,7 +87,7 @@ template <typename Handle, typename Probe>
         tracker.since_ms = now_ms;
     }
     const std::uint64_t duration = now_ms > tracker.since_ms ? now_ms - tracker.since_ms : 0;
-    return {true, duration, duration >= prompt_after_ms};
+    return {true, duration, duration >= prompt_after_ms, duration >= prompt_after_ms + auto_end_after_prompt_ms};
 }
 
 // What the last probes said about how fast the window answers, written into watchdog.json each sample so a

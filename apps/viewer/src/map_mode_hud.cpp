@@ -33,6 +33,7 @@
 #include <godot_cpp/core/object.hpp>
 
 #include "eawr/battle/start.hpp"
+#include "eawr/platform/story_request.hpp"
 #include "eawr/presentation/space/space.hpp"
 
 #include <algorithm>
@@ -1228,7 +1229,7 @@ void MapMode::State::sync_overview_ui() {
     const std::string level = space->live_camera_overview();
     const auto is_level = [](const std::string& value) { return value == "off" || value == "overview" || value == "map"; };
     bool movie = space->live_camera_movie();
-    if (hud) hud->set_movie_mode(movie);
+    if (hud) hud->set_movie_mode(movie && !story_cinematic.camera.active(), story_cinematic.camera.active());
     const bool on = level == "overview" || level == "map";
     const bool first = overview_level.empty();
     if (level != overview_level) {
@@ -2227,6 +2228,122 @@ void MapMode::State::end_tsw_cinematic() {
     cinematic.input.reset();
     if (live_session) live_session->set_cinematic_pacing(false);
     set_movie_mode(false, true);
+}
+
+// TSC-01..TSC-14. The requests of the tactical scripts since the last frame, in script order. A battle that is not running ends a
+// cinematic (as the other cinematics); the requests of a battle that is not running are dropped.
+void MapMode::State::apply_story_requests() {
+    if (!live_session) return;
+    const auto requests = live_session->take_story_requests();
+    const bool running = live_session->phase() == LiveSessionView::Phase::running;
+    if (!running && story_cinematic.camera.active()) end_story_cinematic();
+    if (!running || !space) return;
+    using script::authoritative::StoryRequestKind;
+    namespace cam = presentation::camera;
+    for (const auto& item : requests) {
+        const auto& request = item.request;
+        ++story_cinematic.requests;
+        const double now = static_cast<double>(item.tick);
+        const auto key = [&request] {
+            cam::StoryKeyInput input;
+            input.position = request.position;
+            input.distance = request.distance;
+            input.pitch = request.pitch;
+            input.yaw = request.yaw;
+            input.euler = request.euler;
+            input.object = request.object;
+            input.use_object_rotation = request.use_object_rotation;
+            input.centre = request.bounds_center;
+            return input;
+        };
+        switch (request.kind) {
+        case StoryRequestKind::fade_screen_out: if (hud) hud->set_script_fade("out", request.seconds); break;
+        case StoryRequestKind::fade_screen_in: if (hud) hud->set_script_fade("in", request.seconds); break;
+        case StoryRequestKind::fade_on: if (hud) hud->set_script_fade("on", 0.0); break;
+        case StoryRequestKind::fade_off: if (hud) hud->set_script_fade("off", 0.0); break;
+        case StoryRequestKind::environment_index:
+            // TSC-12: the space view composes its sky and light from environment record 0 and cannot change record in a battle,
+            // so the request is kept (clamped by the map's record count when read) and not drawn: a fidelity-list line.
+            ++story_cinematic.environment_requests;
+            story_cinematic.environment_index = request.index;
+            break;
+        case StoryRequestKind::environment_cinematic:
+            ++story_cinematic.environment_requests;
+            story_cinematic.environment_cinematic = request.flag;
+            break;
+        case StoryRequestKind::camera_start: {
+            // The camera and the target hold where the player's camera is; the battle UI, fog overlay and world input go like the
+            // other cinematics'. Starting a running cinematic starts it over.
+            const auto frame = space->live_camera_frame();
+            if (!frame) break;
+            const auto eye = presentation::space::source_from_render(frame->eye);
+            const auto aim = presentation::space::source_from_render(frame->target);
+            const bool was_active = story_cinematic.camera.active();
+            story_cinematic.camera.start(now, {eye.x, eye.y, eye.z}, {aim.x, aim.y, aim.z});
+            if (!was_active) {
+                space->live_camera_movie(true, {});
+                if (live_fog) live_fog->set_movie_hidden(true);
+                if (hud) hud->set_story_cinematic(true);
+            }
+            apply_story_pose();
+            break;
+        }
+        case StoryRequestKind::camera_end: end_story_cinematic(); break;
+        case StoryRequestKind::camera_key:
+            if (request.transition) story_cinematic.camera.transition_camera_key(now, key(), request.seconds);
+            else story_cinematic.camera.set_camera_key(now, key());
+            break;
+        case StoryRequestKind::target_key:
+            if (request.transition) story_cinematic.camera.transition_target_key(now, key(), request.seconds);
+            else story_cinematic.camera.set_target_key(now, key());
+            break;
+        case StoryRequestKind::to_tactical: {
+            // TSC-04: back to the player's camera pose over the time. Unverified: the original also puts the player's camera at
+            // its farthest zoom first; here the pose it holds now is the goal (the least visible reading).
+            const auto frame = space->live_camera_frame();
+            if (!frame) break;
+            const auto eye = presentation::space::source_from_render(frame->eye);
+            const auto aim = presentation::space::source_from_render(frame->target);
+            story_cinematic.camera.transition_to_tactical(now, request.seconds, {eye.x, eye.y, eye.z}, {aim.x, aim.y, aim.z});
+            break;
+        }
+        }
+    }
+}
+
+bool MapMode::State::apply_story_pose() {
+    auto& cinematic = story_cinematic.camera;
+    if (!cinematic.active() || !space || !live_session) return false;
+    // An attached object is read from the units the local view draws (their yaw gives the turn about the vertical); one the view
+    // does not draw leaves the last matrix it had (TSC-06).
+    const auto& visible = live_session->visible_units();
+    const auto read_unit = [&visible](const std::uint64_t id) -> std::optional<presentation::camera::StoryAttachment> {
+        const auto unit = std::find_if(visible.begin(), visible.end(), [id](const auto& item) { return item.entity == id; });
+        if (unit == visible.end()) return std::nullopt;
+        presentation::camera::StoryAttachment attached;
+        attached.position = unit->position;
+        const double yaw = unit->yaw * 3.14159265358979323846 / 180.0;
+        const double c = std::cos(yaw), s = std::sin(yaw);
+        attached.rotation = std::array<std::array<double, 3>, 3>{{{c, -s, 0.0}, {s, c, 0.0}, {0.0, 0.0, 1.0}}};
+        return attached;
+    };
+    const presentation::camera::StoryAttachmentReader reader(read_unit);
+    const auto pose = cinematic.pose(live_session->presented_tick(), reader);
+    if (!pose) return false;
+    const auto eye = presentation::space::render_from_source({pose->eye[0], pose->eye[1], pose->eye[2]});
+    const auto aim = presentation::space::render_from_source({pose->target[0], pose->target[1], pose->target[2]});
+    space->live_camera_movie(true, {aim.x, aim.y, aim.z});
+    space->live_camera_movie_eye({eye.x, eye.y, eye.z});
+    space->live_camera_movie_fov(std::nullopt);
+    space->live_camera_movie_clip(std::nullopt);
+    return true;
+}
+
+void MapMode::State::end_story_cinematic() {
+    if (!story_cinematic.camera.active()) return;
+    story_cinematic.camera.end();
+    if (hud) hud->set_story_cinematic(false);
+    set_movie_mode(false, true); // the player's camera, fog overlay and UI come back at once
 }
 
 } // namespace eawr::presentation::godot_backend

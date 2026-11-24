@@ -71,7 +71,7 @@ jobs:
   build-and-test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.name == 'linux-x64-clang' && 150 || 90 }}
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -156,7 +156,7 @@ jobs:
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           if errorlevel 1 exit /b 1
-          cmake --preset windows-clang-ninja -DCMAKE_LINKER=lld-link
+          cmake --preset windows-clang-ninja -DCMAKE_LINKER:FILEPATH=lld-link
           if errorlevel 1 exit /b 1
           findstr /i /b /c:"CMAKE_LINKER:FILEPATH=" out\build\windows-clang-ninja\CMakeCache.txt | findstr /i /c:"lld-link"
           if errorlevel 1 exit /b 1
