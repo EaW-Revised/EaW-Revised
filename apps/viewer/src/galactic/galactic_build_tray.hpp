@@ -162,6 +162,7 @@ private:
     std::size_t omitted_by_layout_{};
     float header_line_{};  // the line the header labels draw (the strip height at either size step), for the report
     bool compact_{};
+    bool broad_rows_{}; // the last layout fell back to the broad category rows (GBT-05, legacy #8361)
     bool handle_docked_{};
     bool dock_warned_{};
     std::uint64_t handle_presses_{};

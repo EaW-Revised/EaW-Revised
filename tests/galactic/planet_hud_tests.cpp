@@ -174,6 +174,37 @@ int case_galactic_planet_hud_tests() {
         const auto state = command_layer_rect(4.5F, 4.375F, 36.0F, 35.0F, 0.125F);
         assert(near(state.x, 0.0F) && near(state.y, 0.0F));
         assert(near(state.width, 4.5F) && near(state.height, 4.375F));
+        {
+            // #8366 (#7956): the one icon rule. The aspect is always kept and the icon is centred.
+            using eawr::presentation::ui::IconFitMode;
+            using eawr::presentation::ui::fit_icon_rect;
+            // A 20 x 40 icon (the watchtower) in a 56 x 56 slot: natural size, 1:2, centred.
+            const auto natural = fit_icon_rect(56.0F, 56.0F, 20.0F, 40.0F, 1.0F, IconFitMode::natural);
+            assert(near(natural.width, 20.0F) && near(natural.height, 40.0F));
+            assert(near(natural.x, 18.0F) && near(natural.y, 8.0F));
+            // Natural size ignores the box: a larger icon overflows it, centred (the bar's rule, GHUD-S74).
+            const auto big = fit_icon_rect(10.0F, 10.0F, 40.0F, 20.0F, 1.0F, IconFitMode::natural);
+            assert(near(big.width, 40.0F) && near(big.x, -15.0F) && near(big.y, -5.0F));
+            // Shrink never grows an icon but brings a larger one inside the box with its aspect kept.
+            const auto shrunk = fit_icon_rect(10.0F, 10.0F, 40.0F, 20.0F, 1.0F, IconFitMode::shrink);
+            assert(near(shrunk.width, 10.0F) && near(shrunk.height, 5.0F) && near(shrunk.x, 0.0F) && near(shrunk.y, 2.5F));
+            const auto small = fit_icon_rect(56.0F, 56.0F, 20.0F, 40.0F, 1.0F, IconFitMode::shrink);
+            assert(near(small.width, 20.0F) && near(small.height, 40.0F));
+            // Contain fills the box on the limiting side, up or down: a square icon fills a square slot, a tall one
+            // is as tall as the slot, a wide icon as wide as the slot, and neither is stretched.
+            const auto square = fit_icon_rect(56.0F, 56.0F, 50.0F, 50.0F, 1.0F, IconFitMode::contain);
+            assert(near(square.width, 56.0F) && near(square.height, 56.0F) && near(square.x, 0.0F));
+            const auto tall = fit_icon_rect(56.0F, 56.0F, 20.0F, 40.0F, 1.0F, IconFitMode::contain);
+            assert(near(tall.height, 56.0F) && near(tall.width, 28.0F) && near(tall.x, 14.0F) && near(tall.y, 0.0F));
+            const auto wide = fit_icon_rect(80.0F, 40.0F, 100.0F, 25.0F, 1.0F, IconFitMode::contain);
+            assert(near(wide.width, 80.0F) && near(wide.height, 20.0F) && near(wide.x, 0.0F) && near(wide.y, 10.0F));
+            assert(near(wide.width / wide.height, 100.0F / 25.0F));
+            // A degenerate texture or box draws nothing and never divides by zero.
+            const auto none = fit_icon_rect(0.0F, 0.0F, 20.0F, 40.0F, 2.0F, IconFitMode::contain);
+            assert(near(none.width, 40.0F) && near(none.height, 80.0F));
+            const auto empty = fit_icon_rect(56.0F, 56.0F, 0.0F, 0.0F, 1.0F, IconFitMode::contain);
+            assert(near(empty.width, 0.0F) && near(empty.height, 0.0F));
+        }
         const auto stock = command_button_geometry(anchor, {}, 60, 40, 1.0F);
         assert((stock.art == eawr::data::ui::ReferenceRect{70, 30, 60, 40}));
         assert(stock.hit == anchor.rect);

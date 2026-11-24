@@ -90,6 +90,7 @@ bool GalacticMode::State::build_hero_action_hud() {
                     .disabled = command_texture(first(*component, data::ui::Field::disabled_texture_name)), .portrait = {}, .overlays = {}};
                 if (choice) art.portrait = HudButtonArt::Portrait{{}, false, true};
                 button->setup_art(art);
+                if (choice) button->set_icon_fit(presentation::ui::IconFitMode::contain);
                 surface.panel->add_child(button);
                 if (close) {
                     surface.close = button; button->set_action([this] { close_hero_action(); });

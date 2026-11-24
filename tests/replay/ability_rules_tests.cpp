@@ -706,7 +706,9 @@ void test_deployment_abilities() {
             if (tick == 141) expect(!session.ability_state(1)->slots[0].active,
                 "WHD-04: generator loss ends INTERDICT");
             if (tick == 151) {
-                const auto& status = step.value().snapshot->instances().front().abilities.front();
+                const auto& snapshot = step.value().snapshot;
+                const auto& instance = snapshot->instances().front();
+                const auto& status = instance.abilities.front();
                 expect(!status.active && !status.ready, "WIN-02: lost generator gates command and HUD readiness");
             }
             if (tick == 156) expect(session.ability_state(1)->slots[1].active,

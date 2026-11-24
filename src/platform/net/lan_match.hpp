@@ -29,6 +29,8 @@
 #include <utility>
 
 namespace eawr::presentation::godot_backend {
+inline constexpr std::string_view lobby_connections_waiting = "Waiting for all players to connect";
+inline constexpr std::string_view lobby_connections_explanation = "Every pair must connect before Start; My connections shows only your own links.";
 enum class LanPhase { idle, connecting, handshake, setup, barrier, running, reconnecting, resyncing, ended };
 enum class LanReason { none, version, build, identity, refused, timeout, desync, peer_left, cancelled };
 [[nodiscard]] inline bool lan_connection_loss(std::string_view code) {

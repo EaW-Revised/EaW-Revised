@@ -162,9 +162,34 @@ std::optional<std::array<std::uint8_t, 3>> LiveSessionView::owner_ui_colour(cons
     return std::array<std::uint8_t, 3>{faction->r, faction->g, faction->b};
 }
 
+void LiveSessionView::ensure_gc_seat_colours() const {
+    if (gc_seat_colours_ready_ || !options_.borrowed_battle || !start_ || team_of_player_.empty()) return;
+    gc_seat_colours_ready_ = true;
+    gc_seat_colours_.clear();
+    // #8355: the local seat and every enemy keep their faction's own look (no entry); the local side's mates, human or
+    // allied AI, get tinted variants of the local faction's colour. Developer workshop switch:
+    // EAWR_GC_ALLY_OWN_COLOURS=1 gives each human mate a palette colour of its own instead of a shade.
+    std::optional<std::array<std::uint8_t, 3>> own;
+    const auto local = std::find_if(options_.colour_seats.begin(), options_.colour_seats.end(),
+        [&](const auto& row) { return row.seat_id == options_.controller_seat; });
+    if (local != options_.colour_seats.end()) {
+        if (const auto faction = ui::faction_colour(faction_colours_, player_faction(local->player), true))
+            own = std::array<std::uint8_t, 3>{faction->r, faction->g, faction->b};
+    }
+    const bool shades = godot::OS::get_singleton()->get_environment("EAWR_GC_ALLY_OWN_COLOURS") != godot::String("1");
+    std::vector<sim::SeatId> ai_mates;
+    for (const auto& seat : options_.colour_seats)
+        if (seat.active && seat.kind == sim::SeatKind::ai && seat.player != player_ && is_ally_of_local(seat.player))
+            ai_mates.push_back(seat.seat_id);
+    for (const auto& seat : options_.colour_seats)
+        if (const auto colour = ui::gc_participant_colour(seat.seat_id, options_.colour_seats, options_.colour_teams,
+                gc_palette_, shades, options_.controller_seat, own, ai_mates)) gc_seat_colours_.emplace(seat.seat_id, *colour);
+}
+
 std::optional<std::array<std::uint8_t, 3>> LiveSessionView::participant_colour(
         sim::SeatId seat, const tactical::PlayerId owner) const {
     if (options_.borrowed_battle) {
+        ensure_gc_seat_colours();
         if (seat.value == 0) {
             const auto found = std::find_if(options_.colour_seats.begin(), options_.colour_seats.end(),
                 [owner](const auto& row) { return row.player == owner && row.active && row.kind == sim::SeatKind::human; });
@@ -177,11 +202,47 @@ std::optional<std::array<std::uint8_t, 3>> LiveSessionView::participant_colour(
 
 std::optional<std::array<std::uint8_t, 3>> LiveSessionView::instance_model_colour(
         const tactical::TacticalInstance& instance, const std::string& object_id) const {
-    const auto* saved = ActiveSettings::get();
     const auto faction = model_colour(instance.owner, object_id);
-    const bool participant_units = options_.borrowed_battle && saved && saved->gameplay.gc_battle_colours == 1
-        && !neutral_model_owners_.contains(instance.owner);
+    const bool participant_units = gc_participant_units() && !neutral_model_owners_.contains(instance.owner);
+    if (participant_units) ensure_gc_seat_colours();
     return ui::gc_instance_model_colour(participant_units, instance, faction, options_.colour_seats, gc_seat_colours_);
+}
+
+void LiveSessionView::apply_gc_colour_toggle() {
+    if (gc_follow_mate_ && battle_frame_.latest) {
+        ensure_gc_seat_colours();
+        for (const auto& instance : battle_frame_.latest->instances()) {
+            if (!gc_seat_colours_.contains(instance.controller_seat) || !composed_ship(instance.entity_id)) continue;
+            options_.follow = instance.entity_id;
+            gc_follow_mate_ = false;
+            break;
+        }
+    }
+    if (!gc_colour_toggle_ || presented_tick_ < gc_colour_toggle_->first) return;
+    const auto* saved = ActiveSettings::get();
+    if (saved) {
+        for (const auto& ship : placed_ships_) {
+            if (!ship.live_entity || !ship.team_colour) continue;
+            gc_colours_before_toggle_ += (gc_colours_before_toggle_.empty() ? "" : ", ") + std::string("{\"entity\": ")
+                + std::to_string(ship.live_entity) + ", \"rgb\": [" + std::to_string((*ship.team_colour)[0]) + ", "
+                + std::to_string((*ship.team_colour)[1]) + ", " + std::to_string((*ship.team_colour)[2]) + "]}";
+        }
+        auto changed = *saved;
+        changed.gameplay.gc_battle_colours = gc_colour_toggle_->second;
+        ActiveSettings::set(std::move(changed));
+    }
+    gc_colour_toggle_.reset();
+}
+
+bool LiveSessionView::gc_participant_units() const noexcept {
+    const auto* saved = ActiveSettings::get();
+    return options_.borrowed_battle && saved && saved->gameplay.gc_battle_colours == 1;
+}
+
+std::optional<std::array<std::uint8_t, 3>> LiveSessionView::minimap_unit_colour(
+        const tactical::TacticalInstance& instance, const std::string& object_id) const {
+    if (!gc_participant_units()) return std::nullopt;
+    return instance_model_colour(instance, object_id);
 }
 
 bool LiveSessionView::model_uses_player_colour(const tactical::PlayerId player) const noexcept {

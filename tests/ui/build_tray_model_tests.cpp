@@ -539,6 +539,152 @@ void test_a_remake_shaped_stack() {
         "7 rows and the automatic width keep every group in its own place");
 }
 
+
+// ---- GBT-05: the fallback to the broad rows (legacy #8361) ----------------------------------------------------
+
+// 10 frigates of one class and 28 capital ships of 14 classes (two each): the fine rows fold 28 of the 38 choices into Other
+// in 4 rows; the broad rows (one frigate group, one capital group) fit.
+struct BigOther final {
+    tray::TypeIndex index;
+    std::vector<std::string> frigates;
+    std::vector<std::string> capitals;
+};
+
+BigOther big_other() {
+    BigOther fixture;
+    for (int n = 0; n < 10; ++n) {
+        auto name = "Frigate_" + std::to_string(n);
+        fixture.index.add(classed(type(name, {"Frigate"}), "TEXT_CLASS_FRIGATE", "Frigate"));
+        fixture.frigates.push_back(std::move(name));
+    }
+    for (int n = 0; n < 28; ++n) {
+        auto name = "Capital_" + std::to_string(n);
+        fixture.index.add(classed(type(name, {"Capital"}), "TEXT_CLASS_" + std::to_string(n / 2)));
+        fixture.capitals.push_back(std::move(name));
+    }
+    return fixture;
+}
+
+void test_a_big_other_falls_back_to_the_broad_rows_and_a_filtered_list_keeps_the_fine_rows() {
+    const auto fixture = big_other();
+    auto size = metrics(); // 10 per line
+    tray::PackOptions four;
+    four.max_rows = 4;
+
+    const auto fitted = [&](const std::vector<std::string>& choices) {
+        const auto fine = tray::classify(choices, fixture.index, stock_like_enum(), default_definition());
+        const auto broad = tray::classify(choices, fixture.index, stock_like_enum(), default_definition(), {}, false);
+        return tray::fit_with_fallback(fine, broad, size, size, four, 10000.0F);
+    };
+
+    auto all = fixture.frigates;
+    all.insert(all.end(), fixture.capitals.begin(), fixture.capitals.end());
+    const auto fine_all = tray::classify(all, fixture.index, stock_like_enum(), default_definition());
+    const auto fine_fit = tray::fit_to_height(fine_all, size, size, four, 10000.0F);
+    expect(fine_all.size() == 15 && fine_fit.packed.misc_mode && tray::other_entries(fine_fit.packed) == 28,
+        "fixture: the fine rows fold 28 of 38 choices into Other");
+
+    const auto broad_fit = fitted(all);
+    expect(broad_fit.broad && !broad_fit.packed.misc_mode && tray::other_entries(broad_fit.packed) == 0
+            && broad_fit.packed.groups.size() == 2,
+        "the unfiltered big list: more than a quarter in Other and the broad rows put fewer there: the broad rows");
+    expect(broad_fit.packed.groups.size() == 2 && broad_fit.packed.groups[0].name == "Frigate"
+            && broad_fit.packed.groups[1].name == "Capital" && broad_fit.packed.groups[1].label.empty()
+            && broad_fit.packed.groups[1].choices.size() == 28,
+        "the broad rows are the category groups of before the class split, one per category, no class header");
+
+    // The same data narrowed by a filter (the capital ships of classes 0 to 3): the fine rows fit, so they are back.
+    const std::vector<std::string> filtered(fixture.capitals.begin(), fixture.capitals.begin() + 8);
+    const auto filtered_fit = fitted(filtered);
+    expect(!filtered_fit.broad && !filtered_fit.packed.misc_mode && filtered_fit.packed.groups.size() == 4
+            && filtered_fit.packed.groups[0].label == "TEXT_CLASS_0",
+        "the same data under a filter: the evaluation is on the filtered list, the fine class rows show again");
+
+    // Both packings overflow the same way: nothing gained, the fine rows stay.
+    std::vector<std::string> huge = fixture.frigates;
+    tray::TypeIndex many;
+    for (const auto& name : fixture.frigates) many.add(classed(type(name, {"Frigate"}), "TEXT_CLASS_FRIGATE", "Frigate"));
+    for (int n = 0; n < 120; ++n) {
+        auto name = "Big_" + std::to_string(n);
+        many.add(classed(type(name, {"Capital"}), "TEXT_CLASS_" + std::to_string(n / 2)));
+        huge.push_back(std::move(name));
+    }
+    const auto many_fine = tray::classify(huge, many, stock_like_enum(), default_definition());
+    const auto many_broad = tray::classify(huge, many, stock_like_enum(), default_definition(), {}, false);
+    const auto many_fit = tray::fit_with_fallback(many_fine, many_broad, size, size, four, 10000.0F);
+    expect(!many_fit.broad
+            && tray::other_entries(many_fit.packed) == tray::other_entries(tray::fit_to_height(many_broad, size, size, four, 10000.0F).packed),
+        "when the broad rows do not put fewer in Other the fine rows stay (past what any grouping can show)");
+
+    // A tray with no class group has nothing to fall back from (stock-shaped: no encyclopedia classes at all).
+    tray::TypeIndex plain;
+    std::vector<std::string> plain_choices;
+    for (int n = 0; n < 40; ++n) {
+        auto name = "Plain_" + std::to_string(n);
+        plain.add(type(name, {n % 2 ? "Capital" : "Frigate"}));
+        plain_choices.push_back(std::move(name));
+    }
+    const auto plain_groups = tray::classify(plain_choices, plain, stock_like_enum(), default_definition());
+    const auto plain_fit = tray::fit_with_fallback(plain_groups, {}, size, size, four, 10000.0F);
+    const auto plain_broad = tray::classify(plain_choices, plain, stock_like_enum(), default_definition(), {}, false);
+    expect(!plain_fit.broad && plain_broad.size() == plain_groups.size() && plain_broad[0].choices == plain_groups[0].choices,
+        "no class group: the broad rows are the groups already and the fit is the plain fit, whatever Other holds");
+}
+
+// Exactly a quarter of the unit choices in Other keeps the fine rows even where the broad rows would do better; more than a
+// quarter does not (the big list above: 28 of 38).
+void test_a_quarter_in_other_is_not_over_the_line() {
+    auto size = metrics(); // 10 per line
+    tray::PackOptions four;
+    four.max_rows = 4;
+    auto fine = make_groups({{"A", 10}, {"B", 10}, {"C", 10}});
+    std::size_t next = 30;
+    for (int index = 0; index < 5; ++index) {
+        tray::Group group;
+        group.name = "C";
+        group.label = "Class " + std::to_string(index);
+        group.choices = {next, next + 1};
+        next += 2;
+        fine.push_back(std::move(group));
+    }
+    const auto broad = make_groups({{"A", 10}, {"B", 10}, {"C", 20}});
+    const auto fine_fit = tray::fit_to_height(fine, size, size, four, 10000.0F);
+    expect(fine_fit.packed.misc_mode && tray::other_entries(fine_fit.packed) == 10
+            && tray::other_entries(tray::fit_to_height(broad, size, size, four, 10000.0F).packed) == 0,
+        "fixture: 10 of 40 in Other with the fine rows, none with the broad rows");
+    expect(!tray::fit_with_fallback(fine, broad, size, size, four, 10000.0F).broad,
+        "exactly a quarter in Other: the fine rows stay");
+}
+
+// The shape of the RaW ground tray with everything unlocked (Empire): 61 choices in 29 class groups, mostly one or two
+// ships; at 16 per line the fine rows leave over a third in Other, the broad groups (vehicle, infantry, heroes, air) fit.
+void test_a_raw_ground_shaped_tray_falls_back() {
+    auto size = metrics();
+    size.panel_width = 160.0F; // 16 per line
+    tray::PackOptions six;
+    six.max_rows = 6;
+    const auto sized = [&](const std::vector<std::size_t>& counts, const bool labelled) {
+        std::vector<std::pair<std::string, std::size_t>> shape;
+        for (std::size_t index = 0; index < counts.size(); ++index) shape.emplace_back("G" + std::to_string(index), counts[index]);
+        auto groups = make_groups(shape);
+        for (auto& group : groups) {
+            group.min_width = 45.0F; // a header of about four and a half entries
+            if (labelled) group.label = group.name;
+        }
+        return groups;
+    };
+    std::vector<std::size_t> fine{9, 5, 4, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2};
+    fine.insert(fine.end(), 14, 1);
+    const auto fine_groups = sized(fine, true);
+    const auto broad_groups = sized({22, 20, 8, 4, 3, 2, 1, 1}, false);
+    const auto plain = tray::fit_to_height(fine_groups, size, size, six, 10000.0F);
+    expect(plain.packed.misc_mode && tray::other_entries(plain.packed) * 4 > 61,
+        "fixture: the fine rows leave over a quarter in Other");
+    const auto fitted = tray::fit_with_fallback(fine_groups, broad_groups, size, size, six, 10000.0F);
+    expect(fitted.broad && tray::other_entries(fitted.packed) == 0 && !fitted.packed.misc_mode,
+        "the RaW ground shape: the broad rows, no Other");
+}
+
 } // namespace
 
 int main() {
@@ -559,6 +705,9 @@ int main() {
     test_height_steps();
     test_empty_and_single_inputs();
     test_a_remake_shaped_stack();
+    test_a_big_other_falls_back_to_the_broad_rows_and_a_filtered_list_keeps_the_fine_rows();
+    test_a_quarter_in_other_is_not_over_the_line();
+    test_a_raw_ground_shaped_tray_falls_back();
     if (eawr::test::ui::failures() != 0) {
         std::cerr << eawr::test::ui::failures() << " build tray model check(s) failed\n";
         return 1;

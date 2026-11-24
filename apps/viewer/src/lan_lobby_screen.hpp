@@ -64,6 +64,7 @@ public:
         std::filesystem::path save_directory;
         // Fixture knobs (#5512): the saved-game listing worker never returns; the listing limit in milliseconds (0: the default).
         bool fault_listing_hang{};
+        bool fixture_waiting_banner{};
         int listing_timeout_ms{};
         presentation::ui::LayoutRules rules{presentation::ui::LayoutRules::aspect_correct};
         std::string language{"ENGLISH"};

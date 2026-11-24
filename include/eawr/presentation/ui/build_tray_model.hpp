@@ -126,9 +126,11 @@ struct Group final {
 // is merged with it (never two identical headers in one tray), the merged choices in tray order. The headers of whole
 // category groups are the caller's resolved captions (`category_headers`: category name, header text; a name it lacks reads
 // derived_caption(name)); a class group's header is its label.
+// GBT-05 fallback (legacy #8361): `split_by_class` false gives the broad rows, the category groups as the tray showed them
+// before the class split: no category group splits and nothing merges.
 [[nodiscard]] std::vector<Group> classify(std::span<const std::string> choice_types, const TypeIndex& types,
     const CategoryEnum& categories, const GroupDefinition& definition,
-    std::span<const std::pair<std::string, std::string>> category_headers = {});
+    std::span<const std::pair<std::string, std::string>> category_headers = {}, bool split_by_class = true);
 
 // ---- Row packing (GBT-06) -------------------------------------------------------------------------
 
@@ -198,12 +200,25 @@ struct Packed final {
 
 struct FitResult final {
     bool compact{};       // the one smaller size step was used
+    bool broad{};         // fit_with_fallback chose the broad rows (GBT-05, legacy #8361)
     Packed packed;
 };
 
 // GBT-06 height cap: use the full size when the packed rows fit `available_height`; else the compact
 // size; else the compact size with fewer rows, never fewer than the buildings rows plus one unit row.
 [[nodiscard]] FitResult fit_to_height(const std::vector<Group>& groups, const Metrics& full,
+    const Metrics& compact, const PackOptions& options, float available_height);
+
+// GBT-05 (owner decision of 2026-11-24, legacy #8361): the entries the fold put in the misc row ("Other"), plus any it had to
+// omit.
+[[nodiscard]] std::size_t other_entries(const Packed& packed) noexcept;
+
+// GBT-05 (legacy #8361): `fine` are the groups split by encyclopedia class, `broad` the same choices in the broad category
+// groups (classify with split_by_class false). The fine rows are used unless the fold puts more than a quarter of the unit
+// choices (every group but the buildings) into Other AND the broad rows put fewer there; then the broad rows are. Decided
+// per call, on the list given: a mod's filter button that narrows the list gets the fine rows again as soon as they fit.
+// Without a class group in `fine` there is nothing to fall back from (`broad` is not looked at).
+[[nodiscard]] FitResult fit_with_fallback(const std::vector<Group>& fine, const std::vector<Group>& broad, const Metrics& full,
     const Metrics& compact, const PackOptions& options, float available_height);
 
 // GBT-06, Width_Mode Auto: the narrowest panel width from `min_width` up to `max_width`, in steps of one entry

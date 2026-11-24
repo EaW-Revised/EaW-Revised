@@ -654,6 +654,9 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
         category_headers.emplace_back(name, caption_text(tray::Group{tray::GroupKind::category, name, {}, {}, 0.0F, {}}));
     auto groups = tray::classify(types, types_, categories_, groups_.definition, category_headers);
     for (auto& group : groups) group.min_width = measure(caption_text(group)).x;
+    // GBT-05 (legacy #8361): the same choices in the broad category groups, for the fallback when the fine rows leave Other too big.
+    auto broad_groups = tray::classify(types, types_, categories_, groups_.definition, category_headers, false);
+    for (auto& group : broad_groups) group.min_width = measure(caption_text(group)).x;
     tray::PackOptions options;
     options.max_rows = layout.max_rows;
     options.fold_single_choice_groups = layout.fold_single_choice_groups;
@@ -681,8 +684,9 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
     }
     const float free_height = std::max(0.0F, bottom - top);
     full.panel_width = compact.panel_width = panel_width(state, bar);
-    const auto fit = tray::fit_to_height(groups, full, compact, options, free_height);
+    const auto fit = tray::fit_with_fallback(groups, broad_groups, full, compact, options, free_height);
     compact_ = fit.compact;
+    broad_rows_ = fit.broad;
     const auto& metrics = fit.compact ? compact : full;
     const auto geometry = tray::place(fit.packed, metrics, bar.position.x, bottom);
     omitted_by_layout_ = fit.packed.omitted;
@@ -933,6 +937,7 @@ std::string GalacticBuildTray::report_json() const {
     }
     out << ']';
     // The text of each shown header, in the order of the rects (a tray never shows two identical headers, GBT-05).
+    out << ",\"broad_rows\":" << (broad_rows_ ? "true" : "false");
     out << ",\"header_texts\":[";
     headers_written = 0;
     for (std::size_t index = 1; index < headers_.size(); ++index) {

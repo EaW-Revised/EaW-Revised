@@ -121,6 +121,7 @@ bool GalacticMode::State::build_radar_hud() {
             button->set_texture_hover(command_texture(first(*component, data::ui::Field::mouse_over_texture_name)));
             button->set_texture_pressed(command_texture(first(*component, data::ui::Field::selected_texture_name)));
             button->set_order_icon(command_texture(first(*component, data::ui::Field::icon_texture_name)), false);
+            button->set_icon_fit(presentation::ui::IconFitMode::contain);
             if (index == 0) {
                 // COMMANDBARCOMPONENTS.XML b_zoom uses its camera-state table,
                 // not the faction ALT table: zoom_out first, then zoom_in.
@@ -222,6 +223,7 @@ void GalacticMode::State::build_advanced_map_labels() {
             pad->set_texture_normal(command_texture(first(*style, data::ui::Field::blank_texture_name)));
             // The icon rectangle the occupant's icon goes into; without it set_icon_texture draws nothing (legacy #7168).
             pad->set_order_icon({}, false);
+            pad->set_icon_fit(presentation::ui::IconFitMode::contain);
             pad->set_disabled(true);
             pad->hide();
             advanced_map_shell->add_child(pad);

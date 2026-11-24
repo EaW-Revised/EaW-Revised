@@ -301,6 +301,12 @@ public:
         sim::tactical::PlayerId owner) const;
     [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> instance_model_colour(
         const sim::tactical::TacticalInstance& instance, const std::string& object_id) const;
+    // #8355: true while the per-player unit colours of a campaign battle are on (read live from the Tweaks choice).
+    [[nodiscard]] bool gc_participant_units() const noexcept;
+    // #8355: the radar blip colour of a unit; empty unless the per-player unit colours are on, so the blip then
+    // matches the model, and otherwise keeps its faction look.
+    [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> minimap_unit_colour(
+        const sim::tactical::TacticalInstance& instance, const std::string& object_id) const;
     // WGT-120: neutral owners always use nonzero type/faction No_Colorization_Color;
     // other owners use lobby colour in skirmish and type/faction colour in campaign.
     [[nodiscard]] bool model_uses_player_colour(sim::tactical::PlayerId player) const noexcept;
@@ -1038,8 +1044,16 @@ private:
     // #3076: Factions.xml `Color` / `No_Colorization_Color`, and the types' own nonzero
     // `No_Colorization_Color`. Colorization is off outside a skirmish (campaign battles).
     presentation::ui::MinimapSettings faction_colours_;
+    void ensure_gc_seat_colours() const;
+    // Test hook (#8355): EAWR_GC_COLOURS_TOGGLE="<tick>:<0|1>" flips the Tweaks choice once, mid-battle.
+    void apply_gc_colour_toggle();
+    std::optional<std::pair<double, int>> gc_colour_toggle_;
+    bool gc_follow_mate_{}; // Test hook (#8355): EAWR_GC_COLOURS_FOLLOW_MATE=1 frames the first team mate's unit.
+    std::string gc_colours_before_toggle_; // JSON rows of the model colours the frame before the flip
     std::vector<std::array<std::uint8_t, 3>> gc_palette_;
-    std::map<sim::SeatId, std::array<std::uint8_t, 3>> gc_seat_colours_;
+    // Built on first use once the start names the factions (the local seat keeps its faction's main colour).
+    mutable std::map<sim::SeatId, std::array<std::uint8_t, 3>> gc_seat_colours_;
+    mutable bool gc_seat_colours_ready_{};
     std::map<std::string, std::array<std::uint8_t, 3>> type_no_colorization_;
     bool colorization_enabled_{true};
     std::set<sim::tactical::PlayerId> neutral_model_owners_; // WGT-120: cached from authored faction neutrality

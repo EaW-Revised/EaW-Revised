@@ -77,6 +77,7 @@ public:
         bool online_list_failed{};
         // #5512 fault knobs: --eawr-lan-fault listing-hang, --eawr-lan-listing-timeout-ms N.
         bool fault_listing_hang{};
+        bool fixture_waiting_banner{};
         int listing_timeout_ms{};
         std::optional<std::uint16_t> game_port;
         std::string fake;

@@ -74,6 +74,7 @@ bool GalacticMode::State::build_black_market_hud() {
                     surface.close = button; button->set_action([this] { close_black_market(); });
                 } else {
                     button->set_order_icon({}, false);
+                    button->set_icon_fit(presentation::ui::IconFitMode::contain);
                     surface.choices.emplace_back(anchor.name, button);
                 }
             }

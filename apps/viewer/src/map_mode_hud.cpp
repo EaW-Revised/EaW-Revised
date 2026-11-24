@@ -1347,6 +1347,12 @@ void MapMode::State::sync_minimap() {
         if (const auto colour = live.player_colour(owner)) return data::ui::Rgba8{(*colour)[0], (*colour)[1], (*colour)[2], 255};
         return hud->faction_colour(live.player_faction(owner)).value_or(data::ui::Rgba8{100, 100, 100, 255});
     };
+    // #8355: with per-player unit colours on, a blip wears the colour of its model (own faction colour, mates' shades).
+    const auto participant_blip_colour = [&](const sim::tactical::TacticalInstance& instance, const std::string& type,
+                                             presentation::ui::MinimapUnit& blip) {
+        if (const auto colour = live.minimap_unit_colour(instance, type))
+            blip.owner_colour = data::ui::Rgba8{(*colour)[0], (*colour)[1], (*colour)[2], 255};
+    };
     std::vector<presentation::ui::MinimapPlayerColour> radar_players;
     for (const auto& player : latest->players()) {
         radar_players.push_back({player.player_id, player.team_id, player.neutral, owner_colour(player.player_id)});
@@ -1429,6 +1435,7 @@ void MapMode::State::sync_minimap() {
         if (live.squadron_of().contains(entity) || live.squadron_members().contains(entity)) continue;
         auto blip = make_blip(entity, instance.type_id, instance.owner,
             sim::tactical::players_hostile(latest->players(), instance.owner, live.local_player()));
+        participant_blip_colour(instance, blip.type, blip);
         blip.radar = live.radar_state(entity);
         blip.radar.display_enemies = display_enemies;
         blip.in_nebula = instance.in_nebula;
@@ -1502,6 +1509,7 @@ void MapMode::State::sync_minimap() {
         const auto pose = presentation::ui::minimap_squadron_pose(members);
         if (!pose || leader == nullptr) continue;
         auto blip = make_blip(squadron, container->type_id, container->owner, leader->hostile);
+        participant_blip_colour(*container, blip.type, blip);
         // MM-15: the team's authored type supplies geometry/style. Live craft supply
         // radar permission, including teams whose own type omits the radar flag.
         const auto* type = live.tables() != nullptr ? live.tables()->find(blip.type) : nullptr;

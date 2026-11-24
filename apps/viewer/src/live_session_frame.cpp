@@ -1493,6 +1493,7 @@ void LiveSessionView::apply_frame_opacity(const std::shared_ptr<const sim::tacti
         GodotRenderer& renderer,
         const std::vector<live::LiveUnitPose>& poses,
         std::map<sim::EntityId, std::array<float, 3>>& visual_scales) {
+    apply_gc_colour_toggle();
     // #535: the fog fade's opacity (FW-16 to FW-19) goes to every piece of the ship; the pieces
     // whose adapters carry the unit's opacity uniform (the hull surfaces, as BP-21's shield flash
     // reaches) dither with it, the others ignore it (G-FW14).

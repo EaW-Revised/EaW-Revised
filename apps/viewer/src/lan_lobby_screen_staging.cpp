@@ -227,6 +227,7 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     impl.staging_chat = model::ChatLog();
     impl.room_chat_sequence = impl.room_revision = 0; impl.room_notice.clear();
     impl.online_connections.clear();
+    impl.logged_start_reason.clear();
     impl.refused = false;
     impl.mod_review_box = false;
     impl.deferred_mod_review.reset();

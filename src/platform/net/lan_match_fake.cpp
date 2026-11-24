@@ -177,7 +177,7 @@ public:
             view_.online_capacity = static_cast<std::uint32_t>(view_.human_owners.size());
             view_.online_connected = view_.online_capacity > 2 ? view_.online_capacity - 2 : 1;
             view_.start_enabled = false;
-            view_.message = "Waiting for connections between players. Every pair must connect before Start; My connections shows only your own links.";
+            view_.message = lobby_connections_waiting;
             view_.online_connections.clear();
             for (net::PeerIndex peer = 0; peer < view_.online_capacity; ++peer) {
                 net::GnsPairDiagnostic pair;

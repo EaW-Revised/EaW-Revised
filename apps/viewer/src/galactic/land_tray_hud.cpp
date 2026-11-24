@@ -33,6 +33,7 @@ void GalacticMode::State::build_land_tray() {
         // while the pointer is over the slot.
         button->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
         button->set_order_icon({}, false);
+        button->set_icon_fit(presentation::ui::IconFitMode::contain);
         button->hide();
         advanced_map_shell->add_child(button);
         land_fleet_buttons[slot] = button;

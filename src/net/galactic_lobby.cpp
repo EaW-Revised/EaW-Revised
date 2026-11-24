@@ -67,15 +67,8 @@ std::uint32_t galactic_lobby_max_humans(const gc::MpLobbyCampaign& campaign, con
 }
 
 std::uint32_t galactic_lobby_default_humans(const gc::MpLobbyCampaign& campaign, const std::uint32_t seat_limit) noexcept {
-    // Two for every campaign until a room can start with fewer humans than seats (#8130): a room waits for all the seats it opens with.
+    // Two by default for every campaign; the host may choose a larger capacity.
     return std::min<std::uint32_t>(2U, galactic_lobby_max_humans(campaign, seat_limit));
-}
-
-std::string galactic_room_waiting_text(const std::size_t seated, const std::uint32_t capacity) {
-    if (seated >= capacity) return {};
-    const auto missing = static_cast<std::size_t>(capacity) - seated;
-    return "Waiting for " + std::to_string(missing) + (missing == 1 ? " more player" : " more players") + ": this room was opened for "
-        + std::to_string(capacity) + ". Start stays off until it is full; open the room again with fewer Human players to start sooner.";
 }
 
 LobbyGameMode lobby_game_mode(const LobbyGame& game) noexcept {

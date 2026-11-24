@@ -6,6 +6,7 @@
 #include "eawr/sim/galactic/fleet_intelligence.hpp"
 #include "eawr/data/ui/shell_anchors.hpp"
 #include "eawr/core/load_note.hpp"
+#include "eawr/presentation/ui/icon_fit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -110,11 +111,13 @@ struct CommandButtonGeometry final {
         composite_tab ? anchor.rect : hit};
 }
 
-// Each retained layer uses its own texture dimensions, centred on the button artwork.
+// Each retained layer uses its own texture dimensions, centred on the button artwork (#8366: the one icon rule,
+// presentation::ui::fit_icon_rect, natural mode; EawrHudButton::set_icon_fit draws slots the same way).
 [[nodiscard]] inline data::ui::ReferenceRect command_layer_rect(float width, float height,
     float texture_width, float texture_height, float scale) noexcept {
-    const float layer_width = texture_width * scale, layer_height = texture_height * scale;
-    return {(width - layer_width) * 0.5F, (height - layer_height) * 0.5F, layer_width, layer_height};
+    const auto rect = presentation::ui::fit_icon_rect(width, height, texture_width, texture_height, scale,
+        presentation::ui::IconFitMode::natural);
+    return {rect.x, rect.y, rect.width, rect.height};
 }
 
 // GHUD-R01..R03: nonnegative balances truncate; income previews still round.

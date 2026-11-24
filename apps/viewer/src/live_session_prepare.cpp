@@ -126,15 +126,20 @@ bool LiveSessionView::prepare_head(const vfs::Vfs& filesystem, const std::string
     faction_colours_ = minimap_settings;
     gc_palette_.clear();
     gc_seat_colours_.clear();
+    gc_seat_colours_ready_ = false;
+    gc_colour_toggle_.reset();
+    gc_follow_mate_ = options_.borrowed_battle
+        && godot::OS::get_singleton()->get_environment("EAWR_GC_COLOURS_FOLLOW_MATE") == godot::String("1");
+    gc_colours_before_toggle_.clear();
+    if (options_.borrowed_battle) {
+        const std::string toggle = godot::OS::get_singleton()->get_environment("EAWR_GC_COLOURS_TOGGLE").utf8().get_data();
+        const auto colon = toggle.find(':');
+        if (colon != std::string::npos && colon != 0 && colon + 1 < toggle.size())
+            gc_colour_toggle_ = {std::strtod(toggle.c_str(), nullptr), toggle[colon + 1] == '1' ? 1 : 0};
+    }
     if (options_.borrowed_battle) {
         if (auto palette = skirmish::read_lobby_colours(filesystem))
             for (const auto& entry : palette.value()) gc_palette_.push_back(entry.rgb);
-        // Developer workshop switch: set EAWR_GC_ALLY_OWN_COLOURS=1 for distinct co-op colours.
-        const bool shades = godot::OS::get_singleton()->get_environment("EAWR_GC_ALLY_OWN_COLOURS")
-            != godot::String("1");
-        for (const auto& seat : options_.colour_seats)
-            if (const auto colour = ui::gc_participant_colour(seat.seat_id, options_.colour_seats,
-                    options_.colour_teams, gc_palette_, shades)) gc_seat_colours_.emplace(seat.seat_id, *colour);
     }
     // #3076: FoC enables unit colorization for the skirmish game mode only; a campaign battle runs without it.
     colorization_enabled_ = !options_.borrowed_battle;
