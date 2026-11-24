@@ -839,7 +839,7 @@ int main() {
         std::array<std::string, 10> zero_desire_baselines;
         std::array<std::string, 5> refused_invasion_baselines;
         std::array<std::string, 3> native_identity_baselines;
-        std::array<std::string, 24> assembly_baselines;
+        std::array<std::string, 26> assembly_baselines;
         std::string frontier_baseline;
         std::string pending_switch_baseline;
         std::string sparse_force_baseline;

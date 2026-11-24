@@ -288,7 +288,6 @@ bool MapMode::State::prepare_game_menu(const bool finish) {
             UtilityFunctions::printerr("EAWR in-game menu: ", String::utf8(game_menu->failure().c_str()));
             memdelete(game_menu);
             game_menu = nullptr;
-            game_menu_warm_failed = true;
             return false;
         }
         if (!finish) return false;
@@ -311,7 +310,6 @@ bool MapMode::State::open_game_menu() {
     if (menu_host == nullptr || !filesystem) return false;
     if (game_menu != nullptr && !UtilityFunctions::is_instance_id_valid(game_menu_id)) game_menu = nullptr;
     if (game_menu != nullptr && game_menu->shown()) return true;
-    game_menu_warm_failed = false;
     if (!prepare_game_menu(true)) return false;
     EawrOptionsScreen::Options screen_options;
     if (live_session->can_save()) {

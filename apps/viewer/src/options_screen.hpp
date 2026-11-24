@@ -100,7 +100,7 @@ public:
 
     // Adds the screen to `parent` (a CanvasLayer of its own, above the world and the HUD) and opens
     // `start`. Emits `closed` once the player leaves the hub; the screen is then out of the tree.
-    [[nodiscard]] bool prewarm_theme(godot::Node& parent, bool finish = true);
+    [[nodiscard]] bool prewarm_theme(godot::Node& parent, bool finish = true, bool preload_standalone = false);
     void set_game_actions(Options options);
     void show(godot::Node& parent, Page start = Page::hub);
     [[nodiscard]] bool shown() const noexcept { return shown_; }
@@ -193,6 +193,7 @@ private:
     std::unique_ptr<PageState> state_;
     Options options_;
     SettingsStore store_;
+    bool settings_save_failed_{};
     int build_stage_{};
     presentation::ui::PlayerSettings committed_;
     presentation::ui::PlayerSettings draft_;

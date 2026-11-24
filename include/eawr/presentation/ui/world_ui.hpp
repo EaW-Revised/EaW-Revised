@@ -128,6 +128,8 @@ struct WorldUiSettings final {
 };
 [[nodiscard]] WorldUiSettings world_ui_settings(const vfs::Vfs& filesystem);
 [[nodiscard]] float bar_scale(float camera_distance, float scale, float minimum) noexcept;
+// Presentation safeguard: bound a world bar to one quarter of the viewport width.
+[[nodiscard]] float bounded_bar_scale(float scale, float native_width, float viewport_width) noexcept;
 
 // WU-14: a bar shows level ceil(10 x fraction) of 0..10; its filled part is fraction x width from
 // the left, over a black back, with a one-pixel black outline.

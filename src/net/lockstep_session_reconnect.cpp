@@ -8,7 +8,10 @@
 #include <algorithm>
 #include <limits>
 #include <cstdlib>
-#ifndef _WIN32
+#if defined(__APPLE__)
+#include <sys/types.h>
+#include <sys/random.h>
+#elif !defined(_WIN32)
 #include <cerrno>
 #include <sys/random.h>
 #endif
@@ -26,6 +29,13 @@ core::Result<RejoinNonce> fresh_nonce() {
         if (rand_s(&word) != 0) return refused<RejoinNonce>(reconnect_errors::nonce, "OS nonce generation failed");
         for (unsigned byte = 0; byte < 4; ++byte)
             nonce[offset + byte] = static_cast<std::uint8_t>(word >> (byte * 8U));
+    }
+#elif defined(__APPLE__)
+    for (std::size_t offset = 0; offset < nonce.size();) {
+        const auto count = std::min<std::size_t>(256, nonce.size() - offset);
+        if (getentropy(nonce.data() + offset, count) != 0)
+            return refused<RejoinNonce>(reconnect_errors::nonce, "OS nonce generation failed");
+        offset += count;
     }
 #else
     std::size_t offset{};

@@ -492,17 +492,7 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
             });
             // WGA-485: original type (company transport when authored), faction,
             // logical tick rate and the active movement mode determine the estimate.
-            engine->set_galactic_stage_speed([content](auto player, const auto& snapshot, auto type) {
-                using namespace script::foc::ai;
-                const auto object = content->types.find(type);
-                const auto faction = content->faction_speed.find(player);
-                if (object == content->types.end() || faction == content->faction_speed.end() || !snapshot.movement())
-                    return absent<Real>("synchronized staging type/faction/mode speed");
-                const auto speed = to_single(to_single(to_single(object->second.hyperspace_speed * faction->second)
-                    * real(sim::tactical::logical_frames_per_second))
-                    * script::numeric::from_fixed(snapshot.movement()->mode_modifier));
-                return core::Result<Real>::success(speed);
-            });
+            engine->set_galactic_stage_speed(script::foc::ai::galactic_stage_speed_reader(content));
             // WGA-400..404: actual live identity, qualified containing source
             // and literal grandparent; absent source reads no permission.
             actions.bind_freestore_movement([usable](auto player, const auto& facts, const auto& snapshot) {

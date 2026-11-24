@@ -206,6 +206,18 @@ core::Result<GalacticType> resolve_initial_galactic_type(const GalacticTypeTable
     if (type.squadron_capacity && (*type.squadron_capacity < 0
             || static_cast<std::uint64_t>(*type.squadron_capacity) > std::numeric_limits<std::uint32_t>::max()))
         return fail("unbounded squadron capacity");
+    // WGA-507: a squadron type takes the slowest hyperspace speed among its member craft, whatever it authors itself (the
+    // original sets this at data load). Members outside the table or without a speed do not count; with no counted member the
+    // type keeps its own value.
+    if (!type.squadron_units.empty()) {
+        std::optional<Fixed> slowest;
+        for (const auto& member_name : type.squadron_units) {
+            const auto* member = table.find(member_name);
+            if (member && member->hyperspace_speed && (!slowest || *member->hyperspace_speed < *slowest))
+                slowest = member->hyperspace_speed;
+        }
+        if (slowest) type.hyperspace_speed = slowest;
+    }
     if (!type.hyperspace_speed) type.hyperspace_speed = Fixed{};
     if (!type.political_control) type.political_control = Fixed{};
     if (!type.squadron_capacity) type.squadron_capacity = 0;

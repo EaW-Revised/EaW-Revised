@@ -2087,12 +2087,26 @@ bool ai_seated(const CampaignSetupPlan& plan, const CampaignPlayerBinding& bindi
 // The controller type an AI-seated faction acquires, or empty when it acquires none: the shared choice the lobby's row
 // caption also reads (ai_controller_choice). Neutral seat metadata does not create a galactic goal owner (the native goal
 // checkpoint contract excludes neutral players), and an ambient faction retains the campaign's authored assignment or its
-// absence. Refuses an unknown faction and a playable multiplayer faction without Basic_AI.
+// absence. Refuses an unknown faction and a playable multiplayer faction with neither an AI_Player_Control row nor Basic_AI.
 core::Result<std::string_view> galactic_ai_controller_type(const data::galactic::GalacticData& data,
     const data::galactic::Campaign& campaign, const CampaignSetupPlan& plan, std::string_view faction_name) {
     const auto choice = ai_controller_choice(data, campaign, plan.rules_flavour(), faction_name);
     if (!choice.missing.empty()) return absent<std::string_view>(std::string(choice.missing));
     return core::Result<std::string_view>::success(choice.type);
+}
+// #8290: the entries a player type runs at per level (Easy, Normal, Hard), as the galactic runtime finds them: an entry whose
+// adjustment the mounted difficulty data does not define plays as the dummy adjustment, so it is left out (the battle entry
+// reads its player types the same way, so the galactic and the tactical side agree on every level).
+MpLevelEntries mp_level_entries(const ai::AiData& loaded, const std::string_view type_name) {
+    MpLevelEntries entries;
+    const auto type = loaded.players.find(ai::upper_case(type_name));
+    if (type == loaded.players.end()) return entries;
+    constexpr std::array<const char*, 3> levels{"EASY", "NORMAL", "HARD"};
+    for (std::size_t i = 0; i < levels.size(); ++i) {
+        const auto named = type->second.difficulty.find(levels[i]);
+        if (named != type->second.difficulty.end() && loaded.difficulties.contains(named->second)) entries[i] = named->second;
+    }
+    return entries;
 }
 } // namespace
 
@@ -2118,6 +2132,7 @@ core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
     if (!campaign) return absent<std::vector<ga::PlayerSelection>>("authored campaign AI selection");
     std::string level;
     bool ambiguous = false;
+    const bool multiplayer = plan.rules_flavour() == CampaignRulesFlavour::multiplayer;
     const auto authored_adjustment = ai::upper_case(authored_difficulty);
     const auto human = [&](sim::galactic::PlayerId id) { return active_seat(plan, id, sim::galactic::SeatKind::human); };
     std::optional<sim::galactic::PlayerId> human_player;
@@ -2133,7 +2148,7 @@ core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
         const auto* faction = data.faction(binding.faction);
         const auto type = loaded.players.find(ai::upper_case(player_type));
         if (type == loaded.players.end()) return absent<std::vector<ga::PlayerSelection>>("authored AI player type");
-        for (const auto& [candidate, adjustment] : type->second.difficulty) if (adjustment == authored_adjustment) {
+        if (!multiplayer) for (const auto& [candidate, adjustment] : type->second.difficulty) if (adjustment == authored_adjustment) {
             if (!level.empty() && level != candidate) ambiguous = true;
             if (level.empty()) level = candidate;
         }
@@ -2158,9 +2173,23 @@ core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
     // maps that level to an adjustment, or to the dummy adjustment when it authors none. The adjustment name this session carries
     // therefore finds its level through the types that author it; a campaign whose types author other names (a mod's own) falls
     // back to the level one of the three stock names stands for (Easy_Default, Normal_Default, Hard_Default: exactly these,
-    // the names the lobby offers) instead of refusing the start (#6858). The
-    // multiplayer extension keeps its refusal: a room's global adjustment is the mod's own name, never assumed to be Normal.
-    if ((level.empty() || ambiguous) && !selected.empty() && plan.rules_flavour() != CampaignRulesFlavour::multiplayer) {
+    // the names the lobby offers) instead of refusing the start (#6858). A room (multiplayer rules) takes the level branch below.
+    if (multiplayer && !selected.empty()) {
+        // #8290 (the galactic twin of the battle entry's #8172 mapping): the room's one agreed adjustment name stands for a LEVEL,
+        // found through the campaign's own lobby list, then through the player types that author the name, then the stock names;
+        // a name none of them knows plays Normal. Every AI player then runs the entry ITS type authors for that level (its Normal
+        // entry when it has none for the level, else the dummy adjustment). Nothing is refused over a difficulty name, and
+        // nothing is matched by name across player types.
+        std::vector<MpLevelEntries> all_types;
+        for (const auto& [name, type] : loaded.players) { (void)type; all_types.push_back(mp_level_entries(loaded, name)); }
+        const LobbyAiLevels type_levels = [&](const std::string_view name) { return mp_level_entries(loaded, name); };
+        const auto agreed = agreed_mp_level(authored_difficulty, campaign_difficulty_entries(data, plan.campaign_name(), type_levels), all_types);
+        for (auto& player : selected)
+            player.difficulty = ai::upper_case(sim::tactical::to_string(
+                choose_mp_ai_difficulty(mp_level_entries(loaded, player.player_type), agreed.level).level));
+        return core::Result<std::vector<ga::PlayerSelection>>::success(std::move(selected));
+    }
+    if ((level.empty() || ambiguous) && !selected.empty() && !multiplayer) {
         for (const char* stock : {"EASY", "NORMAL", "HARD"})
             if (authored_adjustment == std::string(stock) + "_DEFAULT") { level = stock; ambiguous = false; break; }
     }

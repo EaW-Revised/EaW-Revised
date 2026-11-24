@@ -393,7 +393,11 @@ int main() {
                     layers = eawr::vfs::mod_chain_roots(workshop / *mod); break;
                 }
             }
-            if (layers.empty()) throw std::runtime_error("the actor matrix requires installed workshop mod " + *mod);
+            if (layers.empty()) {
+                if (const auto failures = galactic_test::checker.finish()) return failures;
+                std::cout << "SKIPPED: the actor matrix requires installed workshop mod " << *mod << '\n';
+                return 77;
+            }
             layers.emplace_back("expansion", game / "corruption" / "Data");
             layers.emplace_back("base", game / "GameData" / "Data");
             std::vector<eawr::vfs::MountSpec> mod_mounts;

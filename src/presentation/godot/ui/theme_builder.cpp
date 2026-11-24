@@ -3,10 +3,13 @@
 
 #include "eawr/core/diagnostic.hpp"
 
+#include <godot_cpp/classes/os.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/transform2d.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <sstream>
@@ -197,7 +200,15 @@ ThemeBuildTask::ThemeBuildTask(const model::ThemeModel& model, UiTextures& textu
 
 void ThemeBuildTask::add_texture(const model::ThemeStyle& style, const model::ThemeTexture& slot) {
     const StringName type(text(style.name));
+    static const bool timing = OS::get_singleton() && OS::get_singleton()->has_environment("EAWR_OPTIONS_TIMING");
+    const auto started = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     Ref<Texture2D> texture = textures_.texture(slot, model_.scale_x, model_.scale_y);
+    if (timing) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        if (elapsed >= 10000) UtilityFunctions::print("EAWR options slow theme texture: style ", text(style.name),
+            "; slot ", text(slot.slot), "; texture ", text(slot.texture), "; path ", text(slot.logical_path), "; us ", elapsed);
+    }
     if (texture.is_null()) {
         texture = textures_.empty();
         ++counts_.empty_icons;

@@ -195,8 +195,11 @@ void WorldUiView::draw_bars(const Frame& frame, const RID canvas_item, const flo
         (*screen)[1] = std::trunc((*screen)[1]);
         const float distance = std::sqrt((unit.position[0] - eye[0]) * (unit.position[0] - eye[0])
             + (unit.position[1] - eye[1]) * (unit.position[1] - eye[1]) + (unit.position[2] - eye[2]) * (unit.position[2] - eye[2]));
-        const float scale = ui::bar_scale(distance, *settings_.health_bar_scale, *settings_.min_health_bar_scale) * ui_scale;
-        const float width = ui::bar_width(type->second.bar) * scale;
+        const float native_width = ui::bar_width(type->second.bar);
+        const float scale = ui::bounded_bar_scale(
+            ui::bar_scale(distance, *settings_.health_bar_scale, *settings_.min_health_bar_scale) * ui_scale,
+            native_width, frame.viewport[0]);
+        const float width = native_width * scale;
         const float height = ui::bar_height * scale;
         float y = (*screen)[1];
         bar_geometry_.push_back({candidate.entity, (*screen)[0], y, width, height, lift, *settings_.health_bar_spacing});

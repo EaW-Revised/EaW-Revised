@@ -693,6 +693,11 @@ void difficulty_follows_the_campaigns_ai_types() {
             "a multiplayer entry with an always-AI faction offers that type's entries, not the playable factions' Basic_AI");
         expect(cp::list_mp_lobby_campaigns(mp.data, ai_levels)[0].difficulties == Entries{},
             "playable factions that disagree share no entry that is safe whichever of them the AI plays");
+        // #8289: a playable faction left to the AI runs the entry's own AI_Player_Control type for it, so those types decide the list.
+        auto rowed = mp.data;
+        rowed.campaigns[0].ai_player_control = {{rowed.factions[0].name, "Major_Ai"}, {rowed.factions[1].name, "Major2_Ai"}};
+        expect(cp::list_mp_lobby_campaigns(rowed, ai_levels)[0].difficulties == default_family,
+            "a multiplayer entry's own rows for its playable factions, not their Basic_AI, decide the offered entries");
         mp.data.factions[1].basic_ai = "MAJOR2_AI";
         expect(cp::list_mp_lobby_campaigns(mp.data, ai_levels)[0].difficulties == default_family,
             "playable factions' Basic_AI types that all carry an entry offer it");

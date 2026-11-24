@@ -1634,6 +1634,9 @@ struct MpSelectionFixture {
                 ai.players.emplace(ai_data::upper_case(type.name), std::move(type));
             }
         }
+        // The adjustments the two types author exist in the mounted difficulty data (an undefined one plays as the dummy).
+        ai.difficulties.emplace("MOD_CHALLENGE", ai_data::Difficulty{});
+        ai.difficulties.emplace("MOD_GENTLE", ai_data::Difficulty{});
     }
     auto select(std::string_view difficulty = "mod_challenge") const {
         const auto plan = must(cp::plan_campaign_setup(data, {}, data.campaigns.front().name, options));
@@ -1644,12 +1647,30 @@ struct MpSelectionFixture {
 
 void mp_ai_uses_authored_faction_basic_ai() {
     MpSelectionFixture fixture;
-    // Deliberately unrelated campaign pairs cannot replace the agreed MP faction policy.
-    fixture.data.campaigns.front().ai_player_control = {{"Copper", "Unresolved_Solo_Controller"}};
+    // A multiplayer entry that authors no row for a faction (stock authors none) keeps the faction's own Basic_AI; a row for a
+    // faction held by a human is never read.
+    fixture.data.campaigns.front().ai_player_control = {{"Azure", "Unresolved_Solo_Controller"}};
     const auto selected = must(fixture.select());
     expect(selected.size() == 2 && selected[0].player == galactic::PlayerId{2}
         && selected[0].player_type == "Copper_Mod_Controller" && selected[1].player_type == "Jade_Mod_Controller",
-        "GCMP-AI-01 selects each playable MP AI faction's own mod-authored Basic_AI, without campaign pairs");
+        "GCMP-AI-01 an entry with no row for an AI faction keeps that faction's own mod-authored Basic_AI");
+    // #8289: the entry's own AI_Player_Control row for an AI-seated playable faction is the single-player GC AI.
+    fixture.data.campaigns.front().ai_player_control = {{"Copper", "Jade_Mod_Controller"}};
+    const auto assigned = must(fixture.select());
+    expect(assigned.size() == 2 && assigned[0].player_type == "Jade_Mod_Controller" && assigned[1].player_type == "Jade_Mod_Controller",
+        "#8289 an AI-seated playable faction runs the AI_Player_Control type its entry names for it, not its Basic_AI");
+    const auto& campaign = fixture.data.campaigns.front();
+    expect(cp::ai_controller_choice(fixture.data, campaign, cp::CampaignRulesFlavour::multiplayer, "Copper").type == "Jade_Mod_Controller"
+        && cp::ai_controller_choice(fixture.data, campaign, cp::CampaignRulesFlavour::multiplayer, "Jade").type == "Jade_Mod_Controller",
+        "#8289 the lobby's row choice and the start read the same controller type");
+    auto starter = campaign;
+    starter.starting_active_player = "Copper";
+    expect(cp::ai_controller_choice(fixture.data, starter, cp::CampaignRulesFlavour::multiplayer, "Copper").type == "Copper_Mod_Controller",
+        "#8289 the entry's starter row names the human side's type: an AI seat on that faction keeps its Basic_AI");
+    fixture.data.campaigns.front().ai_player_control = {{"Copper", "Unresolved_Solo_Controller"}};
+    const auto unresolved = fixture.select();
+    expect(!unresolved && unresolved.error().message == "galactic AI provider absent: authored AI player type",
+        "#8289 an authored row naming no defined AI player type refuses like any other authored assignment");
     fixture.options.rules_flavour = cp::CampaignRulesFlavour::single_player;
     expect(!fixture.select(), "networked SP rules resolve authored AI_Player_Control instead of Basic_AI");
     fixture.data.campaigns.front().ai_player_control = {{"Copper", "Jade_Mod_Controller"}};
@@ -1688,6 +1709,18 @@ void mp_ai_uses_agreed_difficulty_mapping() {
         && easy[0].difficulty == "EASY" && easy[1].difficulty == "EASY",
         "GCMP-AI-02 resolves the global agreed adjustment through every selected type's authored mapping");
     expect(must(fixture.select("mOd_ChAlLeNgE")) == hard, "independent selection yields canonical identical controller inputs");
+    // #8290: a type that authors other names than the stock ones (a skirmish-style Easy/Medium/Hard set) finds its level through
+    // the names it authors, and each player runs the entry its OWN type has for that level.
+    auto& copper = fixture.ai.players.at("COPPER_MOD_CONTROLLER");
+    copper.difficulty.clear(); copper.difficulty.emplace("EASY", "MOD_GENTLE"); copper.difficulty.emplace("NORMAL", "MOD_STEADY");
+    copper.difficulty.emplace("HARD", "MOD_CHALLENGE");
+    fixture.ai.difficulties.emplace("MOD_STEADY", eawr::script::foc::ai::Difficulty{});
+    const auto steady = must(fixture.select("mod_steady"));
+    expect(steady.size() == 2 && steady[0].difficulty == "NORMAL" && steady[1].difficulty == "NORMAL",
+        "#8290 a name only one selected type authors, for its Normal entry, is the Normal level for every AI player");
+    const auto gentle = must(fixture.select("MOD_GENTLE"));
+    expect(gentle.size() == 2 && gentle[0].difficulty == "EASY" && gentle[1].difficulty == "EASY",
+        "#8290 a name two types author for the same level is that level");
 }
 
 void mp_ai_preserves_human_inactive_and_ambient_absence() {
@@ -1715,11 +1748,17 @@ void mp_ai_refuses_unsupported_playable_inputs() {
     expect(!missing && missing.error().message == "galactic AI provider absent: authored AI player type",
         "GCMP-AI-04 refuses an unresolved authored Basic_AI reference");
     fixture.data.factions[1].basic_ai = "Copper_Mod_Controller";
-    missing = fixture.select("mod_unsupported");
-    expect(!missing && missing.error().message == "galactic AI provider absent: authored difficulty level",
-        "GCMP-AI-04 refuses an unsupported global difficulty without assuming Normal");
+    // #8290: a room's agreed name no type authors is never a refusal: it plays Normal, each type on its own Normal entry (or the
+    // dummy adjustment when it has none), and a stock name is the level it stands for.
+    const auto unsupported = must(fixture.select("mod_unsupported"));
+    expect(unsupported.size() == 2 && unsupported[0].difficulty == "NORMAL" && unsupported[1].difficulty == "NORMAL",
+        "#8290 an unknown agreed difficulty name runs the Normal level instead of refusing the start");
     fixture.ai.players.at("COPPER_MOD_CONTROLLER").difficulty.emplace("NORMAL", "MOD_CHALLENGE");
-    expect(!fixture.select(), "GCMP-AI-04 refuses ambiguous selected-type difficulty mappings");
-    expect(!fixture.select("Normal_Default"), "#6858 the multiplayer extension keeps refusing: a stock name is never assumed for a room");
+    const auto both = must(fixture.select());
+    expect(both.size() == 2 && both[0].difficulty == "NORMAL" && both[1].difficulty == "NORMAL",
+        "#8290 a name one type maps to two levels is not a level of its own: Normal, never a refusal");
+    const auto stock = must(fixture.select("Hard_Default"));
+    expect(stock.size() == 2 && stock[0].difficulty == "HARD" && stock[1].difficulty == "HARD",
+        "#8290 a stock name no selected type authors is the level it stands for in a room too");
 }
 } // namespace galactic_campaign_stock_test

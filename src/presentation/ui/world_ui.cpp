@@ -152,6 +152,11 @@ float bar_scale(const float camera_distance, const float health_bar_scale, const
     return std::max(min_health_bar_scale, health_bar_scale / camera_distance);
 }
 
+float bounded_bar_scale(const float scale, const float native_width, const float viewport_width) noexcept {
+    if (!(native_width > 0.0F) || !(viewport_width > 0.0F) || !std::isfinite(viewport_width)) return 0.0F;
+    return std::clamp(scale, 0.0F, viewport_width * 0.25F / native_width);
+}
+
 int bar_level(const float fraction) noexcept {
     const float clamped = std::isfinite(fraction) ? std::clamp(fraction, 0.0F, 1.0F) : 0.0F;
     return static_cast<int>(std::ceil(10.0F * clamped));

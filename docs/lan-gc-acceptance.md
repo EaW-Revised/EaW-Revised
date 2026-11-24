@@ -26,8 +26,9 @@ feed, using its published seat binding and snapshots. No conflict or force
 is injected. If the selected campaign or its ordinary orders do not produce
 the required battle or auto-resolve, the run fails coverage.
 
-Playable MP AI factions select their authored `Basic_AI` using the one globally
-agreed difficulty and that player's XML difficulty mappings (GCMP-AI-01..04 in
+Playable MP AI factions run the entry's `AI_Player_Control` type for them (else their
+authored `Basic_AI`) using the one globally agreed difficulty, turned into a level
+and looked up in that player's own XML difficulty mappings (GCMP-AI-01..04 in
 [campaign setup](behaviour/campaign-setup.md#multiplayer-ai-project-policy)). This
 is project policy, **not retail parity**: the private evidence receipt
 `out/mp4481/retail-rule.md` distinguishes retail's authored campaign-pair path

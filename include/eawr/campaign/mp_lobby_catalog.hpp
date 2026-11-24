@@ -64,8 +64,10 @@ using LobbyAiLevels = std::function<std::array<std::string, 3>(std::string_view 
 
 // The controller an AI seat on `faction` acquires (WGA-02 / WGS-08 under single-player rules, GCMP-AI-01/03 under
 // multiplayer rules). `type` is the AI player type, empty when the seat acquires none (Neutral, or an ambient faction the
-// campaign assigns nothing). `missing` names the input the start refuses without (an unknown faction, or a playable
-// multiplayer faction without Basic_AI, GCMP-AI-04), empty otherwise. The start's AI selection and the lobby's row
+// campaign assigns nothing). Under multiplayer rules a playable faction runs the entry's AI_Player_Control type for it (the
+// single-player galactic AI, #8289; never the starter row, which names the human side's type), else its own Basic_AI.
+// `missing` names the input the start refuses without (an unknown faction, or a playable multiplayer faction with neither
+// an AI_Player_Control row nor a Basic_AI, GCMP-AI-04), empty otherwise. The start's AI selection and the lobby's row
 // caption both read it, so they cannot disagree.
 struct AiControllerChoice {
     std::string_view type;

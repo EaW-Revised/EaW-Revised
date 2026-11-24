@@ -510,6 +510,36 @@ void synthetic() {
     expect(defaults && defaults.value().hyperspace_speed == Fixed{} && defaults.value().political_control == Fixed{}
         && defaults.value().squadron_capacity == 0 && defaults.value().hyperspace_capable == false
         && defaults.value().always_spawn_in_orbit == false, "WGS-92 shared omission defaults");
+    {
+        // WGA-507: a squadron type resolves to the slowest hyperspace speed among its member craft, whatever it authors itself.
+        const auto craft = [](const char* name, std::optional<Fixed> speed) {
+            eawr::units::GalacticType type; type.name = name; type.hyperspace_speed = speed; return type;
+        };
+        auto squadron_table = table;
+        squadron_table.types.push_back(craft("Fast_Craft", Fixed::from_decimal("0.75").value()));
+        squadron_table.types.push_back(craft("Slow_Craft", Fixed::from_decimal("0.5").value()));
+        squadron_table.types.push_back(craft("Unspeeded_Craft", std::nullopt));
+        const auto add_squadron = [&](const char* name, std::optional<Fixed> own, std::vector<std::string> members) {
+            auto squadron = craft(name, own); squadron.squadron_units = std::move(members); squadron_table.types.push_back(squadron);
+        };
+        add_squadron("Squadron_No_Speed", std::nullopt, {"Fast_Craft", "Slow_Craft"});
+        add_squadron("Squadron_Own_Speed", Fixed::from_decimal("2").value(), {"Fast_Craft", "Slow_Craft"});
+        add_squadron("Squadron_Gaps", std::nullopt, {"Missing_Craft", "Unspeeded_Craft", "Fast_Craft"});
+        add_squadron("Squadron_Nothing_Counted", Fixed::from_decimal("2").value(), {"Missing_Craft", "Unspeeded_Craft"});
+        const auto speed_of = [&](const char* name) {
+            const auto resolved = eawr::units::resolve_initial_galactic_type(squadron_table, name);
+            return resolved ? resolved.value().hyperspace_speed : std::nullopt;
+        };
+        expect(speed_of("Squadron_No_Speed") == Fixed::from_decimal("0.5").value()
+            && speed_of("Squadron_Own_Speed") == Fixed::from_decimal("0.5").value(),
+            "WGA-507 a squadron takes the slowest member speed, also over an authored one");
+        expect(speed_of("Squadron_Gaps") == Fixed::from_decimal("0.75").value(),
+            "WGA-507 members outside the table or without a speed are not counted");
+        expect(speed_of("Squadron_Nothing_Counted") == Fixed::from_decimal("2").value(),
+            "WGA-507 with no counted member the squadron keeps its own value");
+        expect(speed_of("Slow_Craft") == Fixed::from_decimal("0.5").value() && speed_of("Unspeeded_Craft") == Fixed{},
+            "WGA-507 a type without squadron members is unchanged");
+    }
     expect(defaults && !defaults.value().build_cost_credits && !defaults.value().build_time_seconds
         && !defaults.value().can_hyperspace_without_ability,
         "content-bearing originals retain omissions for consumer defaults");

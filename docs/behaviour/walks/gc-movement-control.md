@@ -949,7 +949,10 @@ agreed authored campaign difficulty becomes a level (easy, normal or hard) once,
 entry the campaign's own lobby list offers for a level, then the one level every mounted AI player type that authors that
 entry name maps it to, then the stock names of the three levels, and Normal when none knows it. Each AI slot then looks
 that level up in its OWN faction's AI player type (its `Basic_AI`) and records it in the existing conflict replay slot;
-child AI, restored preparation and presentation read that recorded level. An entry name never has to match across player
+child AI, restored preparation and presentation read that recorded level. The galactic AI of each AI-seated faction finds the
+same level from the same name with the same search (GCMP-AI-02 in the campaign setup rules) and runs the entry of ITS galactic
+player type, which is the campaign entry's `AI_Player_Control` type for a playable faction when it authors one (GCMP-AI-01); the
+tactical battle controller stays the faction's `Basic_AI`, as in a single-player campaign battle. An entry name never has to match across player
 types (a skirmish-style type maps its own names, a stock type `Normal_Default`). A player type with no entry for the
 level runs its Normal entry, and one with neither (or an unknown type) runs the engine default (every multiplier 1); the
 slot is never refused over its difficulty. Only entries the mounted difficulty data defines count (an entry naming an undefined

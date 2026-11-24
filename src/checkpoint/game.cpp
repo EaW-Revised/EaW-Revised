@@ -1358,6 +1358,9 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
         if (auto phase = prepare_checkpoint_runtime(options, prepared_runtime, path); !phase)
             return core::Result<GameRestore>::failure(phase.error());
     }
+    // A prepared runtime may carry only world-object scripts (an owner with native AI OFF); it is no native AI contributor.
+    if (ai_save.value().state && !options.configure_native_ai && !(prepared_runtime && prepared_runtime->configure_native_ai))
+        return fail<GameRestore>("native AI section needs a fresh state contributor", path);
     const auto& child_scripts = prepared_runtime && prepared_runtime->child_scripts ? prepared_runtime->child_scripts : options.scripts;
     auto created = windowed_oracle
         ? import_oracle_base(oracle_base, build, options, child_scripts, prepared_runtime, recording.base.at, path)

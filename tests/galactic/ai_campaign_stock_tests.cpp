@@ -855,7 +855,8 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
             auto off = must(Live::start(prepare(false), options));
             const auto refused = off->prepare_load("initial", false);
             expect(!refused && refused.error().message.find("native AI section needs a fresh state contributor") != std::string::npos,
-                "native AI checkpoint clearly requires opt-in when loading through an OFF owner");
+                std::string("native AI checkpoint clearly requires opt-in when loading through an OFF owner; got: ")
+                    + (refused ? std::string("a successful load") : refused.error().message));
             off->stop();
         }
         std::unique_ptr<eawr::platform::PreparedLiveRestore> midpoint_restore;

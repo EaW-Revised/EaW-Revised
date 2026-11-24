@@ -133,7 +133,18 @@ static std::string assembly_case(const eawr::sim::PartitionExecutor& executor, u
         staging_connectivity.execution_available = true; staging_connectivity.revision = 1;
         staging_connectivity.execution_routes = routes;
         must(owner.world->publish_execution_routes(true, 1, std::move(routes)));
-        owner.engine->set_galactic_stage_speed([scenario](auto, const auto&, auto) {
+        if (scenario >= 24) {
+            // Scenarios 24/25 read the stock staging-speed reader over an authored content row for type 100. In 24 that row is a
+            // squadron type (craft) whose speed is what the data load gives it, the slowest member craft (WGA-507, here 0.5,
+            // so 15 per second): every member of the force is a squadron. In 25, the control, it is an ordinary ship
+            // (hyperspace speed 1, 30 per second, as the stub below).
+            auto content = std::make_shared<ai::GalacticSelectionContent>();
+            content->faction_speed.emplace(1, ai::real(1));
+            ai::GalacticSelectionContentType row;
+            row.hyperspace_speed = scenario == 24 ? ai::real(1) / ai::real(2) : ai::real(1); row.craft = scenario == 24;
+            content->types.emplace(100, row);
+            owner.engine->set_galactic_stage_speed(ai::galactic_stage_speed_reader(std::move(content)));
+        } else owner.engine->set_galactic_stage_speed([scenario](auto, const auto&, auto) {
             return eawr::core::Result<ai::Real>::success(ai::real(scenario == 18 ? 0 : 30));
         });
     }
@@ -225,6 +236,8 @@ static std::string assembly_case(const eawr::sim::PartitionExecutor& executor, u
     must(owner.engine->service_galactic_system(1, ga::Service::execution, owner.scripts, owner.sequence));
     if (synchronized) {
         const auto& block = ai::EngineContractAccess::retained_block(*owner.engine, block_id);
+        if (scenario >= 24) expect(!block.finished || block.result,
+            "a synchronized force of squadron-type members (speed from their member craft, WGA-507) is not refused at staging");
         expect((scenario == 18 ? block.finished && !block.result : !block.finished)
             && ai::EngineContractAccess::force(*owner.engine).units.size() == (scenario == 20 || scenario == 22 ? 1U : 0U)
             && owner.engine->galactic_movement_requests().empty() && session.state_sha256() == before_assignment,

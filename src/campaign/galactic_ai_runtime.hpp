@@ -85,7 +85,7 @@ void bind_galactic_ai_actor_changes(script::foc::galactic_ai::NativeActions&,
     const data::galactic::GalacticData&, const CampaignSetupPlan&, const script::foc::ai::AiData&,
     std::string_view authored_difficulty);
 // Whether the selection above has any player to select: an active AI seat whose faction acquires a controller (a playable
-// faction's Basic_AI under multiplayer rules, or the campaign's AI_Player_Control pair; GCMP-AI-01/03). A seat whose
+// faction's AI_Player_Control type, else its Basic_AI, under multiplayer rules, or the campaign's AI_Player_Control pair; GCMP-AI-01/03). A seat whose
 // faction acquires none (Neutral, or an ambient faction the campaign assigns nothing) runs no native AI. A seat the
 // selection would refuse (missing campaign, faction or playable Basic_AI) counts, so that refusal is still reported.
 [[nodiscard]] bool galactic_ai_selects_any_player(const data::galactic::GalacticData&, const CampaignSetupPlan&);

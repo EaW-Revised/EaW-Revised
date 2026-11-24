@@ -69,6 +69,10 @@ private:
     tactical::PlayerId player_{};
     std::shared_ptr<State> state_;
 };
+// WGA-485: the synchronized-staging travel-speed reader of the stock content: the original type (company transport when authored),
+// the player's faction factor, the logical tick rate and the active movement mode. Absent content or movement refuses.
+using GalacticStageSpeedReader = std::function<core::Result<Real>(tactical::PlayerId, const sim::galactic::GalacticSnapshot&, tactical::TypeId)>;
+[[nodiscard]] GalacticStageSpeedReader galactic_stage_speed_reader(std::shared_ptr<const GalacticSelectionContent> content);
 // WGA-442: main ground/space totals precede the ordered classified rows.
 // Only classified force is scaled; zero/nonpositive domain totals clear its
 // classified rows. Missing cached or actual defensive facts refuse.

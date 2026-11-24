@@ -242,7 +242,6 @@ struct MapMode::State final {
     EawrOptionsScreen* game_menu{};
     int64_t game_menu_id{};
     bool game_menu_warm_done{};
-    bool game_menu_warm_failed{};
     godot::Node3D* menu_host{};
     std::function<void()> menu_handler;
     bool menu_open{};

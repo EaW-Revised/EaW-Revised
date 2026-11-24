@@ -432,7 +432,7 @@ struct FrontEndMode::State final {
     std::uint32_t frames_after_battle{};
 
     bool build();
-    bool prepare_options(bool finish);
+    bool prepare_options(bool finish, bool data_only = false);
     void build_campaign_screen();
     void refresh_single_player();
     std::filesystem::path save_directory() const;
@@ -1602,7 +1602,7 @@ bool FrontEndMode::close() {
     return state.report_ok;
 }
 
-bool FrontEndMode::State::prepare_options(const bool finish) {
+bool FrontEndMode::State::prepare_options(const bool finish, const bool data_only) {
     if (!live_options()) {
         options_prewarm_done = false;
         options_screen = memnew(EawrOptionsScreen);
@@ -1628,6 +1628,7 @@ bool FrontEndMode::State::prepare_options(const bool finish) {
         }
         if (!finish) return false;
     }
+    if (data_only) return true;
     if (!options_prewarm_done) {
         if (!options_screen->prewarm_theme(*host, finish)) return false;
         options_prewarm_done = true;
@@ -1656,6 +1657,8 @@ bool FrontEndMode::ready(Node3D& host, SkirmishSetupMode& setup) {
     MenuTimeline::mark("fe_built");
     state.build_campaign_screen();
     MenuTimeline::mark("fe_campaign_screen");
+    static_cast<void>(state.prepare_options(true, true));
+    if (state.live_options()) static_cast<void>(state.options_screen->prewarm_theme(host, false, true));
     setup.enable_back(state.caption("TEXT_BUTTON_BACK"));
     if (state.options.audio) {
         state.audio = std::make_unique<MenuAudio>(host, *state.resources.filesystem, *state.resources.catalog);
