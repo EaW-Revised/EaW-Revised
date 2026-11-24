@@ -195,6 +195,7 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
     std::sort(view->units.begin() + static_cast<std::ptrdiff_t>(physical_rows), view->units.end(),
         [](const ViewUnit& left, const ViewUnit& right) { return left.id < right.id; });
     view->script_objects = view->units.size() - physical_rows;
+    view->script_references = world.script_references();
     return view;
 }
 
@@ -232,6 +233,7 @@ inline std::shared_ptr<const WorldView> build_turn_view(const sim::PartitionExec
         });
     if (!prepared) throw std::runtime_error("object turn view preparation failed: " + prepared.error().message);
     view->script_objects = previous.script_objects;
+    view->script_references = previous.script_references;
     const auto first_script = previous.units.end() - static_cast<std::ptrdiff_t>(previous.script_objects);
     view->units.insert(view->units.end(), first_script, previous.units.end());
     return view;

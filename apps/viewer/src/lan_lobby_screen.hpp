@@ -158,6 +158,7 @@ public:
         bool connections_open{};
         bool options_open{}, credits_custom{}, credits_enabled{};
         std::optional<net::GalacticLobbyOptions> galactic_options; // the published options, separate from the modal draft
+        std::string difficulty_shown; // the words the room's difficulty shows as (the Difficulty line): the stack's own AI caption, else Easy/Normal/Hard
         std::string options_error;
         // #5512: the canvas layers of the lobby and of the Load Game list (-1: no list), the list's own state and the Load Game button.
         int lobby_layer{}, list_layer{-1};

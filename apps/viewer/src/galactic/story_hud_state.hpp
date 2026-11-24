@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/core/from_chars.hpp"
+
 #include "eawr/presentation/ui/movie_letterbox.hpp"
 #include "eawr/sim/galactic/story_goals.hpp"
 
@@ -51,7 +53,7 @@ public:
             && (request.reward_name == "LETTER_BOX_IN" || request.reward_name == "LETTER_BOX_OUT")) {
             const auto& text = request.parameters.front();
             double seconds{};
-            const auto parsed = std::from_chars(text.data(), text.data() + text.size(), seconds);
+            const auto parsed = eawr::core::from_chars(text.data(), text.data() + text.size(), seconds);
             if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || !std::isfinite(seconds) || seconds < 0.0) return false;
             letterbox_on_ = request.reward_name == "LETTER_BOX_IN";
             letterbox_seconds_ = seconds;

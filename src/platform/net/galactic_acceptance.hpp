@@ -24,8 +24,10 @@ class GalacticAcceptance {
         std::uint64_t begin{}, end{}, frames{};
     };
 public:
-    GalacticAcceptance(std::filesystem::path directory, std::string campaign, bool stock)
-        : directory_(std::move(directory)), campaign_(std::move(campaign)), stock_(stock) {
+    GalacticAcceptance(std::filesystem::path directory, std::string campaign, bool stock, std::string difficulty = {},
+        std::string difficulty_level = {})
+        : directory_(std::move(directory)), campaign_(std::move(campaign)), difficulty_(std::move(difficulty)),
+          difficulty_level_(std::move(difficulty_level)), stock_(stock) {
         std::filesystem::create_directories(directory_);
         hashes_.open(directory_ / "hashes.csv"); costs_.open(directory_ / "costs.csv");
         trace_.open(directory_ / "trace.csv");
@@ -182,6 +184,7 @@ public:
         std::ofstream output(directory_ / "gc.json");
         output << "{\"schema\":1,\"campaign\":" << std::quoted(campaign_) << ",\"lobby_mode\":\"galactic\","
                << "\"campaign_multiplayer\":true,\"stock_content\":" << (stock_ ? "true" : "false")
+               << ",\"difficulty\":" << std::quoted(difficulty_) << ",\"difficulty_level\":" << std::quoted(difficulty_level_)
                << ",\"local_seat\":" << seat_.value << ",\"native_ai_installed\":" << (native_ai_ ? "true" : "false")
                << ",\"ai_steps\":" << ai_steps_ << ",\"input_delay\":" << delay
                << ",\"barrier_tick\":" << last_tick_ << ",\"agreed_end\":" << (agreed ? "true" : "false")
@@ -217,7 +220,7 @@ public:
     std::uint64_t delay{};
 private:
     std::filesystem::path directory_;
-    std::string campaign_, last_hash_;
+    std::string campaign_, last_hash_, difficulty_, difficulty_level_;
     bool stock_{}, native_ai_{}, paused_{}, resumed_{}, baseline_speed_{}, speed_{}, waiting_{};
     sim::SeatId seat_{};
     std::ofstream hashes_, costs_, trace_;

@@ -155,6 +155,7 @@ struct SkirmishSetupMode::State final {
     std::uint64_t gc_acceptance_ticks{};
     std::size_t gc_acceptance_peers{2};  // human peers in the scripted room: the host and N-1 joiners (2 to 8)
     std::optional<std::uint64_t> gc_acceptance_seed;  // explicit override; otherwise the host draws one
+    std::optional<std::size_t> gc_acceptance_difficulty; // the host's AI difficulty level (0 easy, 1 normal, 2 hard); otherwise the room's default
     std::filesystem::path gc_acceptance_out;
     std::optional<std::chrono::steady_clock::time_point> gc_acceptance_setup_started;
     std::chrono::steady_clock::time_point gc_acceptance_next_log{};
@@ -543,6 +544,13 @@ bool SkirmishSetupMode::State::load() {
             }
             gc_acceptance_seed = seed;
         }
+        if (args[i] == "--eawr-gc-lan-difficulty" && i + 1 < args.size()) {
+            const auto value = utf8(args[++i]);
+            if (value == "easy") gc_acceptance_difficulty = 0U;
+            else if (value == "normal") gc_acceptance_difficulty = 1U;
+            else if (value == "hard") gc_acceptance_difficulty = 2U;
+            else { failure = "--eawr-gc-lan-difficulty expects easy, normal or hard"; return false; }
+        }
         if (args[i] == "--eawr-gc-lan-final-tick" && i + 1 < args.size()) {
             const auto value = utf8(args[++i]);
             const auto parsed = std::from_chars(value.data(), value.data() + value.size(), gc_acceptance_ticks);
@@ -599,7 +607,7 @@ bool SkirmishSetupMode::State::load() {
             benchmark = true;
         }
     }
-    if ((!gc_acceptance_campaign.empty() || gc_acceptance_ticks || !gc_acceptance_out.empty())
+    if ((!gc_acceptance_campaign.empty() || gc_acceptance_ticks || !gc_acceptance_out.empty() || gc_acceptance_difficulty)
         && (!lan_acceptance || gc_acceptance_campaign.empty() || !gc_acceptance_ticks || gc_acceptance_out.empty())) {
         failure = "GC acceptance needs --eawr-lan-acceptance, an output directory and final tick"; return false;
     }
@@ -1307,9 +1315,20 @@ void SkirmishSetupMode::State::process_lan() {
                 const std::uint64_t seed = gc_acceptance_seed.value_or(net::draw_galactic_session_seed());
                 UtilityFunctions::print("EAWR GC acceptance seed=", static_cast<int64_t>(seed));
                 gc_acceptance_seed = seed;
+                // #8071: the host's AI difficulty, one setting for every AI faction. The level names the campaign's own entry for it;
+                // a campaign whose AI types author none for the level cannot be asked for it.
+                std::string difficulty = "Normal_Default";
+                if (gc_acceptance_difficulty) {
+                    difficulty = sim::galactic::lobby_difficulty_entry(*selected_campaign, *gc_acceptance_difficulty);
+                    if (difficulty.empty()) { failure = "GC acceptance campaign offers no entry for the requested AI difficulty"; return; }
+                }
                 // D8: the room opens with the host row only (planned_humans 1); every joiner claims the next playable row, so the scripted
                 // peers end on one human side each (the acceptance check reads one side and one faction per human).
-                auto game = net::default_galactic_lobby_options(*selected_campaign, "Normal_Default", seed, lan_delay, 1);
+                auto game = net::default_galactic_lobby_options(*selected_campaign, difficulty, seed, lan_delay, 1);
+                if (game && gc_acceptance_difficulty && game.value().difficulty != difficulty) {
+                    failure = "GC acceptance room did not keep the requested AI difficulty"; return;
+                }
+
                 if (!game || !lan->set_galactic_game(game.value())) { failure = "GC acceptance room could not open"; return; }
             } else lan->join(lan_join_endpoint);
         }

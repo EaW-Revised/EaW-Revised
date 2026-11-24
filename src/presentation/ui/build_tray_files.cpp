@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/ui/build_tray_files.hpp"
 
 #include "eawr/core/text.hpp"
@@ -34,7 +35,7 @@ bool parse_number(const std::string_view text, double& value) noexcept {
     const auto trimmed = core::trim_view(text, core::xml_whitespace);
     if (trimmed.empty()) return false;
     double parsed{};
-    const auto result = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), parsed);
+    const auto result = eawr::core::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), parsed);
     if (result.ec != std::errc{} || result.ptr != trimmed.data() + trimmed.size() || !std::isfinite(parsed)) return false;
     value = parsed;
     return true;
@@ -44,7 +45,7 @@ bool parse_integer(const std::string_view text, std::int64_t& value) noexcept {
     const auto trimmed = core::trim_view(text, core::xml_whitespace);
     if (trimmed.empty()) return false;
     std::int64_t parsed{};
-    const auto result = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), parsed);
+    const auto result = eawr::core::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), parsed);
     if (result.ec != std::errc{} || result.ptr != trimmed.data() + trimmed.size()) return false;
     value = parsed;
     return true;

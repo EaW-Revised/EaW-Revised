@@ -53,12 +53,27 @@ eawr::campaign::MpLobbyCampaignLabels campaign_labels(std::optional<data::TextLo
 } // namespace
 
 // The room has ONE AI difficulty (the options dialog's choice, the value every AI seat is played and agreed at), so an AI
-// seat names that level: Easy/Normal/Hard entries use the stock AI captions; a mod's own difficulty shows its authored name.
+// seat names that level through the AI caption keys of the text stack (a mod that words them, "AI on Spice", shows its own
+// words); a name with no known level never shows raw (net::galactic_ai_display_level).
 std::string ai_seat_caption(std::string_view difficulty) {
-    using Caption = net::GalacticAiCaption;
-    const auto level = net::galactic_ai_caption(difficulty);
-    if (!level) return std::string(difficulty);
-    return *level == Caption::easy ? "TEXT_EASY_AI_PLAYER" : *level == Caption::hard ? "TEXT_HARD_AI_PLAYER" : "TEXT_MEDIUM_AI_PLAYER";
+    return std::string(net::galactic_ai_caption_key(net::galactic_ai_display_level(difficulty)));
+}
+
+// What an AI caption key shows: the stack's own text for it, and on a stack that words none (no text database, or one without the AI
+// caption keys) the plain level name. Never the key itself and never a raw difficulty entry name.
+String ai_caption_text(std::optional<data::TextLookup>& lookup, const std::string& key) {
+    if (lookup && lookup->contains(key)) return text(data::to_utf8(lookup->text(key)));
+    return text(std::string(net::galactic_ai_caption_words(key)));
+}
+
+// The same caption by the level the campaign's own entry stands for: a mod's authored name (Normal_Minor, a story set) still reads as
+// the level it is the entry of; a name the campaign carries no entry for keeps the name-based caption above.
+std::string ai_seat_caption(const sim::galactic::MpLobbyCampaign* campaign, std::string_view difficulty) {
+    if (campaign != nullptr)
+        if (const auto level = sim::galactic::lobby_difficulty_level(*campaign, difficulty))
+            return std::string(net::galactic_ai_caption_key(*level == 0 ? net::GalacticAiCaption::easy : *level == 2 ? net::GalacticAiCaption::hard
+                                                                                                          : net::GalacticAiCaption::normal));
+    return ai_seat_caption(difficulty);
 }
 
 std::string EawrLanLobby::campaign_display_name(const std::string& campaign) {
@@ -474,7 +489,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
         if (const auto side = net::galactic_lobby_side(*options, source.player)) row.team = *side - 1U;
         row.kind = unseated(index) ? model::RowKind::none : source.human ? model::RowKind::open : model::RowKind::ai;
         row.accepted = row.kind == model::RowKind::ai;
-        if (row.kind == model::RowKind::ai) row.name = ai_seat_caption(options->difficulty);
+        if (row.kind == model::RowKind::ai) row.name = ai_seat_caption(campaign, options->difficulty);
         bool first = true;
         for (const auto& seat : room->snapshot.seats) {
             if (seat.selection.slot != source.player) continue;
@@ -582,7 +597,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
                 const bool open_row = row.kind == model::RowKind::open;
                 // A planned row nobody takes at Start becomes an AI faction, so an open row says so.
                 const std::string open_label = utf8(resolved(resources.text, "TEXT_OPEN_PLAYER")) + " - AI if empty";
-                name->add_item(open_row ? text(open_label) : resolved(resources.text, row_label(row)), 0);
+                name->add_item(open_row ? text(open_label) : row.kind == model::RowKind::ai ? ai_caption_text(resources.text, row_label(row)) : resolved(resources.text, row_label(row)), 0);
                 name->select(0);
                 name->set_tooltip_text(text(row.kind == model::RowKind::ai ? std::string() : row.name));
                 name->set_disabled(true);
@@ -591,7 +606,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
                     && campaign->factions[index].playable) {
                     name->clear();
                     name->add_item(text(open_label), galactic_row_open_id);
-                    name->add_item(resolved(resources.text, ai_seat_caption(options->difficulty)), galactic_row_ai_id);
+                    name->add_item(ai_caption_text(resources.text, ai_seat_caption(campaign, options->difficulty)), galactic_row_ai_id);
                     name->select(open_row ? 0 : 1);
                     name->set_disabled(false);
                 }
@@ -787,7 +802,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             lines.push_back(String("Campaign: ") + (campaign != nullptr
                 ? text(eawr::campaign::lobby_campaign_row_title(*campaign, campaign_labels(resources.text, *campaign, impl.campaign_text_logged).title))
                 : text(options->campaign)));
-            lines.push_back(text("Difficulty: " + options->difficulty));
+            lines.push_back(String("Difficulty: ") + ai_caption_text(resources.text, ai_seat_caption(campaign, options->difficulty)));
             if (options->custom) {
                 lines.push_back(resolved(resources.text, "TEXT_SKIRMISH_CREDITS") + ": " + text(std::to_string(options->credits)));
                 lines.push_back(resolved(resources.text, "TEXT_SKIRMISH_STARTING_TECH_LEVEL") + ": " + text(std::to_string(options->starting_tech)));

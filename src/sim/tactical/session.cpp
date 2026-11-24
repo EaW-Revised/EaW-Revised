@@ -402,6 +402,16 @@ std::optional<UnitState> TacticalSession::unit_state(const EntityId unit) const 
         identity.barrage_source, identity.garrison_enabled};
 }
 
+std::vector<std::pair<std::uint64_t, EntityId>> TacticalSession::script_references() const {
+    std::vector<std::pair<std::uint64_t, EntityId>> result;
+    const auto& registry = std::as_const(impl_->registry);
+    for (const auto& [id, handle] : impl_->handles) {
+        const auto* view = registry.try_get<ScriptView>(handle);
+        if (view != nullptr && view->value.identity != 0) result.emplace_back(view->value.identity, id);
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+}
 std::span<const Squadron> TacticalSession::squadrons() const noexcept { return impl_->squadrons; }
 const FogCells* TacticalSession::fog_cells() const noexcept { return impl_->fog ? &*impl_->fog : nullptr; }
 std::span<const Projectile> TacticalSession::projectiles() const noexcept { return impl_->projectiles; }

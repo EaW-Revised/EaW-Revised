@@ -271,6 +271,17 @@ and a solo staging branch read `Basic_AI`; those are separate retail paths.
 The current lobby agrees one global difficulty, not a per-seat difficulty.
 Per-seat difficulty would require a separate agreed-input extension.
 
+The host sets that one difficulty in the room's campaign options, a choice among the campaign's own Easy, Normal and Hard
+entries (the entries its AI player types author, so a level none of them authors is not offered). Every peer reads it from
+the room, where each AI row and the settings line name the level the entry stands for, not the mod's entry name. It is part
+of the agreed roster and of every AI faction's controller claim, so a peer whose claim was made at another difficulty is
+refused at start, naming the AI configuration. A multiplayer save records it, and a resumed room starts at the saved
+difficulty. The level, not the entry name, is what each AI faction's own player type is asked for (see the multiplayer
+tactical AI level rule in the movement-control walk). The words shown for the level are the text stack's own AI player names
+for it (the stock Easy, Medium and Hard AI texts, or a mod's rewording such as "AI on Spice"; the difficulty adjustment
+records author no text of their own); a stack that words none shows Easy, Normal or Hard, and an entry the campaign does not
+list reads the level its first word names, else Normal. The lobby never shows a text key or a raw entry name.
+
 ## Fidelity list
 
 - **Verified (WGS-181, WGS-186..188):** mixed-list political control, ground

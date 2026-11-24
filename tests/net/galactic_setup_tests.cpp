@@ -507,6 +507,39 @@ void forged_controller_claim() {
     expect(group.holders[1]->builds == 0, "the peer never builds from a forged controller claim");
 }
 
+// #8071: the agreed AI difficulty is part of every AI faction's controller claim, so a peer is refused a claim that was not made at
+// the difficulty the offer's roster states: the players never start at different levels.
+void difficulty_is_agreed_and_a_mismatch_is_refused() {
+    auto cohort = peers_of(2);
+    // The production claim (no test override): faction, player, the agreed difficulty and the local content digests.
+    for (auto& peer : cohort) peer->content.ai_configuration = {};
+    auto hard_roster = two_sides();
+    hard_roster.difficulty = "Hard_Default";
+    const auto normal = make_offer(*cohort[0], two_sides());
+    auto proposal = make_offer(*cohort[0], hard_roster);
+    const auto normal_claim = require(net::decode_galactic_setup(normal.setup)).roster.players[2].ai_configuration;
+    auto payload = require(net::decode_galactic_setup(proposal.setup));
+    expect(payload.roster.difficulty == "Hard_Default", "the agreed roster carries the host's difficulty");
+    expect(!normal_claim.empty() && payload.roster.players[2].ai_configuration != normal_claim,
+        "the AI faction's controller claim differs between difficulties");
+    expect(normal.identity.content != proposal.identity.content, "the agreed content identity differs between difficulties");
+    {   // Both peers derive the claim from the roster's own difficulty and agree.
+        auto honest = peers_of(2);
+        for (auto& peer : honest) peer->content.ai_configuration = {};
+        const auto offer = make_offer(*honest[0], hard_roster);
+        Group agreed(honest, offer);
+        check_ready_group(agreed, offer, "Hard difficulty");
+    }
+    // A claim made at Normal under an offer that says Hard is refused by name, and the peer never builds.
+    payload.roster.players[2].ai_configuration = normal_claim;
+    proposal.setup = require(net::encode_galactic_setup(payload));
+    Group group(cohort, proposal, {}, [](sim::MatchAgreement& reported, const net::SetupOffer& selected) { reported = selected.identity; });
+    group.refused();
+    expect(group.sessions[1].refusal().has_value() && group.sessions[1].refusal()->reason == net::SetupReason::identity
+        && group.sessions[1].refusal()->domain == "gc-ai-controllers", "a controller claim at another difficulty is refused");
+    expect(group.holders[1]->builds == 0, "the peer never builds from a claim at another difficulty");
+}
+
 void payload_codec() {
     auto cohort = peers_of(1);
     const auto proposal = make_offer(*cohort[0], two_sides());
@@ -1766,7 +1799,7 @@ int main(int argc, char** argv) {
         checkpoint_transfer_contracts(); checkpoint_transfer_pacing(); checkpoint_transfer_trace(); checkpoint_transfer_send_on_ack(); checkpoint_transfer_over_tcp(); checkpoint_transfer_async_restore(); checkpoint_transfer_long_restore(); recovery_transfer_contracts();
         skirmish_layout_pinned(); payload_codec(); local_load_notes(); roster_refusals(); offer_refusals();
         agreement_rules_flavour(); agreement_two_peers(); agreement_eight_seats(); data_driven_factions();
-        content_refusals(); incompatible_content(); seed_refusal(); forged_host_digest(); forged_controller_claim(); readiness();
+        content_refusals(); incompatible_content(); seed_refusal(); forged_host_digest(); forged_controller_claim(); difficulty_is_agreed_and_a_mismatch_is_refused(); readiness();
         std::cout << "galactic setup contracts passed: payload, roster rules, two peers, eight seats, refusals, forged digests\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

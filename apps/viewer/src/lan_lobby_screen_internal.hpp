@@ -79,6 +79,10 @@ namespace data = eawr::data::ui;
 // The text key a Galactic Conquest difficulty entry shows as in the lobby (lan_lobby_screen_galactic.cpp): the stock AI caption
 // of the level it stands for, or the entry's own authored name.
 [[nodiscard]] std::string ai_seat_caption(std::string_view difficulty);
+// What an AI caption key shows: the stack's own text for it (a mod's "AI on Spice"), else Easy / Normal / Hard.
+[[nodiscard]] godot::String ai_caption_text(std::optional<data::TextLookup>& lookup, const std::string& key);
+// The same, by the level the campaign's own entry stands for (campaign may be null).
+[[nodiscard]] std::string ai_seat_caption(const sim::galactic::MpLobbyCampaign* campaign, std::string_view difficulty);
 static_assert(model::lan_command_seat_limit == sim::max_match_seats);
 
 namespace lan_lobby_detail {

@@ -90,6 +90,7 @@ int main(int argc, char* argv[]) {
     test_script_despawn_cleanup();
     test_script_hold_fire();
     test_script_layering();
+    test_script_creation_reference();
     test_script_change_owner();
     test_script_change_owner_edges();
     test_script_hold_fire_beam();

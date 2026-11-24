@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/core/from_chars.hpp"
+
 #include "eawr/data/xml.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/sim/tactical/types.hpp"
@@ -27,7 +29,7 @@ inline std::optional<T> number(std::string_view text) {
     while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.remove_suffix(1);
     if (text.starts_with('+')) text.remove_prefix(1);
     T value{};
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    const auto parsed = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
     if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || !std::isfinite(value)) return {};
     return value;
 }
@@ -35,7 +37,7 @@ inline std::optional<T> number(std::string_view text) {
 // BP-01: integer-valued XML spellings such as 01 and 1.0 select the same renderer.
 inline int custom_render(const std::string_view text) {
     double value{};
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    const auto parsed = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
     if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || !std::isfinite(value)) return 0;
     return value == 1.0 ? 1 : value == 2.0 ? 2 : 0;
 }

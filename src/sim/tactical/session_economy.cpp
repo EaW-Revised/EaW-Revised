@@ -1467,6 +1467,42 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
             // A staged wrapper has already been returned: execution failure aborts the whole tick.
             const auto* profile = economy.upgrade(created->type);
             auto* owner = ledger_of(stage.ledgers, created->owner);
+            if (profile == nullptr) {
+                // A data-defined unit, squadron or company: the same birth a reinforcement makes (nearest free spot), with
+                // no purchase, queue or population transaction. Each object it makes carries the script reference
+                // base + k (members in creation order, then the team containers), so same-tick and later script commands
+                // reach it. A reference the world already holds, or more objects than a reference block, aborts the tick
+                // as a staged wrapper has already been returned.
+                const bool spawnable = motion.squadrons.find_squadron(created->type) != nullptr
+                    || motion.squadrons.find_craft(created->type) != nullptr || economy.footprint_of(created->type) != nullptr;
+                if (ledger == nullptr || !player || setup.domain != BattleDomain::space || owner == nullptr || !spawnable
+                    || economy.disabled_types.contains(created->type))
+                    return Void::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+                        "script object factory cannot create the requested type for this player"));
+                for (const auto& [id, unit] : staged)
+                    if (unit.script_view && unit.script_view->identity >= created->identity
+                        && unit.script_view->identity < created->identity + script_reference_member_limit)
+                        return Void::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+                            "script object factory creation reference is already retained"));
+                CompanySpawn request;
+                request.prototype = UnitState{0, created->type, created->owner};
+                request.prototype.position = created->position;
+                request.prototype.rotation = math::identity_quat();
+                request.placement = CompanyPlacement::reinforcement;
+                auto birth = spawn_company(request, staged, stage, tick);
+                if (!birth) return Void::failure(birth.error());
+                const auto& made = birth.value();
+                if (made.members.size() + made.teams.size() > script_reference_member_limit)
+                    return Void::failure(detail::diagnostic(diagnostic_codes::resource_limit,
+                        "script object factory creation exceeds its reference block"));
+                std::uint64_t reference = created->identity;
+                for (const auto& group : {&made.members, &made.teams}) for (const auto id : *group) {
+                    auto& view = staged.at(id).script_view.emplace();
+                    view.identity = reference++;
+                }
+                event.unit = made.root;
+                return finish(RejectReason::none);
+            }
             if (ledger == nullptr || !player || setup.domain != BattleDomain::space || owner == nullptr
                 || profile == nullptr || profile->level_up || !profile->bounties.empty()
                 || economy.disabled_types.contains(created->type))

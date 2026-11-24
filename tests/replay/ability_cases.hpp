@@ -26,6 +26,7 @@ void test_script_despawn();
 void test_script_despawn_cleanup();
 void test_script_hold_fire();
 void test_script_layering();
+void test_script_creation_reference();
 void test_script_change_owner();
 void test_script_change_owner_edges();
 void test_script_hold_fire_beam();

@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/audio/sfx.hpp"
 
 #include <algorithm>
@@ -35,7 +36,7 @@ namespace {
     text = trim(text);
     // Leading number only, as the integer fields (std::from_chars stops at the first non-digit).
     double value{};
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    const auto [end, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
     if (error != std::errc{} || end == text.data()) return std::nullopt;
     return value;
 }
@@ -125,7 +126,7 @@ std::string upper(const std::string_view text) {
 std::optional<int> leading_integer(std::string_view text) {
     text = trim(text);
     int value{};
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    const auto [end, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
     if (error != std::errc{} || end == text.data()) return std::nullopt;
     return value;
 }
@@ -452,7 +453,7 @@ std::optional<Space3D> space_3d(const std::span<const Field> fields, std::vector
         for (const auto& [name, text] : fields) if (upper(name) == upper(tag)) {
             const auto raw = trim(text);
             double parsed{};
-            const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), parsed);
+            const auto [end, error] = eawr::core::from_chars(raw.data(), raw.data() + raw.size(), parsed);
             value = error == std::errc{} && end == raw.data() + raw.size() && !raw.empty()
                 ? std::optional<double>(parsed) : std::nullopt;
         }
@@ -503,7 +504,7 @@ ProjectAudioRules project_audio_rules(const std::span<const Field> fields, std::
         } else if (upper(name) == "DISTANCE_GAIN_FLOOR_DB") {
             const auto raw = trim(text);
             double decibels{};
-            const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), decibels);
+            const auto [end, error] = eawr::core::from_chars(raw.data(), raw.data() + raw.size(), decibels);
             if (error != std::errc{} || end != raw.data() + raw.size() || !std::isfinite(decibels) || decibels > 0.0) {
                 problems.push_back("EAWR-AUDIO-0303: Distance_Gain_Floor_Db: not a number of at most 0 dB; no floor");
                 rules.distance_gain_floor = 0.0;

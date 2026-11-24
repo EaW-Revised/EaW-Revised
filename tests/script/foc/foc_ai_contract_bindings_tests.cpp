@@ -1711,6 +1711,8 @@ void script_creation_contracts() {
         auto previous = upgrade; previous.type = 51; previous.increments_tech = false; previous.removes_previous = 0;
         economy.upgrades.push_back(previous);
         auto level = previous; level.type = 52; level.level_up = true; economy.upgrades.push_back(level);
+        auto paying = previous; paying.type = 54; paying.bounties.push_back(t::UpgradeProfile::Bounty{Q::from_raw(Q::scale / 4), 0, {1}, false});
+        economy.upgrades.push_back(paying);
         t::DurabilityTable durability;
         t::DurabilityProfile health; health.type_id = 1; health.max_hull = q(100);
         durability.profiles.push_back(health);
@@ -1733,6 +1735,9 @@ void script_creation_contracts() {
         host->setup.content.types.push_back(type);
         type.type_id = 51; type.name = "PREVIOUS"; host->setup.content.types.push_back(type);
         type.type_id = 52; type.name = "LEVEL"; host->setup.content.types.push_back(type);
+        type.type_id = 54; type.name = "BOUNTY"; host->setup.content.types.push_back(type);
+        // An ordinary object with neither an upgrade profile nor a spawn footprint stays refused.
+        type.type_id = 53; type.name = "PLAIN"; type.upgrade_object = false; host->setup.content.types.push_back(type);
         host->types.clear(); host->types_by_name.clear();
         for (const auto& row : host->setup.content.types) {
             host->types.emplace(row.type_id, &row); host->types_by_name.emplace(row.name, &row);
@@ -1750,12 +1755,16 @@ function Create()
     created = Create_Generic_Object(ty, prior, p)
     immediate = created.Is_Valid() and created.Get_Type() == ty
         and created.Get_Owner() == p and Axis(created, 3) == 9
+    lookup_pending = Find_First_Object('RESEARCH') == created
+        and Find_First_Object('PREVIOUS') == prior
     invalid = not pcall(function() Create_Generic_Object(ty, {0, 0, 0}, p, 1) end)
         and not pcall(function() Create_Generic_Object('missing', {0, 0, 0}, p) end)
         and not pcall(function() Create_Generic_Object(ty, false, p) end)
         and not pcall(function() Create_Generic_Object(ty, {0, 0, 0}, nil) end)
         and not pcall(function() Create_Generic_Object('SHIP', {0, 0, 0}, p) end)
         and not pcall(function() Create_Generic_Object('LEVEL', {0, 0, 0}, p) end)
+        and not pcall(function() Create_Generic_Object('BOUNTY', {0, 0, 0}, p) end)
+        and not pcall(function() Create_Generic_Object('PLAIN', {0, 0, 0}, p) end)
     local orphan = Find_Player('NOACCOUNT')
     noaccount = orphan ~= nil and not pcall(function() Create_Generic_Object(ty, {0, 0, 0}, orphan) end)
 end
@@ -1813,7 +1822,7 @@ end
         expect(report && report.value().diagnostics.empty() && report.value().commands.size() == 4,
             "SSU-03: parallel creation returns wrappers and rejects malformed or unsupported factories");
         if (!report) return;
-        for (const auto instance : {1ULL, 2ULL}) for (const auto* name : {"immediate", "invalid", "noaccount"}) {
+        for (const auto instance : {1ULL, 2ULL}) for (const auto* name : {"immediate", "lookup_pending", "invalid", "noaccount"}) {
             const auto value = scripts.value().read_global(instance, name);
             expect(value && value.value() && std::get<bool>(value.value()->data), "SSU-03: same-call facts and invalid-argument controls; an owner without an economy account is a Lua error, not a tick abort");
         }

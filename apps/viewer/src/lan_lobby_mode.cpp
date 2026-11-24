@@ -124,7 +124,8 @@ constexpr double default_wait_seconds = 60.0;
            << static_cast<long long>(shot.list_cancel_centre.y) << "], \"window\": [" << static_cast<long long>(shot.window.x)
            << ", " << static_cast<long long>(shot.window.y) << "]"
            << ", \"list_box_scale\": " << shot.list_box_scale << ", \"list_scale\": " << shot.list_scale
-           << ", \"list_note\": " << json(shot.list_note) << ", \"pointer\": " << shot.pointer << ", \"galactic_options\": ";
+           << ", \"list_note\": " << json(shot.list_note) << ", \"pointer\": " << shot.pointer << ", \"difficulty_shown\": " << json(shot.difficulty_shown)
+           << ", \"galactic_options\": ";
     if (shot.galactic_options) {
         const auto& gc = *shot.galactic_options;
         output << "{\"custom\": " << (gc.custom ? "true" : "false")

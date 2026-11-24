@@ -64,6 +64,7 @@ core::Result<TacticalSession::Impl::CompanyBirth> TacticalSession::Impl::spawn_c
             auto added = add(deployed, raised, request.prototype.rotation, population_share(population, 1), true);
             if (!added) return Void::failure(added.error());
             birth.root = added.value();
+            birth.members.push_back(added.value());
             if (solo != nullptr && (squadron != nullptr || request.placement == CompanyPlacement::exact)) {
                 auto flight = launch_state(direction.value(), math::Fixed{});
                 if (!flight) return Void::failure(flight.error());
@@ -130,6 +131,7 @@ core::Result<TacticalSession::Impl::CompanyBirth> TacticalSession::Impl::spawn_c
             // minds but no extra company body. The first successful member chooses it.
             if (!request.create_teams) {
                 if (!members.empty()) birth.root = members.front();
+                birth.members = members;
                 for (const auto id : members) {
                     if (motion.squadrons.find_craft(units.at(id).state.type_id) == nullptr) continue;
                     SquadronState order;
@@ -144,8 +146,9 @@ core::Result<TacticalSession::Impl::CompanyBirth> TacticalSession::Impl::spawn_c
                 return Void::success();
             }
             // FL-06: one authored purchase may produce several teams, all after its craft.
+            birth.members = members;
             for (std::size_t begin = 0; begin < members.size();) {
-                const auto count = std::min<std::size_t>(members.size() - begin, maximum);
+                const auto count = squadron_team_size(members.size() - begin, maximum);
                 auto container = add(deployed, math::Vec3{point.x, point.y, layer_z},
                     request.placement == CompanyPlacement::reinforcement ? math::identity_quat() : request.prototype.rotation,
                     0, true);
@@ -160,6 +163,7 @@ core::Result<TacticalSession::Impl::CompanyBirth> TacticalSession::Impl::spawn_c
                 stage.minds.emplace(container.value(), std::move(order));
                 stage.squadrons.push_back(Squadron{container.value(),
                     std::vector<EntityId>(members.begin() + begin, members.begin() + begin + count)});
+                birth.teams.push_back(container.value());
                 if (begin == 0) birth.root = container.value();
                 begin += count;
             }

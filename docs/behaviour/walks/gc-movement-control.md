@@ -935,9 +935,10 @@ prove production installation or the complete capture chain.
 ### GCMP-06 multiplayer session policy
 
 The live campaign installer injects the vote timeout's 30 Hz duration into the campaign session. The host's
-agreed lobby value wins (5 to 120 s, default 15) (legacy EAWR-6156): every peer carries it in the agreed roster. The
-`Battle_Pending_Timeout_Seconds` constant from mounted data only sets the default a new room offers (clamped to that range) and
-still applies to setups that did not come from a lobby. A resumed save keeps the value it recorded, even outside 5 to 120. Every space conflict with at least one
+agreed lobby value wins (5 to 120 s, default 30) (legacy EAWR-6156): every peer carries it in the agreed roster. The default of
+30 s is a deliberate project deviation (owner decision, 2026-11-23): a new room opens at 30 s whatever the mounted
+`Battle_Pending_Timeout_Seconds` authors (retail 15), and the host may set 5 to 120. The constant still applies to setups that did
+not come from a lobby. A resumed save keeps the value it recorded, even outside 5 to 120. Every space conflict with at least one
 active human side opens session vote 8 for the humans of that side or sides (owner update 10-21;
 a human against an AI side votes alone, the AI side never votes). Owner D10 overrides the retail
 WGM-44/WAR-01 arbitration: Begin against an AI side launches a child tactical battle on every

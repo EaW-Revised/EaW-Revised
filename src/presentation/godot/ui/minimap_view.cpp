@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "minimap_view.hpp"
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/text.hpp"
@@ -62,7 +63,7 @@ void EawrMinimap::prepare_orders(const vfs::Vfs& filesystem) {
     const auto number = [&text](const data::XmlNode& node) {
         const auto value = text(node);
         double parsed{};
-        const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+        const auto result = eawr::core::from_chars(value.data(), value.data() + value.size(), parsed);
         return result.ec == std::errc{} && std::isfinite(parsed) ? parsed : 0.0;
     };
     constexpr std::array<std::string_view, 3> tags{"GUI_Movement_Click_Radar_Event_Name",

@@ -86,6 +86,12 @@ public:
     [[nodiscard]] bool staging_roster_ready(std::uint32_t active) const;
     [[nodiscard]] core::Result<bool> lock_staging_roster(std::uint32_t active);
     [[nodiscard]] bool staging_mesh_ready() const;
+    // Native slots in the frozen roster, bit per slot. 0 for a staging mesh before its freeze (and for a guest before the
+    // roster arrives); a fixed mesh is full once published; the two-seat edge is 3. Slots outside it are vacant, never repaired.
+    [[nodiscard]] std::uint32_t roster_mask() const;
+    // Staging host: while held (a Start is in progress, before the roster freezes), a new attachment is refused with the retryable
+    // EAWR-NET-1307 instead of taking a slot, so the freeze cannot be raced by a stray join. Release on cancel. No-op elsewhere.
+    void hold_staging_joins(bool hold);
     [[nodiscard]] core::Result<void> reopen_staging_listener(); // Two-seat unauthenticated LAN host only; same port.
     void close(); // ordered clean-close frame, flushed by poll; destructor aborts immediately
     // Like poll/link, query only on the current I/O owner's thread. Ownership may

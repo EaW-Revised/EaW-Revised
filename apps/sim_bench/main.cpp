@@ -4,6 +4,13 @@
 // changes a state hash.
 
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/platform/live_session.hpp"
+#if __has_include("eawr/core/perf_diag/sim_feed.hpp")
+#include "eawr/core/perf_diag/sim_feed.hpp"
+#define EAWR_BENCH_HAS_FEED 1
+#else
+#define EAWR_BENCH_HAS_FEED 0
+#endif
 #include "eawr/sim/replay.hpp"
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/replay.hpp"
@@ -38,6 +45,7 @@ using namespace sim_bench;
 void print_help(std::ostream& output) {
     output << "Usage: sim_bench [--units <n>] [--ticks <n>] [--warmup <n>] [--repeat <n>] [--seed <n>]\n"
               "                 [--workers <n|hardware>[,<n|hardware>...]] [--dispatch-cost 1] [--fog on|off] [--hash on|off]\n"
+              "                 [--live-feed off|coarse|fine] (one worker count and repeat 1)\n"
               "\n"
               "Generates a synthetic space battle of <n> units (default 1200) from the seed, steps it\n"
               "<warmup> + <ticks> ticks (default 30 + 300) with each worker count (default 1, 2, 4, 8 and\n"
@@ -112,6 +120,9 @@ template <typename T>
             const auto seed = parse_number<std::uint64_t>(value);
             valid = seed.has_value();
             options.seed = seed.value_or(0);
+        } else if (argument == "--live-feed") {
+            valid = value == "off" || value == "coarse" || value == "fine";
+            options.live_feed = value;
         } else if (argument == "--dispatch-cost") {
             valid = value == "0" || value == "1";
             options.dispatch_cost = value == "1";
@@ -131,6 +142,57 @@ template <typename T>
         }
     }
     return options;
+}
+
+// Benchmark-only live driver; the same source can be applied to the main parent for the off arm.
+int live_bench(const Battle& battle, const Options& options) {
+#if !EAWR_BENCH_HAS_FEED
+    if (options.live_feed != "off") { std::cerr << "feed unavailable on this revision\n"; return 2; }
+#endif
+    using Live = eawr::platform::LiveSession;
+    const auto total = options.warmup + options.ticks;
+    if (total >= 4096 || options.workers.size() != 1 || options.repeat != 1) {
+        std::cerr << "live benchmark needs one worker count, repeat 1, and at most 4096 ticks\n"; return 2;
+    }
+    std::vector<std::vector<tactical::PlayerCommand>> commands(static_cast<std::size_t>(total + 2));
+    std::vector<Clock::time_point> starts(static_cast<std::size_t>(total + 2));
+    for (const auto& command : battle.replay.commands) {
+        if (command.key.tick <= total) commands[static_cast<std::size_t>(command.key.tick)].push_back(command);
+    }
+    Live::Options settings;
+    settings.workers = options.workers.front();
+    settings.pacing = Live::Pacing::driven;
+    settings.command_source = [&](const std::uint64_t tick) {
+        if (tick < starts.size()) starts[static_cast<std::size_t>(tick)] = Clock::now();
+        return tick < commands.size() ? std::move(commands[static_cast<std::size_t>(tick)]) : std::vector<tactical::PlayerCommand>{};
+    };
+    auto result = Live::start(battle.replay.setup, battle.sensors, battle.durability, tactical::MotionTable{}, battle.combat, settings);
+    if (!result) { std::cerr << eawr::core::format_diagnostic(result.error()) << '\n'; return 1; }
+    auto live = std::move(result).value();
+#if EAWR_BENCH_HAS_FEED
+    if (options.live_feed != "off") live->perf_feed().set_enabled(true);
+    if (options.live_feed == "fine") live->perf_feed().set_fine(true);
+#endif
+    live->advance_to(options.warmup);
+    if (options.warmup && !live->wait_for(options.warmup, std::chrono::minutes(30))) { std::cerr << "warmup timed out\n"; return 1; }
+    live->advance_to(total + 1);
+    if (!live->wait_for(total + 1, std::chrono::minutes(30))) { std::cerr << "live benchmark timed out\n"; return 1; }
+    live->stop();
+    std::vector<double> values;
+    for (std::uint64_t tick = options.warmup; tick < total; ++tick) {
+        const auto before = starts[static_cast<std::size_t>(tick)];
+        const auto after = starts[static_cast<std::size_t>(tick + 1)];
+        if (before == Clock::time_point{} || after <= before) { std::cerr << "missing tick timestamp\n"; return 1; }
+        values.push_back(std::chrono::duration<double, std::milli>(after - before).count());
+    }
+    const auto wall = std::chrono::duration<double, std::milli>(starts[static_cast<std::size_t>(total)]
+        - starts[static_cast<std::size_t>(options.warmup)]).count();
+    std::sort(values.begin(), values.end());
+    const auto pct = [&](std::size_t n) { return values[(values.size() * n + 99) / 100 - 1]; };
+    std::cout << "LIVE-BENCH feed=" << options.live_feed << " units=" << options.units << " ticks=" << values.size()
+              << " workers=" << settings.workers << " p50_ms=" << pct(50) << " p95_ms=" << pct(95)
+              << " p99_ms=" << pct(99) << " wall_ms=" << wall << '\n';
+    return 0;
 }
 
 // Forwards to the pool and adds up the time of each named phase.
@@ -316,6 +378,7 @@ int main(const int argc, const char* const argv[]) {
     }
     if (options->dispatch_cost) return dispatch_cost(*options);
     const auto battle = generate(*options);
+    if (!options->live_feed.empty()) return live_bench(battle, *options);
     std::cout << "sim_bench: synthetic space battle, " << options->units << " units, " << player_count
               << " players in 2 teams, " << options->ticks << " timed ticks after " << options->warmup
               << " warm-up, seed " << options->seed << ", median of " << options->repeat << " run(s)\n"

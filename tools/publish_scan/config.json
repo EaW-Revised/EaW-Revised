@@ -1354,7 +1354,7 @@
       "tests/replay/fixtures/tactical-visibility-frame-7.eawr-replay": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
       "tests/replay/fixtures/zero-tick-v1.eawr-replay": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
       "tests/skirmish/fixtures/m2-start.eawr-replay": "b9fa80a8267af761b5ca26db1d95cbd37454b51001916642e0bc05765d5814b0",
-      "tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp": "f92d4f7f8b822aafbfe018ba722b535b1ceafa16cecf57316e44ae82fcef9ef1",
+      "tests/skirmish/fixtures/saves/tactical-v2-host.eawr-ckp": "9b58532c4b54b3f7dabdb0433e05ef2a5d6e28da9d65f134b84bf421a9d10961",
       "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2",
       "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "4ad94db38ee11569fd9b928620956ec580cd8f0cc77728137325e48073203f86",
       "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "4a3d72c1656ba3cf09eea25d748e431458c939aa1e73471186d8bd4cf17f9a0a",

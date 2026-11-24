@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "battle_effects.hpp"
@@ -146,7 +147,7 @@ float particle_detail_threshold(const data::EffectiveObject& object) {
     auto text = core::trim_view(threshold->value.raw_text);
     if (!text.empty() && text.front() == '+') text.remove_prefix(1);
     float value{};
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    const auto parsed = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
     if (parsed.ec != std::errc::result_out_of_range) return value;
 
     // from_chars leaves its output unchanged on overflow AND underflow. Preserve
@@ -232,7 +233,7 @@ void BattleEffects::prepare_effect_constants() {
                     data::tag_trace::used(child);
                     const std::string value = trim(child.raw_text);
                     std::int32_t frames{};
-                    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), frames);
+                    const auto parsed = eawr::core::from_chars(value.data(), value.data() + value.size(), frames);
                     if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size()) look.frames = frames;
                 }
             }

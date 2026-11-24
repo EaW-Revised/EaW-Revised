@@ -1,6 +1,12 @@
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
 find_package(Threads REQUIRED)
 
+add_executable(core_from_chars_tests from_chars_tests.cpp)
+target_link_libraries(core_from_chars_tests PRIVATE eawr::core)
+target_compile_features(core_from_chars_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(core_from_chars_tests)
+add_test(NAME core_from_chars_contracts COMMAND core_from_chars_tests)
+
 add_executable(core_load_note_tests load_note_tests.cpp)
 target_link_libraries(core_load_note_tests PRIVATE eawr::core eawr::platform)
 eawr_target_project_warnings(core_load_note_tests)

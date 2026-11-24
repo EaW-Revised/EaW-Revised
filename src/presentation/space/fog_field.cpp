@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/space/fog_field.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/core/text.hpp"
@@ -38,7 +39,7 @@ constexpr double clear_floor = 16.0;
     text = trim(text);
     if (!text.empty() && (text.back() == 'f' || text.back() == 'F')) text.remove_suffix(1);
     double result{};
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), result);
+    const auto [end, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), result);
     if (error != std::errc{} || end != text.data() + text.size() || !std::isfinite(result)) return std::nullopt;
     return result;
 }

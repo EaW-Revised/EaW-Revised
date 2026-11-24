@@ -305,6 +305,9 @@ public:
     // Const completed-world read, safe during a worker phase with no world writes.
     // Copies only UnitState, without gathering unrelated service components.
     [[nodiscard]] std::optional<UnitState> unit_state(EntityId unit) const;
+    // The script references (script_creation_namespace bit) of live objects a direct creation made, with the object's ID,
+    // ascending by reference. Empty while no script has created a unit.
+    [[nodiscard]] std::vector<std::pair<std::uint64_t, EntityId>> script_references() const;
     // Live squadrons in ascending container ID, each with its live craft (#271).
     [[nodiscard]] std::span<const Squadron> squadrons() const noexcept;
     // The retail fog cells of a session bound to fog rules (#274); null otherwise.

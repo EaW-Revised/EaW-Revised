@@ -36,6 +36,10 @@ from this shared-seat extension. Ambient controller absence is preserved;
 unsupported playable controller inputs refuse before agreement. Per-seat AI
 difficulty is a possible follow-up and is not present in the current agreement.
 
+The host sets the room's one AI difficulty for every AI faction (`-Difficulty easy|normal|hard`, default the room's
+Normal). Each peer's `gc.json` reports the agreed difficulty entry and the level it stands for, and the verifier requires
+both peers to report the same value, the level the host asked for.
+
 Each seat restores 1× and requests 2× after its pause/resume and the 45-second
 LAN clock admission window. Movement starts after these clock exercises, so
 both speed changes target the strategic clock. Both the stamped requests

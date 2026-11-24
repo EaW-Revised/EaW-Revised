@@ -2515,7 +2515,7 @@ void acceptance_recorder_observes_without_changing_ticks() {
     constexpr std::uint64_t final_tick = 20;
     Pair recorded(versus_setup(), {1, 4}, LiveGameSession::Pacing::driven, 3000, 0, final_tick);
     for (net::PeerIndex peer = 0; peer < 2; ++peer) {
-        recorded.matches[peer]->configure_acceptance(directory / std::to_string(peer), "synthetic-contract", false);
+        recorded.matches[peer]->configure_acceptance(directory / std::to_string(peer), "synthetic-contract", false, "Hard_Default", "hard");
         recorded.start(peer);
     }
     expect(recorded.run_to(final_tick), "recorded peers reach the ordinary final tick");
@@ -2540,6 +2540,9 @@ void acceptance_recorder_observes_without_changing_ticks() {
         "recorder writes one row per tick plus header");
     expect(read(directory / "0/gc.json").find("\"agreed_end\":true") != std::string::npos,
         "receipt proves the agreed barrier, rather than a forced stop");
+    for (const char* peer : {"0", "1"})
+        expect(read(directory / peer / "gc.json").find("\"difficulty\":\"Hard_Default\",\"difficulty_level\":\"hard\"") != std::string::npos,
+            "each peer's receipt reports the agreed AI difficulty and its level (#8071)");
     const auto costs = read(directory / "0/costs.csv");
     expect(static_cast<std::uint64_t>(std::count(costs.begin(), costs.end(), '\n')) == final_tick + 1,
         "costs cover every completed tick");

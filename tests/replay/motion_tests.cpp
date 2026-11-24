@@ -1522,8 +1522,8 @@ void test_final_facing() {
         }
     }
 
-    // Checkpoint: a held facing (order or queued leg) selects domain 41 and restores to the same continuation;
-    // no facing keeps domain 37; a facing domain without a facing, and a domain beyond 52, are refused.
+    // Checkpoint: a held facing (order or queued leg) selects domain 42 and restores to the same continuation;
+    // no facing keeps domain 38; a facing domain without a facing, and a domain beyond 53, are refused.
     const auto checkpoint_case = [&](const std::vector<tactical::PlayerCommand>& commands, const std::string_view label,
                                      const int save_tick = 100) {
         const eawr::platform::ThreadWorkerAdapter executor(2);
@@ -1538,7 +1538,7 @@ void test_final_facing() {
         const auto saved = session.save_checkpoint_state();
         expect(static_cast<bool>(saved), std::string(label) + ": saves");
         if (!saved) return;
-        expect(domain_of(saved.value()) == 41U, std::string(label) + ": a held facing selects domain 41");
+        expect(domain_of(saved.value()) == 42U, std::string(label) + ": a held facing selects domain 42");
         auto second = tactical::TacticalSession::create(one_ship(), {}, {}, table);
         expect(second && second.value().load_checkpoint_state(saved.value()), std::string(label) + ": restores");
         if (!second) return;
@@ -1556,8 +1556,8 @@ void test_final_facing() {
         expect(true, std::string(label) + ": restored continuation matches the straight run");
         auto beyond = saved.value();
         auto bare = tactical::TacticalSession::create(one_ship(), {}, {}, table);
-        beyond[0] = 53;
-        expect(bare && !bare.value().load_checkpoint_state(beyond), std::string(label) + ": domain 53 is refused");
+        beyond[0] = 54;
+        expect(bare && !bare.value().load_checkpoint_state(beyond), std::string(label) + ": domain 54 is refused");
     };
     checkpoint_case({command(0, 1, 0, 1, facing_move(at(300, 0, 0), yaw_a))}, "MV-40 order checkpoint");
     checkpoint_case({command(0, 1, 0, 1, facing_move(at(300, 0, 0), yaw_a))}, "MV-40 mid-turn checkpoint", 200);
@@ -1573,10 +1573,10 @@ void test_final_facing() {
                 "MV-40: plain move admits");
             for (int tick = 0; tick < 50; ++tick) expect(static_cast<bool>(session.step(executor)), "MV-40: plain move steps");
             const auto saved = session.save_checkpoint_state();
-            expect(saved && domain_of(saved.value()) == 37U, "MV-40: no facing keeps the domain and layout of before");
+            expect(saved && domain_of(saved.value()) == 38U, "MV-40: no facing keeps the domain and layout of before");
             if (saved) {
                 auto padded = saved.value();
-                padded[0] = 41;
+                padded[0] = 42;
                 auto fresh = tactical::TacticalSession::create(one_ship(), {}, {}, table);
                 expect(fresh && !fresh.value().load_checkpoint_state(padded),
                     "MV-40: a facing domain with no facing held is refused");

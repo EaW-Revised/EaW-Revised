@@ -580,7 +580,7 @@ starts with a digit and are unchanged (`tests/net/galactic_lobby_tests.cpp` pins
 start with `gc2` (`include/eawr/net/galactic_lobby.hpp`): `gc2 <delay> <seed> <auto resolve> <vote timeout> <custom> <credits> <start tech>
 <max tech> <heroes> "<difficulty>" <rows>` and per faction row `<player> <faction id> <flags> "<faction>" <human> <dropout>`;
 `LobbyGame::map` names the campaign. Decode accepts only bytes that re-encode to themselves and refuses an unknown version by
-name. `<vote timeout>` is the battle-vote timeout in seconds (legacy EAWR-6156): the host picks 5 to 120, default 15; it rides the agreed
+name. `<vote timeout>` is the battle-vote timeout in seconds (legacy EAWR-6156): the host picks 5 to 120, default 30 whatever the data authors (owner decision, a deliberate deviation from the authored constant); it rides the agreed
 roster and the setup payload, so every peer arms the same tick count. The decoder accepts anything below the tick horizon, not only
 5 to 120, because a resumed save keeps the value it recorded (a mod's constant can lie outside the host range) and the restore refuses
 a different one. The host owns the mode for the room's lifetime: it is chosen with the retail "Campaign" game type of the host options

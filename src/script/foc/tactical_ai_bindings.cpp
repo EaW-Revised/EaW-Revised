@@ -247,6 +247,12 @@ core::Result<ValueList> first_object_of_type(Host& host, BindingContext& context
         context.charge_host_work(visited);
         return one(handle(handle_game_object, unit.id));
     }
+    for (const ViewUnit& unit : pending_created_objects(host, context)) {
+        ++visited;
+        if (unit.type != *type) continue;
+        context.charge_host_work(visited);
+        return one(handle(handle_game_object, unit.id));
+    }
     context.charge_host_work(visited);
     return none();
 }
@@ -374,9 +380,13 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
             || !host->players.contains(static_cast<tactical::PlayerId>(owner->id)))
             return fail("Create_Generic_Object: invalid type, position or player");
         const auto* profile = host->world ? host->world->economy().upgrade(type->type_id) : nullptr;
-        if (host->setup.domain != tactical::BattleDomain::space || !type->upgrade_object || !profile || profile->level_up || !profile->bounties.empty()
+        // An ordinary upgrade object is a hidden economy object; any other data-defined object with a footprint is a
+        // unit the ordered commit places at the nearest free spot, as a reinforcement is.
+        const bool upgrade = type->upgrade_object && profile != nullptr && !profile->level_up && profile->bounties.empty();
+        const bool unit = !type->upgrade_object && host->world != nullptr && host->world->economy().footprint_of(type->type_id) != nullptr;
+        if (host->setup.domain != tactical::BattleDomain::space || !(upgrade || unit)
             || host->world->economy().disabled_types.contains(type->type_id))
-            return fail("Create_Generic_Object: this host supports ordinary space upgrade objects only");
+            return fail("Create_Generic_Object: this host supports ordinary space upgrade objects and space units only");
         const auto player = static_cast<tactical::PlayerId>(owner->id);
         const auto issuer = host->players.find(player);
         if (issuer == host->players.end() || issuer->second->neutral)
@@ -389,10 +399,12 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
             return fail("Create_Generic_Object: the creation owner has no economy account");
         // Project reference namespace: bounded, injective (instance, command sequence), retained in replay/state.
         constexpr unsigned sequence_bits = 20;
-        if (context.instance() >= (std::uint64_t{1} << (63 - sequence_bits))
+        constexpr unsigned low_bits = sequence_bits + tactical::script_reference_member_bits;
+        if (context.instance() >= (std::uint64_t{1} << (63 - low_bits))
             || context.command_sequence() >= (std::uint64_t{1} << sequence_bits))
             return fail("Create_Generic_Object: script creation identity space exhausted");
-        const auto identity = tactical::script_creation_namespace | (context.instance() << sequence_bits) | context.command_sequence();
+        const auto identity = tactical::script_creation_namespace | (context.instance() << low_bits)
+            | (context.command_sequence() << tactical::script_reference_member_bits);
         if (identity == tactical::script_creation_namespace) return fail("Create_Generic_Object: invalid creation identity");
         context.issue_command(std::string(verb_create_object), {number(LuaNumber(static_cast<std::int64_t>(player))),
             handle(handle_type, type->type_id), position_value(*position), arguments[2], handle(handle_game_object, identity)});

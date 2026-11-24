@@ -6,6 +6,7 @@
 #include "eawr/platform/story_request.hpp"
 
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/core/perf_diag/sim_feed.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/sim/state_hash.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
@@ -463,6 +464,10 @@ public:
     // tick_cost_history ticks are kept.
     static constexpr std::size_t tick_cost_history = 4096;
     [[nodiscard]] std::vector<LiveTickCost> tick_costs_after(std::uint64_t after) const;
+    // #8058: the diagnostics feed of this session's simulation thread (tick records, phases, markers). Off until a
+    // reader calls set_enabled(true) (coarse) and, for the per-barrier rows, set_fine(true): the runtime form of
+    // Options::measure_phases. One reader thread at a time. Never read by the simulation.
+    [[nodiscard]] core::perf_diag::SimFeed& perf_feed() noexcept;
     // Set once a step fails or the simulation thread throws (the exception is caught there,
     // never escapes the thread); the simulation thread then stops stepping.
     [[nodiscard]] std::optional<core::Diagnostic> failure() const;

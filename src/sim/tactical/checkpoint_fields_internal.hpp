@@ -141,7 +141,7 @@ template <> struct Fields<ConstructionState> {
 };
 
 template <> struct Fields<ScriptViewState> {
-    template <class A, class T> static void apply(A& a, T& v) { a(v.hidden, v.unselectable); }
+    template <class A, class T> static void apply(A& a, T& v) { a(v.hidden, v.unselectable, v.identity); }
 };
 
 template <> struct Fields<CorruptSystemsState> {

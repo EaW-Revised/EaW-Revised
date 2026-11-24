@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/ui/credits.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/core/text.hpp"
@@ -34,7 +35,7 @@ const data::XmlNode* find_tag(const data::XmlNode& root, const std::string_view 
 bool parse_float(std::string_view text, float& value) {
     text = trimmed(text);
     if (text.empty()) return false;
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    const auto [end, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
     return error == std::errc{} && end == text.data() + text.size() && std::isfinite(value);
 }
 

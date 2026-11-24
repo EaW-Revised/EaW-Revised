@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/shader_lowering.hpp"
 
 #include <algorithm>
@@ -286,7 +287,7 @@ std::uint32_t Parser::integer() {
     if (text.ends_with('u')) text.remove_suffix(1U);
     if (text.size() > 1U && text.front() == '0') fail(unsupported, token.offset, "non-decimal integer spelling is unsupported");
     std::uint32_t result{};
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), result);
+    const auto parsed = eawr::core::from_chars(text.data(), text.data() + text.size(), result);
     if (token.kind != TokenKind::number || parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
         fail(unsupported, token.offset, "expected a bounded unsigned integer literal");
     return result;
@@ -599,7 +600,7 @@ std::size_t Parser::primary(std::size_t depth) {
         if (token.kind != TokenKind::number) value_type.scalar = Scalar::boolean;
         else if (token.text.find_first_of(".eE") != std::string_view::npos) {
             float value{};
-            const auto parsed = std::from_chars(token.text.data(), token.text.data() + token.text.size(), value);
+            const auto parsed = eawr::core::from_chars(token.text.data(), token.text.data() + token.text.size(), value);
             if (parsed.ec != std::errc{} || parsed.ptr != token.text.data() + token.text.size() || !std::isfinite(value))
                 fail(unsupported, token.offset, "floating literal is outside the supported range");
         } else {
@@ -607,7 +608,7 @@ std::size_t Parser::primary(std::size_t depth) {
             const bool unsigned_value = text.ends_with('u'); if (unsigned_value) text.remove_suffix(1U);
             if (text.size() > 1U && text.front() == '0') fail(unsupported, token.offset, "non-decimal integer spelling is unsupported");
             std::uint32_t value{};
-            const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+            const auto parsed = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
             if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()
                 || (!unsigned_value && value > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())))
                 fail(unsupported, token.offset, "integer literal is outside the supported range");
@@ -742,7 +743,7 @@ bool Parser::one(std::size_t index, std::uint32_t component, const std::vector<s
         auto text = node.text;
         if (text.ends_with('u')) text.remove_suffix(1U);
         double value{};
-        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+        const auto parsed = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
         return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() && value == 1.0;
     }
     if (node.kind == NodeKind::reference) return (known[node.symbol] & (1U << component)) != 0U;

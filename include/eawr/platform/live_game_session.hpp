@@ -512,6 +512,9 @@ public:
     // `command-source` (the callback, which runs the GC AI) and `session-step`. Never part of a
     // snapshot, hash or replay.
     [[nodiscard]] std::vector<LiveTickCost> tick_costs_after(std::uint64_t after) const;
+    // #8058: the diagnostics feed of the simulation thread (tick records, phases, markers); see LiveSession::perf_feed.
+    // Off until a reader calls set_enabled(true); set_fine(true) adds the gc_profile per-tick phases.
+    [[nodiscard]] core::perf_diag::SimFeed& perf_feed() noexcept;
     [[nodiscard]] std::optional<core::Diagnostic> failure() const;
     [[nodiscard]] std::vector<core::Diagnostic> rejected_orders() const;
     [[nodiscard]] std::size_t worker_count() const noexcept;

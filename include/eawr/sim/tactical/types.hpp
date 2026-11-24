@@ -566,6 +566,10 @@ struct TacticalSuperweaponPayload {
 // SSU-03: direct factory creation, with no purchase or queue transaction.
 // The high-bit identity is a Lua reference; the ordered commit allocates the ordinary object ID.
 inline constexpr std::uint64_t script_creation_namespace = std::uint64_t{1} << 63;
+// One creation may bring several objects (a squadron's craft, then its team containers): the k-th object's reference is
+// the command's base reference plus k, so a base reference keeps these low bits clear.
+inline constexpr unsigned script_reference_member_bits = 6;
+inline constexpr std::uint64_t script_reference_member_limit = std::uint64_t{1} << script_reference_member_bits;
 struct ScriptCreateObjectPayload {
     TypeId type{};
     PlayerId owner{};

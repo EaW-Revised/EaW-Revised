@@ -1,3 +1,4 @@
+#include "eawr/core/from_chars.hpp"
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/core/text.hpp"
@@ -31,7 +32,7 @@ constexpr std::string_view constants_path = "data/xml/gameconstants.xml";
 [[nodiscard]] std::optional<std::int32_t> integer(const std::string_view text) noexcept {
     const std::string_view value = trim(text);
     std::int32_t result{};
-    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), result);
+    const auto [end, error] = eawr::core::from_chars(value.data(), value.data() + value.size(), result);
     if (error != std::errc{} || end != value.data() + value.size()) return std::nullopt;
     return result;
 }
@@ -101,7 +102,7 @@ BattleMessageLooks battle_message_looks(const data::XmlNode& root) {
         }
         const std::string text(trim(node->raw_text));
         double value = 0.0;
-        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+        const auto parsed = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
         if (text.empty() || parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || !(value >= 0.0 && value <= 1.0)) fallback(tag, "is not a screen share");
         else *target = value;
     }

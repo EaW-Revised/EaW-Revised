@@ -1178,6 +1178,15 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
             if (!unrestricted(properties) && (info == nullptr || (info->property_bits & *properties) == 0)) continue;
             out.push_back(handle(handle_game_object, unit.id));
         }
+        for (const ViewUnit& unit : pending_created_objects(*host, context)) {
+            context.charge_host_work(1);
+            if (player != nullptr && unit.owner != player->id) continue;
+            const AiType* info = host->type(unit.type);
+            if (type && unit.type != *type) continue;
+            if (!unrestricted(categories) && (info == nullptr || (info->category_bits & *categories) == 0)) continue;
+            if (!unrestricted(properties) && (info == nullptr || (info->property_bits & *properties) == 0)) continue;
+            out.push_back(handle(handle_game_object, unit.id));
+        }
         return one(Value{std::move(out)});
     });
     // BHR-01..03. The original keeps one list of hint objects per battle (HINT-behavior objects: map markers and

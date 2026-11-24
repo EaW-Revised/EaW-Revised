@@ -36,11 +36,13 @@ inline constexpr unsigned galactic_lobby_options_version = 2;
 // Stock MP_Default_Allow_Auto_Resolve (WAR-01): 0 always, 1 never, 2 ask, 3 overwhelming odds.
 inline constexpr std::uint32_t galactic_lobby_default_auto_resolve = 2;
 inline constexpr std::uint32_t galactic_lobby_max_auto_resolve = 3;
-// Battle-vote timeout, a host setting (#6156, owner D9): seconds a battle vote waits between different human sides. The retail
-// default is 15; the host may choose 5 to 120. Players on one side never vote against a clock (GameSession::untimed_votes).
+// Battle-vote timeout, a host setting (#6156, owner D9): seconds a battle vote waits between different human sides. A room's
+// default is 30 whatever pending-battle timeout constant the data authors (owner decision D11, 2026-11-23, a deliberate
+// deviation from retail's constant 15). The host may choose 5 to 120. Players on one side never vote against a clock
+// (GameSession::untimed_votes).
 inline constexpr std::uint32_t galactic_lobby_min_vote_timeout = 5;
 inline constexpr std::uint32_t galactic_lobby_max_vote_timeout = 120;
-inline constexpr std::uint32_t galactic_lobby_default_vote_timeout = 15;
+inline constexpr std::uint32_t galactic_lobby_default_vote_timeout = 30;
 [[nodiscard]] constexpr std::uint32_t galactic_lobby_clamp_vote_timeout(const std::int64_t seconds) noexcept {
     return seconds < galactic_lobby_min_vote_timeout ? galactic_lobby_min_vote_timeout
         : seconds > galactic_lobby_max_vote_timeout ? galactic_lobby_max_vote_timeout : static_cast<std::uint32_t>(seconds);
@@ -135,6 +137,14 @@ struct GalacticLobbyOptions {
 // The room has one difficulty, so every AI seat caption comes from this, never from a fixed "Medium".
 enum class GalacticAiCaption : std::uint8_t { easy, normal, hard };
 [[nodiscard]] std::optional<GalacticAiCaption> galactic_ai_caption(std::string_view difficulty) noexcept;
+// The level a lobby SHOWS for a room difficulty whose campaign entry list is not at hand (a room of a campaign this install lacks): the stock
+// caption level when the name has one, else the level named by the name's first word (Medium_Skirmish -> normal, Hard_Story -> hard), else
+// normal. Never a raw entry name: the lobby words a difficulty as Easy, Normal or Hard (or the stack's own text for that level).
+[[nodiscard]] GalacticAiCaption galactic_ai_display_level(std::string_view difficulty) noexcept;
+// The text keys the AI captions are worded under (the stock Easy / Medium / Hard AI player names, which a mod may reword), and the plain
+// words a lobby shows for a key when its text stack words none: Easy, Normal or Hard (anything else reads Normal).
+[[nodiscard]] std::string_view galactic_ai_caption_key(GalacticAiCaption level) noexcept;
+[[nodiscard]] std::string_view galactic_ai_caption_words(std::string_view key) noexcept;
 
 // The human side (1..galactic_lobby_max_human_sides) a faction row forms: the row's rank among the host's human rows. Nothing for an AI row
 // or a player ID the room does not list. A seat's `team` is this value; a seat's `faction` is the row's name.

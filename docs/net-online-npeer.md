@@ -806,6 +806,15 @@ synchronous scene handover. A lost guest during that barrier fails with
 EAWR-NET-1301 and cannot produce a half-committed match; late joins get
 EAWR-NET-1305. Incompatible lobby bootstrap formats get EAWR-NET-1306.
 
+A frozen roster keeps its native slot numbers: a vacant seat is a hole in the mask
+(`roster_mask`), never compacted, and the game side works on the lobby's dense
+seat view instead. Mid-match repair and rejoin walk only the frozen slots, so a
+hole is never dialled and never blocks repair completion, and the staging host keeps
+its refusal listener afterwards. A host whose Start is still preparing can hold new
+attachments (`hold_staging_joins`): they get the retryable EAWR-NET-1307 instead of
+taking a slot, so a freeze at setup-ready cannot be raced and a cancelled Start
+returns to staging.
+
 This mode is opt-in. Legacy fixed-roster TCP and campaign setup retain their
 original full-mesh barrier and recovery route; the lobby bootstrap negotiates that
 host mode before admission. Map selection checks each occupied human/AI row before

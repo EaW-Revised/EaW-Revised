@@ -75,9 +75,9 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
         out.hold_fire = std::any_of(live.begin(), live.end(), [](const auto& unit) { return unit.hold_fire; });
         out.suspended_locomotor = std::any_of(live.begin(), live.end(), [](const auto& unit) { return unit.suspended_locomotor; });
         out.script_view = std::any_of(live.begin(), live.end(), [](const auto& unit) { return unit.script_view.has_value(); });
-        // SSU-03: domain 37 base includes direct-creation references and positions.
+        // Domain 38 base: script-view units archive their direct-creation reference (domain 37 layouts are refused).
         // +1 fire range; +2 script invulnerability; +4 final facing; +8 deploy clips; +16 hold fire; +32 random-hardpoint projectiles; +64 script view flags; +128 combat-modifier projectiles. Older layouts are refused.
-        out(std::uint32_t{37U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)
+        out(std::uint32_t{38U + (out.fire_range_bonuses ? 1U : 0U) + (out.script_invulnerable ? 2U : 0U)
             + (out.final_facing ? 4U : 0U) + (out.deploy_poses ? 8U : 0U) + (out.hold_fire ? 16U : 0U)
             + (out.random_hardpoints ? 32U : 0U) + (out.script_view ? 64U : 0U) + (out.combat_mods ? 128U : 0U)
             + (out.suspended_locomotor ? 256U : 0U)});
@@ -128,16 +128,16 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         checkpoint_detail::Reader in(bytes);
         std::uint32_t version{};
         in(version);
-        if (version < 37U || version > 548U) throw checkpoint_detail::Invalid("unsupported child state domain");
-        in.fire_range_bonuses = (version - 37U) % 2U == 1U;
-        in.script_invulnerable = (version - 37U) % 4U >= 2U;
-        in.final_facing = (version - 37U) % 8U >= 4U;
-        in.deploy_poses = (version - 37U) % 16U >= 8U;
-        in.hold_fire = (version - 37U) % 32U >= 16U;
-        in.random_hardpoints = (version - 37U) % 64U >= 32U;
-        in.script_view = (version - 37U) % 128U >= 64U;
-        in.combat_mods = (version - 37U) % 256U >= 128U;
-        in.suspended_locomotor = (version - 37U) % 512U >= 256U;
+        if (version < 38U || version > 549U) throw checkpoint_detail::Invalid("unsupported child state domain");
+        in.fire_range_bonuses = (version - 38U) % 2U == 1U;
+        in.script_invulnerable = (version - 38U) % 4U >= 2U;
+        in.final_facing = (version - 38U) % 8U >= 4U;
+        in.deploy_poses = (version - 38U) % 16U >= 8U;
+        in.hold_fire = (version - 38U) % 32U >= 16U;
+        in.random_hardpoints = (version - 38U) % 64U >= 32U;
+        in.script_view = (version - 38U) % 128U >= 64U;
+        in.combat_mods = (version - 38U) % 256U >= 128U;
+        in.suspended_locomotor = (version - 38U) % 512U >= 256U;
         const auto cursors = impl_->last_submitted;
         checkpoint_detail::Access::state(in, *impl_);
         // SAE-10: a reinforcement whose search failed advanced its issuer's cursor but is never recorded, so the

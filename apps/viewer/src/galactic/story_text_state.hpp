@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/core/from_chars.hpp"
+
 #include "eawr/sim/galactic/story_goals.hpp"
 
 #include <algorithm>
@@ -126,7 +128,7 @@ private:
         if (text.empty()) return std::nullopt;
         if (text.front() == '+') text.remove_prefix(1);
         double value{};
-        const auto [stop, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+        const auto [stop, error] = eawr::core::from_chars(text.data(), text.data() + text.size(), value);
         if (error != std::errc{} || stop != text.data() + text.size()) return std::nullopt;
         return value;
     }

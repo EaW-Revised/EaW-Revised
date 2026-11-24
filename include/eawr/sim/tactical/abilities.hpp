@@ -316,6 +316,9 @@ struct LureProfile {
 struct ScriptViewState {
     bool hidden{};
     bool unselectable{};
+    // The script reference (script_creation_namespace bit set) a direct creation gave this object, or zero. Later script
+    // commands that name the reference reach the object through it, in the same tick and after.
+    std::uint64_t identity{};
     friend constexpr bool operator==(const ScriptViewState&, const ScriptViewState&) noexcept = default;
 };
 

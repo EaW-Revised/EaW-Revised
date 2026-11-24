@@ -836,8 +836,8 @@ void test_restore_bindings() {
         archive::Reader reader(saved.value());
         std::uint32_t version{};
         reader(version);
-        reader.fire_range_bonuses = (version - 37U) % 2U == 1U;
-        reader.script_invulnerable = (version - 37U) % 4U >= 2U;
+        reader.fire_range_bonuses = (version - 38U) % 2U == 1U;
+        reader.script_invulnerable = (version - 38U) % 4U >= 2U;
         archive::Access::state(reader, state);
         std::vector<tactical::LiveUnit> live;
         reader(live);
