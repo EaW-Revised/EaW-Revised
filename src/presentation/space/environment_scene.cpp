@@ -232,6 +232,13 @@ std::optional<EnvironmentLight> environment_light(const assets::EnvironmentDescr
     return light;
 }
 
+std::optional<lighting::DistanceFog> environment_fog(const assets::EnvironmentDescriptor& environment) {
+    std::vector<lighting::RawField> fields;
+    fields.reserve(environment.fields.size());
+    for (const assets::RawField& field : environment.fields) fields.push_back({field.id, field.bytes});
+    return lighting::distance_fog(fields);
+}
+
 assets::Vec3f sky_orientation_degrees(const assets::EnvironmentDescriptor& environment, const bool secondary) {
     const auto first = scalar_field(environment, secondary ? 0x1eU : 0x1dU);
     const auto third = scalar_field(environment, secondary ? 0x20U : 0x1fU);
@@ -588,6 +595,11 @@ Billboard facing_billboard(const SceneSurface& surface, const Affine& object, co
         }
     }
     return result;
+}
+
+float sky_reach_factor(const float world_radius) noexcept {
+    if (!(world_radius > 0.0F) || !std::isfinite(world_radius)) return 1.0F;
+    return std::max(1.0F, environment_sky_reach / world_radius);
 }
 
 FixedCamera environment_view_camera(FixedCamera camera) noexcept {

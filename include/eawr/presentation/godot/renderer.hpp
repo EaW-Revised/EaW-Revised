@@ -9,6 +9,7 @@
 #include "eawr/presentation/proxy_reservation.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/fog/fog.hpp"
+#include "eawr/presentation/lighting/distance_fog.hpp"
 #include "eawr/presentation/lighting/scene_bloom.hpp"
 
 #include <array>
@@ -478,6 +479,9 @@ public:
     // Environment-only input for families that read independent ambient.
     // Preserves the current SH, sun, shadow policy and global atlas settings.
     void set_ambient_light(const std::array<float, 3>& rgb);
+    // The environment's distance fog (lighting/distance_fog.hpp), shared by every fogged legacy adapter of every scene on
+    // this device. Empty, or a disabled fog, draws none: the constants return to (0, 1) and a white colour.
+    void set_distance_fog(const std::optional<lighting::DistanceFog>& fog);
     // The state of the last set_lighting call; empty before the first. Viewer
     // adapters outside the renderer (bump-mapped particles) follow it.
     [[nodiscard]] const std::optional<LightingState>& lighting() const noexcept;

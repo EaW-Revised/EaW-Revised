@@ -1294,9 +1294,9 @@ std::string MapMode::State::overview_report_json() const {
            << ", \"radar_contents\": " << (overview_ui.radar_contents ? "true" : "false")
            << ", \"unit_brackets\": " << (overview_ui.unit_brackets ? "true" : "false")
            << ", \"world_markers\": " << (overview_ui.world_markers ? "true" : "false")
-           // V-5f: the remake draws no scene distance fog in space (the legacy adapters disable it),
-           // so the overview's fog switch has nothing to turn off.
-           << ", \"distance_fog\": \"not drawn\", \"minimap_syncs\": " << minimap_syncs << ", \"fade\": ";
+           // V-5f: the overview's fog switch has nothing to turn off: scene distance fog follows the environment
+           // record (R-FOG-06) and the overview does not change it.
+           << ", \"distance_fog\": \"environment record\", \"minimap_syncs\": " << minimap_syncs << ", \"fade\": ";
     if (overview_fade) output << overview_fade->report_json();
     else output << "null";
     output << "}";

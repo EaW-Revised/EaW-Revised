@@ -11,6 +11,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -343,6 +344,16 @@ void test_authored_sky_scale() {
     }
 }
 
+void test_sky_reach() {
+    expect(space::sky_reach_factor(28000.0F) > 3.0F && space::sky_reach_factor(28000.0F) * 28000.0F <= space::environment_far_plane,
+           "a small sky is enlarged to stay inside the render far plane");
+    expect(space::sky_reach_factor(space::environment_sky_reach) == 1.0F && space::sky_reach_factor(2.0F * space::environment_far_plane) == 1.0F,
+           "a sky that already reaches is never shrunk");
+    expect(space::sky_reach_factor(0.0F) == 1.0F && space::sky_reach_factor(-1.0F) == 1.0F
+               && space::sky_reach_factor(std::numeric_limits<float>::infinity()) == 1.0F,
+           "a radius that is not positive and finite leaves the sky as authored");
+}
+
 void test_camera_relative_sky() {
     eawr::presentation::FixedCamera camera;
     camera.far_plane = 7000.0F;
@@ -400,6 +411,7 @@ int main() {
     test_default_camera();
     test_authored_sky_scale();
     test_camera_relative_sky();
+    test_sky_reach();
     test_config_free_laser_camera();
     if (failures != 0) {
         std::cerr << failures << " environment scene contract failure(s)\n";

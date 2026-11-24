@@ -3,6 +3,7 @@
 
 #include "renderer_internal.hpp"
 #include "lighting_propagation.hpp"
+#include "distance_fog_source.hpp"
 #include <cstring>
 #include "texture_budget.hpp"
 #include "particle_culling.hpp"
@@ -75,6 +76,26 @@ GodotShaderCache::Stats GodotShaderCache::stats() const noexcept {
     return {impl_->entries.size(), impl_->source_bytes, impl_->refused_full};
 }
 
+namespace {
+
+// The two shared shader values the fogged legacy adapters read (distance_fog_source.hpp). Registered once per device,
+// before any shader that declares them compiles; the neutral values draw no fog.
+void ensure_distance_fog_globals(RenderingServer& rendering) {
+    const StringName vals(std::string(distance_fog_source::vals_name).c_str());
+    const StringName color(std::string(distance_fog_source::color_name).c_str());
+    bool have_vals = false;
+    bool have_color = false;
+    const auto names = rendering.global_shader_parameter_get_list();
+    for (int64_t i = 0; i < names.size(); ++i) {
+        have_vals = have_vals || StringName(names[i]) == vals;
+        have_color = have_color || StringName(names[i]) == color;
+    }
+    if (!have_vals) rendering.global_shader_parameter_add(vals, RenderingServer::GLOBAL_VAR_TYPE_VEC2, Vector2(0.0F, 1.0F));
+    if (!have_color) rendering.global_shader_parameter_add(color, RenderingServer::GLOBAL_VAR_TYPE_VEC3, Vector3(1.0F, 1.0F, 1.0F));
+}
+
+} // namespace
+
 GodotRenderer::Impl::Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders, const bool attach_scene)
     : attach_scene_(attach_scene), owner_(owner), shader_cache_(std::move(shaders)) {
     if (detail::TextureCensusRegistry::enabled().load(std::memory_order_relaxed)) {
@@ -87,6 +108,10 @@ GodotRenderer::Impl::Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shade
             "Godot RenderingServer, world, or viewport is unavailable");
         return;
     }
+    ensure_distance_fog_globals(*rendering);
+    // The shared values belong to the device, not to this renderer: every new renderer starts with no fog, so a scene
+    // that never sets one (a land map with the default environment) cannot inherit an earlier scene's fog.
+    set_distance_fog(std::nullopt);
     scenario_ = owner_.get_world_3d()->get_scenario();
     viewport_ = owner_.get_viewport()->get_viewport_rid();
     camera_ = rendering->camera_create();
@@ -210,6 +235,17 @@ void GodotRenderer::Impl::set_ambient_light(const std::array<float, 3>& rgb) {
         static_cast<void>(asset);
         if (consumer.material.is_valid()) apply_ambient_params(*rendering, consumer.material);
     }
+}
+
+void GodotRenderer::Impl::set_distance_fog(const std::optional<lighting::DistanceFog>& fog) {
+    RenderingServer* rendering = RenderingServer::get_singleton();
+    if (!rendering) return;
+    ensure_distance_fog_globals(*rendering);
+    const lighting::FogGlobals globals = lighting::fog_globals(fog);
+    rendering->global_shader_parameter_set(StringName(std::string(distance_fog_source::vals_name).c_str()),
+        Vector2(globals.vals.x, globals.vals.y));
+    rendering->global_shader_parameter_set(StringName(std::string(distance_fog_source::color_name).c_str()),
+        Vector3(globals.color[0], globals.color[1], globals.color[2]));
 }
 
 void GodotRenderer::Impl::apply_wind_params(
@@ -693,6 +729,7 @@ void GodotRenderer::set_camera(const FixedCamera& camera) { impl_->set_camera(ca
 
 void GodotRenderer::set_lighting(const LightingState& lighting) { impl_->set_lighting(lighting); }
 void GodotRenderer::set_ambient_light(const std::array<float, 3>& rgb) { impl_->set_ambient_light(rgb); }
+void GodotRenderer::set_distance_fog(const std::optional<lighting::DistanceFog>& fog) { impl_->set_distance_fog(fog); }
 const std::optional<GodotRenderer::LightingState>& GodotRenderer::lighting() const noexcept {
     return impl_->lighting();
 }

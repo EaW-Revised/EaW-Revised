@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/assets/assets.hpp"
+#include "eawr/presentation/lighting/distance_fog.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/presentation/renderer.hpp"
 #include "eawr/presentation/camera/camera.hpp"
@@ -47,6 +48,11 @@ struct EnvironmentLight final {
 // Empty when one of those minis is absent, too short or not finite (R-DEC-07
 // fails closed). For a repeated id the last complete occurrence wins (R-DEC-02).
 [[nodiscard]] std::optional<EnvironmentLight> environment_light(const assets::EnvironmentDescriptor& environment);
+
+// R-DEC-08 and R-FOG-01: the record's distance fog (colour 0x0f, enable 0x10, start 0x11, end 0x12). Empty when the colour
+// mini is short or not finite, which fails the record like the light minis (R-DEC-04); a record without the fog minis gives
+// the defaults (fog off).
+[[nodiscard]] std::optional<lighting::DistanceFog> environment_fog(const assets::EnvironmentDescriptor& environment);
 
 // R-SKY-02: the sky object's orientation triple (first, 0, third) in degrees,
 // from minis 0x1d/0x1f (primary) or 0x1e/0x20 (secondary). An absent or
@@ -188,6 +194,16 @@ struct Billboard final {
 // retail's widened background range (BP-75), 100000 (#6447).
 inline constexpr float environment_far_plane = 100000.0F;
 inline constexpr float environment_sky_radius = 48000.0F;
+
+// A sky sphere is camera-centred, so scaling it uniformly about the eye changes nothing the eye sees. Retail draws the sky
+// in a background scene and clears depth before the main scene, so a main-scene object always paints over it. Here the sky
+// writes depth, so it would hide every main-scene pixel beyond its radius (a large sea plane ends in a curved edge against
+// the sky's lower band). The drawn sky is therefore enlarged, never shrunk, to this radius, inside the render far plane.
+inline constexpr float environment_sky_reach = environment_far_plane * 0.95F;
+
+// The factor (at least 1) that brings a sky of the given world radius out to environment_sky_reach; 1 for a radius that is
+// not positive and finite.
+[[nodiscard]] float sky_reach_factor(float world_radius) noexcept;
 
 // Space_Mode supplies the pose and near plane; the environment needs its own
 // far plane to keep the camera-centred sky and distant backdrop in view.

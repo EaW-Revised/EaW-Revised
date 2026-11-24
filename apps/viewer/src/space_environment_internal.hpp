@@ -446,6 +446,8 @@ private:
     std::string primary_sky_;
     std::string secondary_sky_;
     std::optional<space::EnvironmentLight> light_;
+    // The environment record's distance fog (R-FOG-01), shared with every renderer on the device.
+    std::optional<lighting::DistanceFog> fog_;
     std::vector<Item> items_;
     std::vector<std::string> not_rendered_;
     std::vector<std::uint32_t> environment_records_;
@@ -453,6 +455,9 @@ private:
     std::vector<EnvironmentIdle> environment_idle_;
     std::vector<sim::RenderInstance> instances_;
     std::vector<std::pair<std::size_t, space::Affine>> sky_instances_;
+    // The factor that brings the primary sky out to space::environment_sky_reach; the secondary sky shares it so the
+    // layers keep their order.
+    std::optional<float> sky_reach_scale_;
     // TSW-15: the instances of each environment-drawn map record, and the ones a destroyed record no longer shows.
     // An instance is dropped from the submitted snapshot, never from instances_ (the sky indices stay valid).
     std::map<std::uint32_t, std::vector<std::size_t>> record_instances_;
