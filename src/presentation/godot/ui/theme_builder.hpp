@@ -87,6 +87,28 @@ struct ThemeBuildSummary final {
     std::size_t font_variations{}; // distinct FontVariation resources
 };
 
+// Builds a theme resource per step, on the main thread. The inputs outlive this task.
+class ThemeBuildTask final {
+public:
+    ThemeBuildTask(const presentation::ui::ThemeModel& model, UiTextures& textures, FontProvider& fonts);
+    [[nodiscard]] bool step();
+    [[nodiscard]] godot::Ref<godot::Theme> theme() const { return theme_; }
+    [[nodiscard]] ThemeBuildSummary summary() const { return counts_; }
+private:
+    void add_texture(const presentation::ui::ThemeStyle& style, const presentation::ui::ThemeTexture& slot);
+    void add_font(const presentation::ui::ThemeStyle& style, const presentation::ui::ThemeFont& font);
+    const presentation::ui::ThemeModel& model_;
+    UiTextures& textures_;
+    FontProvider& fonts_;
+    godot::Ref<godot::Theme> theme_;
+    ThemeBuildSummary counts_;
+    std::map<std::string, godot::Ref<godot::FontVariation>> variations_;
+    std::size_t next_{};
+    std::size_t texture_index_{};
+    std::size_t font_index_{};
+    bool style_started_{};
+};
+
 [[nodiscard]] godot::Ref<godot::Theme> build_theme(const presentation::ui::ThemeModel& model, UiTextures& textures,
                                                    FontProvider& fonts, ThemeBuildSummary* summary = nullptr);
 

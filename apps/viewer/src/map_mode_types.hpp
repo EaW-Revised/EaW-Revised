@@ -241,6 +241,8 @@ struct MapMode::State final {
     // the options screen. The pointer is only trusted while its instance id is valid.
     EawrOptionsScreen* game_menu{};
     int64_t game_menu_id{};
+    bool game_menu_warm_done{};
+    bool game_menu_warm_failed{};
     godot::Node3D* menu_host{};
     std::function<void()> menu_handler;
     bool menu_open{};
@@ -249,6 +251,7 @@ struct MapMode::State final {
     bool menu_paused{}; // the menu paused the battle and resumes it when it closes
     bool leave_to_menu{};
     // Escape / the options button. False when the battle is not in a state that has a menu.
+    bool prepare_game_menu(bool finish);
     bool open_game_menu();
     // Once per frame: a closed menu resumes the battle, and a confirmed Quit Game leaves it.
     void service_game_menu();

@@ -45,6 +45,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <map>
 #include <optional>
 #include <utility>
@@ -55,6 +56,26 @@ namespace model = presentation::ui;
 namespace data = eawr::data::ui;
 
 namespace {
+
+class OptionsTiming final {
+public:
+    explicit OptionsTiming(const char* phase) : phase_(phase), enabled_(enabled()) {
+        if (enabled_) start_ = std::chrono::steady_clock::now();
+    }
+    ~OptionsTiming() {
+        if (!enabled_) return;
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_).count();
+        UtilityFunctions::print("EAWR options timing ", phase_, ": ", us, " us");
+    }
+private:
+    static bool enabled() {
+        static const bool value = OS::get_singleton()->has_environment("EAWR_OPTIONS_TIMING");
+        return value;
+    }
+    const char* phase_;
+    bool enabled_;
+    std::chrono::steady_clock::time_point start_{};
+};
 
 [[nodiscard]] const char* supersampling_name(const int level) noexcept {
     return level == 2 ? "2x" : level == 1 ? "1.5x" : "off";
@@ -143,6 +164,7 @@ struct EawrOptionsScreen::Resources final {
     std::optional<data::TextLookup> text;
     std::optional<model::ThemeModel> theme_model;
     Ref<Theme> theme;
+    std::unique_ptr<ThemeBuildTask> theme_task;
     Vector2 theme_size; // the viewport the theme was made for
 };
 
@@ -193,10 +215,168 @@ bool EawrOptionsScreen::parse_page(const std::string& name, Page& result) noexce
 
 std::string EawrOptionsScreen::settings_file() const { return ViewerPath::utf8(store_.file()); }
 
-bool EawrOptionsScreen::build(Options options) {
+void EawrOptionsScreen::begin_build(Options options) {
     options_ = std::move(options);
     resources_ = std::make_unique<Resources>();
+    build_stage_ = 0;
+    built_ = false;
+    failure_.clear();
+}
+
+EawrOptionsScreen::BuildProgress EawrOptionsScreen::advance_build() {
+    if (!resources_ || !failure_.empty()) return BuildProgress::failed;
+    if (built_) return BuildProgress::ready;
+    OptionsTiming timing("build-step");
     Resources& resources = *resources_;
+    switch (build_stage_) {
+    case 0: {
+        store_ = SettingsStore(options_.settings_file);
+        break;
+    }
+    case 1: {
+        resources.filesystem = options_.filesystem;
+        if (!resources.filesystem) {
+            if (options_.game_root.empty()) {
+                failure_ = "the options screen needs the game root or the content a menu mounted";
+                return BuildProgress::failed;
+            }
+            const std::filesystem::path expansion = options_.game_root / "corruption" / "Data";
+            const std::filesystem::path base = options_.game_root / "GameData" / "Data";
+            if (!std::filesystem::is_directory(expansion) || !std::filesystem::is_directory(base)) {
+                failure_ = "the game root needs corruption/Data and GameData/Data (FoC)";
+                return BuildProgress::failed;
+            }
+            std::vector<std::pair<std::string, std::filesystem::path>> roots;
+            if (!options_.mod_root.empty()) {
+                const std::filesystem::path data_folder = options_.mod_root / "Data";
+                roots.emplace_back("mod", std::filesystem::is_directory(data_folder) ? data_folder : options_.mod_root);
+            }
+            roots.emplace_back("expansion", expansion);
+            roots.emplace_back("base", base);
+            mount_revised_layer(roots);
+            std::vector<vfs::MountSpec> specs;
+            for (const auto& [id, root] : roots) {
+                auto manifest = vfs::resolve_manifest_mount(id, root);
+                if (!manifest) {
+                    failure_ = core::format_diagnostic(manifest.error());
+                    return BuildProgress::failed;
+                }
+                specs.push_back(std::move(manifest.value().mount));
+            }
+            auto mounted = vfs::Vfs::mount(specs);
+            if (!mounted) {
+                failure_ = core::format_diagnostic(mounted.error());
+                return BuildProgress::failed;
+            }
+            resources.filesystem = std::make_shared<const vfs::Vfs>(std::move(mounted.value()));
+        }
+        break;
+    }
+    case 2: {
+        auto catalog = data::load_dialog_catalog(*resources.filesystem);
+        if (!catalog) {
+            failure_ = core::format_diagnostic(catalog.error());
+            return BuildProgress::failed;
+        }
+        resources.catalog.emplace(std::move(catalog.value()));
+        break;
+    }
+    case 3: {
+        auto atlas = assets::load_mega_texture_atlas(*resources.filesystem,
+            "data/art/textures/" + resources.catalog->skin.texture_file + ".mtd");
+        if (!atlas) {
+            failure_ = core::format_diagnostic(atlas.error());
+            return BuildProgress::failed;
+        }
+        resources.atlas.emplace(std::move(atlas.value()));
+        resources.textures = std::make_unique<UiTextures>(*resources.atlas, *resources.filesystem);
+        if (!resources.textures->page_failure().empty()) {
+            failure_ = "atlas page: " + resources.textures->page_failure();
+            return BuildProgress::failed;
+        }
+        break;
+    }
+    case 4: {
+        if (auto text_database = data::load_language_text_database(*resources.filesystem, "ENGLISH")) {
+            resources.text_database.emplace(std::move(text_database.value()));
+            resources.text.emplace(*resources.text_database);
+        } else {
+            notes_.push_back("text database: " + core::format_diagnostic(text_database.error()) + "; captions show their keys");
+        }
+        break;
+    }
+    case 5: {
+        const std::filesystem::path cache = default_font_cache(options_.font_cache);
+        const vfs::MountSpec mount{.layer_id = "font-cache", .data_root = cache,
+                                   .loose_logical_prefix = std::string(model::font_cache_prefix), .active_archives = {}};
+        auto font_mount = vfs::Vfs::mount(std::span<const vfs::MountSpec>(&mount, 1));
+        if (font_mount) resources.font_filesystem.emplace(std::move(font_mount.value()));
+        const vfs::Vfs unmounted;
+        resources.fonts = std::make_unique<FontProvider>(model::load_font_cache(
+            resources.font_filesystem ? *resources.font_filesystem : unmounted, ViewerPath::utf8(cache)));
+        built_ = true;
+        return BuildProgress::ready;
+    }
+    default: return BuildProgress::failed;
+    }
+    ++build_stage_;
+    return BuildProgress::pending;
+}
+
+bool EawrOptionsScreen::build(Options options) {
+    OptionsTiming timing("build");
+    begin_build(std::move(options));
+    BuildProgress result;
+    do { result = advance_build(); } while (result == BuildProgress::pending);
+    return result == BuildProgress::ready;
+}
+
+void EawrOptionsScreen::set_game_actions(Options options) {
+    options_.save_names = std::move(options.save_names);
+    options_.save_game = std::move(options.save_game);
+    options_.load_directory = std::move(options.load_directory);
+    options_.load_game = std::move(options.load_game);
+}
+
+bool EawrOptionsScreen::prewarm_theme(Node& parent, const bool finish) {
+    OptionsTiming timing("theme");
+    if (!built_ || parent.get_viewport() == nullptr) return false;
+    Resources& resources = *resources_;
+    const Vector2 size = parent.get_viewport()->get_visible_rect().size;
+    // The theme follows the viewport's size (UI-L1): made once per size, not per page.
+    if (resources.theme_size != size) {
+        resources.theme_task.reset();
+        resources.theme.unref();
+    }
+    if (resources.theme.is_null() && !resources.theme_task) {
+        model::ThemeSources sources;
+        sources.catalog = &*resources.catalog;
+        sources.atlas = &resources.atlas->directory;
+        sources.standalone = model::vfs_standalone_textures(*resources.filesystem);
+        sources.fonts = &resources.fonts->cache();
+        const std::vector<std::string>& families = resources.fonts->system_families();
+        sources.system = [&families](const std::string_view face) {
+            return model::match_system_face(face, families).has_value();
+        };
+        resources.theme_model.emplace(model::build_theme_model(
+            sources, model::reference_space({static_cast<std::uint32_t>(size.x), static_cast<std::uint32_t>(size.y)},
+                                            options_.rules)));
+        resources.theme_size = size;
+        resources.theme_task = std::make_unique<ThemeBuildTask>(*resources.theme_model, *resources.textures, *resources.fonts);
+    }
+
+    if (resources.theme_task) {
+        bool done = false;
+        for (int step = 0; step < 8 && !done; ++step) done = resources.theme_task->step();
+        while (finish && !done) done = resources.theme_task->step();
+        if (!done) return false;
+        resources.theme = resources.theme_task->theme();
+        resources.theme_task.reset();
+    }
+    return resources.theme.is_valid();
+}
+
+void EawrOptionsScreen::reload_settings() {
     store_ = SettingsStore(options_.settings_file);
     // The settings: a missing file is the defaults, an unreadable one the defaults with notes.
     file_existed_ = store_.exists();
@@ -218,43 +398,7 @@ bool EawrOptionsScreen::build(Options options) {
     }
     draft_ = committed_;
 
-    resources.filesystem = options_.filesystem;
-    if (!resources.filesystem) {
-        if (options_.game_root.empty()) {
-            failure_ = "the options screen needs the game root or the content a menu mounted";
-            return false;
-        }
-        const std::filesystem::path expansion = options_.game_root / "corruption" / "Data";
-        const std::filesystem::path base = options_.game_root / "GameData" / "Data";
-        if (!std::filesystem::is_directory(expansion) || !std::filesystem::is_directory(base)) {
-            failure_ = "the game root needs corruption/Data and GameData/Data (FoC)";
-            return false;
-        }
-        std::vector<std::pair<std::string, std::filesystem::path>> roots;
-        if (!options_.mod_root.empty()) {
-            const std::filesystem::path data_folder = options_.mod_root / "Data";
-            roots.emplace_back("mod", std::filesystem::is_directory(data_folder) ? data_folder : options_.mod_root);
-        }
-        roots.emplace_back("expansion", expansion);
-        roots.emplace_back("base", base);
-        mount_revised_layer(roots);
-        std::vector<vfs::MountSpec> specs;
-        for (const auto& [id, root] : roots) {
-            auto manifest = vfs::resolve_manifest_mount(id, root);
-            if (!manifest) {
-                failure_ = core::format_diagnostic(manifest.error());
-                return false;
-            }
-            specs.push_back(std::move(manifest.value().mount));
-        }
-        auto mounted = vfs::Vfs::mount(specs);
-        if (!mounted) {
-            failure_ = core::format_diagnostic(mounted.error());
-            return false;
-        }
-        resources.filesystem = std::make_shared<const vfs::Vfs>(std::move(mounted.value()));
-    }
-    const vfs::Vfs& filesystem = *resources.filesystem;
+    const vfs::Vfs& filesystem = *resources_->filesystem;
     model::apply_selection_config(committed_, filesystem);
     {
         const auto layout = model::build_tray::load_tray_layout(filesystem);
@@ -270,44 +414,12 @@ bool EawrOptionsScreen::build(Options options) {
     }
     draft_ = committed_;
 
-    auto catalog = data::load_dialog_catalog(filesystem);
-    if (!catalog) {
-        failure_ = core::format_diagnostic(catalog.error());
-        return false;
-    }
-    resources.catalog.emplace(std::move(catalog.value()));
-    auto atlas = assets::load_mega_texture_atlas(filesystem,
-                                                 "data/art/textures/" + resources.catalog->skin.texture_file + ".mtd");
-    if (!atlas) {
-        failure_ = core::format_diagnostic(atlas.error());
-        return false;
-    }
-    resources.atlas.emplace(std::move(atlas.value()));
-    resources.textures = std::make_unique<UiTextures>(*resources.atlas, filesystem);
-    if (!resources.textures->page_failure().empty()) {
-        failure_ = "atlas page: " + resources.textures->page_failure();
-        return false;
-    }
-    if (auto text_database = data::load_language_text_database(filesystem, "ENGLISH")) {
-        resources.text_database.emplace(std::move(text_database.value()));
-        resources.text.emplace(*resources.text_database);
-    } else {
-        notes_.push_back("text database: " + core::format_diagnostic(text_database.error()) + "; captions show their keys");
-    }
-    const std::filesystem::path cache = default_font_cache(options_.font_cache);
-    const vfs::MountSpec mount{.layer_id = "font-cache", .data_root = cache,
-                               .loose_logical_prefix = std::string(model::font_cache_prefix), .active_archives = {}};
-    auto font_mount = vfs::Vfs::mount(std::span<const vfs::MountSpec>(&mount, 1));
-    if (font_mount) resources.font_filesystem.emplace(std::move(font_mount.value()));
-    const vfs::Vfs unmounted;
-    resources.fonts = std::make_unique<FontProvider>(model::load_font_cache(
-        resources.font_filesystem ? *resources.font_filesystem : unmounted, ViewerPath::utf8(cache)));
-    built_ = true;
-    return true;
 }
 
 void EawrOptionsScreen::show(Node& parent, const Page start) {
+    OptionsTiming timing("show");
     if (!built_ || shown_) return;
+    reload_settings();
     parent.add_child(this);
     set_visible(true);
     shown_ = true;
@@ -406,23 +518,7 @@ void EawrOptionsScreen::rebuild_page() {
     built_width_ = size.x;
     built_height_ = size.y;
 
-    // The theme follows the viewport's size (UI-L1): made once per size, not per page.
-    if (resources.theme.is_null() || resources.theme_size != size) {
-        model::ThemeSources sources;
-        sources.catalog = &*resources.catalog;
-        sources.atlas = &resources.atlas->directory;
-        sources.standalone = model::vfs_standalone_textures(*resources.filesystem);
-        sources.fonts = &resources.fonts->cache();
-        const std::vector<std::string>& families = resources.fonts->system_families();
-        sources.system = [&families](const std::string_view face) {
-            return model::match_system_face(face, families).has_value();
-        };
-        resources.theme_model.emplace(model::build_theme_model(
-            sources, model::reference_space({static_cast<std::uint32_t>(size.x), static_cast<std::uint32_t>(size.y)},
-                                            options_.rules)));
-        resources.theme = build_theme(*resources.theme_model, *resources.textures, *resources.fonts);
-        resources.theme_size = size;
-    }
+    static_cast<void>(prewarm_theme(*this));
 
     auto* root = memnew(EawrUiModalLayer);
     root->set_name("EawrOptionsScreen");

@@ -190,65 +190,82 @@ Ref<Texture2D> UiTextures::texture(const model::ThemeTexture& slot, const double
     return texture;
 }
 
+ThemeBuildTask::ThemeBuildTask(const model::ThemeModel& model, UiTextures& textures, FontProvider& fonts)
+    : model_(model), textures_(textures), fonts_(fonts) {
+    theme_.instantiate();
+}
+
+void ThemeBuildTask::add_texture(const model::ThemeStyle& style, const model::ThemeTexture& slot) {
+    const StringName type(text(style.name));
+    Ref<Texture2D> texture = textures_.texture(slot, model_.scale_x, model_.scale_y);
+    if (texture.is_null()) {
+        texture = textures_.empty();
+        ++counts_.empty_icons;
+    }
+    theme_->set_icon(StringName(text(slot.slot)), type, texture);
+    ++counts_.icons;
+}
+
+void ThemeBuildTask::add_font(const model::ThemeStyle& style, const model::ThemeFont& font) {
+    const StringName type(text(style.name));
+    const float width_scale = font.pixels.glyph_height > 0 && font.pixels.glyph_height != font.pixels.width_em
+        ? static_cast<float>(font.pixels.width_em) / static_cast<float>(font.pixels.glyph_height) : 1.0F;
+    std::ostringstream key;
+    key << font.resolved.face << '|' << static_cast<int>(font.resolved.source) << '|'
+        << font.character_padding << '|' << std::lround(width_scale * 1000.0F);
+    Ref<FontVariation>& variation = variations_[key.str()];
+    if (variation.is_null()) {
+        variation.instantiate();
+        variation->set_base_font(fonts_.font(font.resolved));
+        if (font.character_padding != 0) variation->set_spacing(TextServer::SPACING_GLYPH, font.character_padding);
+        if (width_scale != 1.0F) variation->set_variation_transform(Transform2D(width_scale, 0, 0, 1, 0, 0));
+    }
+    const String role = text(data::ui::to_string(font.role));
+    theme_->set_font(StringName(role), type, variation);
+    theme_->set_font_size(StringName(role), type, font.pixels.glyph_height);
+    theme_->set_color(StringName(role + String("_top")), type, colour(font.top_color));
+    theme_->set_color(StringName(role + String("_bottom")), type, colour(font.bottom_color));
+    theme_->set_constant(StringName(role + String("_emboss")), type, font.emboss ? 1 : 0);
+    theme_->set_constant(StringName(role + String("_outline")), type, font.outline ? 1 : 0);
+    theme_->set_constant(StringName(role + String("_cell_ascent")), type, font.cell_ascent);
+    theme_->set_constant(StringName(role + String("_cell_descent")), type, font.cell_descent);
+    ++counts_.fonts;
+}
+
+bool ThemeBuildTask::step() {
+    if (next_ > model_.variations.size()) return true;
+    const auto& style = next_ == 0 ? model_.defaults : model_.variations[next_ - 1];
+    if (!style_started_) {
+        if (!style.base.empty()) theme_->set_type_variation(StringName(text(style.name)), StringName(text(style.base)));
+        ++counts_.styles;
+        style_started_ = true;
+    }
+    if (texture_index_ < style.textures.size()) {
+        add_texture(style, style.textures[texture_index_++]);
+        return false;
+    }
+    if (font_index_ < style.fonts.size()) {
+        add_font(style, style.fonts[font_index_++]);
+        return false;
+    }
+    if (next_ == 0) {
+        theme_->set_type_variation(StringName(text(model::theme_type)), StringName(text(kit_base_type)));
+        theme_->set_constant("scale_permille", text(model::theme_type),
+                             static_cast<int32_t>(std::lround(std::min(model_.scale_x, model_.scale_y) * 1000.0)));
+    }
+    ++next_;
+    texture_index_ = font_index_ = 0;
+    style_started_ = false;
+    counts_.font_variations = variations_.size();
+    return next_ > model_.variations.size();
+}
+
 Ref<Theme> build_theme(const model::ThemeModel& theme_model, UiTextures& textures, FontProvider& fonts,
                        ThemeBuildSummary* summary) {
-    Ref<Theme> theme;
-    theme.instantiate();
-    ThemeBuildSummary counts;
-    std::map<std::string, Ref<FontVariation>> variations;
-    const auto add_style = [&](const model::ThemeStyle& style) {
-        const StringName type(text(style.name));
-        if (!style.base.empty()) theme->set_type_variation(type, StringName(text(style.base)));
-        ++counts.styles;
-        for (const model::ThemeTexture& slot : style.textures) {
-            Ref<Texture2D> texture = textures.texture(slot, theme_model.scale_x, theme_model.scale_y);
-            if (texture.is_null()) {
-                texture = textures.empty();
-                ++counts.empty_icons;
-            }
-            theme->set_icon(StringName(text(slot.slot)), type, texture);
-            ++counts.icons;
-        }
-        for (const model::ThemeFont& font : style.fonts) {
-            const float width_scale = font.pixels.glyph_height > 0 && font.pixels.glyph_height != font.pixels.width_em
-                ? static_cast<float>(font.pixels.width_em) / static_cast<float>(font.pixels.glyph_height)
-                : 1.0F;
-            std::ostringstream key;
-            key << font.resolved.face << '|' << static_cast<int>(font.resolved.source) << '|'
-                << font.character_padding << '|' << std::lround(width_scale * 1000.0F);
-            Ref<FontVariation>& variation = variations[key.str()];
-            if (variation.is_null()) {
-                variation.instantiate();
-                variation->set_base_font(fonts.font(font.resolved));
-                if (font.character_padding != 0) {
-                    variation->set_spacing(TextServer::SPACING_GLYPH, font.character_padding);
-                }
-                // UI-F2: glyphs as high as the stretched size, as wide as the unstretched face.
-                if (width_scale != 1.0F) variation->set_variation_transform(Transform2D(width_scale, 0, 0, 1, 0, 0));
-            }
-            const String role = text(data::ui::to_string(font.role));
-            theme->set_font(StringName(role), type, variation);
-            theme->set_font_size(StringName(role), type, font.pixels.glyph_height);
-            theme->set_color(StringName(role + String("_top")), type, colour(font.top_color));
-            theme->set_color(StringName(role + String("_bottom")), type, colour(font.bottom_color));
-            theme->set_constant(StringName(role + String("_emboss")), type, font.emboss ? 1 : 0);
-            theme->set_constant(StringName(role + String("_outline")), type, font.outline ? 1 : 0);
-            theme->set_constant(StringName(role + String("_cell_ascent")), type, font.cell_ascent);
-            theme->set_constant(StringName(role + String("_cell_descent")), type, font.cell_descent);
-            ++counts.fonts;
-        }
-    };
-    add_style(theme_model.defaults);
-    // Godot follows a Control's theme_type_variation only when a theme
-    // declares it as a variation, so the default style is one too, of an
-    // empty base type.
-    theme->set_type_variation(StringName(text(model::theme_type)), StringName(text(kit_base_type)));
-    theme->set_constant("scale_permille", text(model::theme_type),
-                        static_cast<int32_t>(std::lround(std::min(theme_model.scale_x, theme_model.scale_y) * 1000.0)));
-    for (const model::ThemeStyle& style : theme_model.variations) add_style(style);
-    counts.font_variations = variations.size();
-    if (summary != nullptr) *summary = counts;
-    return theme;
+    ThemeBuildTask task(theme_model, textures, fonts);
+    while (!task.step()) {}
+    if (summary != nullptr) *summary = task.summary();
+    return task.theme();
 }
 
 } // namespace eawr::presentation::godot_backend
