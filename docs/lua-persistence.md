@@ -213,6 +213,15 @@ scheduler queues and counters, random draw positions and next IDs. Existing repl
 formats and their v1/v2 goldens are unchanged; the tactical tick hash does not include
 scripts until the tactical AI host runs scripts in the tick.
 
+The galactic script host (`ScriptedGalacticSession`) hashes its story and object
+schedulers every tick with `sync_hash()` instead: SHA-256 over the same scheduler
+metadata plus a cached 128-bit fingerprint per Lua graph, so an unchanged graph is not
+re-encoded or re-hashed. The composed digest uses `eawr-script-galactic-state-v3`
+(`eawr-script-galactic-sync-state-v3` with a synchronized AI digest). Saves still hold
+the full archive. A save written before this identity carries the full-archive digest
+(`eawr-script-galactic-state-v1`); its restore accepts that digest and reports it until
+the first step, then uses the current one.
+
 `authoritative_state_sha256(tick, world, script)` combines one completed tick's world
 and script state hashes under `eawr-authoritative-state-v1` (identity, u64 tick, both hex
 strings, each length-prefixed): the per-tick hash a scripted session exchanges ([multiplayer

@@ -409,6 +409,7 @@ void proximity_contracts();
 void reveal_all_contracts();
 void letter_box_contracts();
 void story_presentation_contracts();
+void story_lock_contracts();
 void battle_story_contracts();
 void battle_planet_family_contracts();
 void faction_controller_inventory();

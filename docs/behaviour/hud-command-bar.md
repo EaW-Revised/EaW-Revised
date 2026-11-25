@@ -212,6 +212,12 @@
   campaign's retained child battle (its feed does not carry the requests: the stock tactical plots are not run there either, HCB-72), the
   tactical plot scripts (the story engine does not run them in a battle), and `Letter_Box_On` / `Letter_Box_Off` (no stock or BFC caller;
   the scripts that name them fault as an unknown function). **Evidence of the viewer part:** `test_tactical_script_letterbox` (GPU case: the calls are injected at a tick of the script service with `--eawr-live-letterbox <tick>:<in|out>:<seconds>`, through the same request path a script's call takes after the host; it checks the bands, the GUI hidden and restored, a slow slide, the overlap with the battle camera and an unchanged world hash). Not covered by a GPU case: an installed unit's object script making the call in a running skirmish (the contract test runs the script host directly).
+- **HCB-77:** Tactical Lua `Lock_Controls(number)` owns a local camera-effects input lock, separate from HCB-69's story reward.
+  A positive number locks; zero or a negative number unlocks; a non-number is diagnosed and unlocks. While locked, mouse
+  button-downs and the wheel are consumed, as are key-downs other than Escape; an open dialog takes its own input. User camera
+  updates, including edge scrolling and rotation, stop until unlock. The original skips the game UI's left-button release without
+  clearing an existing drag; what that drag does after unlock remains unverified. Evidence: debug build, tactical Lua lock walk
+  2026-11-23. This state is presentation-only and is neither saved nor replayed.
 - **HCB-73 (legacy EAWR-6759):** Galactic pause (H102). Source: a rig capture of the original (galactic conquest, 1280 by 720), not the
   debug build. **Button:** the pause button of the clock panel is a toggle (`Toggle` in the command bar data); it is drawn lit,
   with its selected art, for as long as the game is paused and dim while it runs (two captures 33 s apart both lit, one running

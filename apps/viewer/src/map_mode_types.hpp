@@ -113,6 +113,7 @@ struct MapMode::State final {
     // #82: the local player's selection and orders on the live session; declared after the
     // session, the population and the space view, so it goes first.
     std::unique_ptr<BattleInput> battle;
+    bool story_controls_locked{};
     // #80: the live battle's shots, hits and explosions; released with the population, declared
     // after the session it reads.
     std::unique_ptr<BattleEffects> battle_effects;
@@ -245,6 +246,7 @@ struct MapMode::State final {
     godot::Node3D* menu_host{};
     std::function<void()> menu_handler;
     bool menu_open{};
+    std::uint32_t game_menu_opens{};
     std::uint64_t shown_save_failures{};
     std::optional<std::chrono::steady_clock::time_point> save_notice_until{};
     bool menu_paused{}; // the menu paused the battle and resumes it when it closes

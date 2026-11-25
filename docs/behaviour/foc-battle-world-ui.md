@@ -59,9 +59,14 @@ Nothing here reaches the simulation.
   bar is about 100 reference pixels wide (68 x 1.5). A close camera therefore draws large bars:
   a craft's small bar is 51 reference pixels at distance 1000 and six times its width at 250
   (eye check judged at FoC's default distance).
-  Project safeguard: the displayed scale is capped so the authored bar width occupies at
-  most one quarter of the viewport width; height scales with width. This limit is a presentation
-  choice, not a verified retail maximum, and the authored scale and minimum still apply below it.
+  Deliberate deviation (owner decision) (legacy EAWR-8313): the displayed scale is capped so the authored bar width occupies at
+  most 20 percent of the viewport width; height scales with width. The original has no cap; the cap is a presentation
+  choice, and the authored scale and minimum still apply below it.
+  Retail capture (rig, retail executable, Corellian corvette hovered, closest zoom, 1280 x 720, fog off): the original
+  applies no cap: the medium bar is about 445 px wide (35 % of the screen), which matches the formula at a
+  camera distance near 214. Ours is capped at 20 percent: at the closest zoom the original's 35 percent would
+  cover the ship; at medium and far zoom the width stays below the cap, so ours equals the original there (a
+  medium-distance retail still was not obtained: at four notches out the corvette is a few pixels wide).
 - WU-14. A bar shows level ceil(10 x fraction) of 0..10; the filled part is fraction x width from
   the left over the black back (`i_bar_control_wide*`) with a black outline of one pixel.
 - WU-15. The health bar's colour is its level's texture: black 0, red 1 to 3, orange 4 and 5, yellow
@@ -90,7 +95,9 @@ Nothing here reaches the simulation.
   pixels before the bars are placed there (WSU-54). The health bar shows the unit's display health
   (WSU-52): the hull percent, or for a type that dies with its destroyable hardpoints (HD-21) the
   lesser of that and the combined destroyable-hardpoint percent. Project policy: the bounds are the
-  remake's pick box.
+  remake's pick box over the hull's own pieces; the shield bubble, cloak and gate meshes are left out, because with
+  them the shield bar floated about 120 px above the ship (owner shot, 1334 px wide) where the retail capture
+  puts it about 12 px above the silhouette top (1280 x 720). Picking keeps the full box.
 
 ## Authored model bounds
 

@@ -135,6 +135,24 @@ void test_lifecycle_clears_stale_input() {
         return !(bridge.frame() == before);
     };
 
+    // HCB-77: a drag begun before the story lock cannot move the camera while locked.
+    const auto locked_drag = [&](MapCameraBridge& camera) {
+        expect(handled(camera, motion(640.0F, 360.0F, 0.0F))
+            && handled(camera, middle(true)) && handled(camera, motion(700.0F, 360.0F, 60.0F)),
+            "drag starts before story lock");
+        camera.set_user_locked(true);
+        const auto before = camera.frame();
+        expect(handled(camera, motion(760.0F, 360.0F, 60.0F))
+            && handled(camera, middle(false)) && camera.step(0.05F).has_value()
+            && camera.frame() == before, "story lock cancels pending drag and ignores held motion");
+        expect(!camera.pointer_hold(), "story lock ends pointer hold");
+        camera.set_user_locked(false);
+    };
+    locked_drag(bridge);
+    Land land;
+    activate_land(land, "");
+    if (land.ok) locked_drag(land.bridge);
+
     // Focus loss; regain needs a fresh press.
     expect(handled(bridge, key("D", true)) && moved(), "held pan moves before focus loss");
     bridge.set_focus(false);

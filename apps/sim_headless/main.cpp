@@ -4,6 +4,7 @@
 #include "eawr/platform/degradation_summary.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "cli_galactic.hpp"
+#include "cli_console.hpp"
 #include "cli_internal.hpp"
 #include "eawr/platform/model_facts.hpp"
 
@@ -131,6 +132,7 @@ int main(const int raw_argc, const char* const raw_argv[]) {
 namespace {
 
 int run(const int argc, const char* const argv[]) {
+    if (argc > 1 && std::string_view(argv[1]) == "console") return run_console(argc, argv);
     if (argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--help")) {
         print_help(std::cout);
         print_galactic_help(std::cout);

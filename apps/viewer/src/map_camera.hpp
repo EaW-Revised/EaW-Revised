@@ -195,6 +195,13 @@ public:
         adapter_.set_focus(focused);
         if (!focused && controller_) controller_->stop_pan();
     }
+    void set_user_locked(bool locked) noexcept {
+        if (locked && !user_locked_) {
+            adapter_.cancel_user_input();
+            if (controller_) controller_->stop_pan();
+        }
+        user_locked_ = locked;
+    }
     void sample_pointer(float x, float y) noexcept { adapter_.sample_pointer(x, y); }
     void clear_pointer_sample() noexcept { adapter_.clear_pointer_sample(); }
     // #5990: where a held middle-button drag keeps the pointer; empty otherwise.
@@ -283,6 +290,7 @@ public:
 
 private:
     camera_input::Adapter adapter_;
+    bool user_locked_{};
     camera_input::Context context_;
     std::vector<MapCameraTrace> trace_;
     std::uint64_t trace_dropped_{};

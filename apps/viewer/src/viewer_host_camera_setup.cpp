@@ -190,6 +190,15 @@ void ViewerHost::on_skirmish_start() {
 
 void ViewerHost::_input(const Ref<InputEvent>& event) {
     sync_modal_holds();
+    if (map_mode_ && map_mode_->story_controls_locked() && !input_focus(*get_viewport()).modal_open) {
+        const auto* mouse = Object::cast_to<InputEventMouseButton>(event.ptr());
+        const auto* key = Object::cast_to<InputEventKey>(event.ptr());
+        if ((mouse && (mouse->is_pressed() || mouse->get_button_index() == MOUSE_BUTTON_LEFT))
+            || (key && key->is_pressed() && key->get_keycode() != KEY_ESCAPE)) {
+            get_viewport()->set_input_as_handled();
+            return;
+        }
+    }
     if (front_end_ && !map_mode_) front_end_->input(event);
     if (map_mode_) map_mode_->observe_pointer(event, input_focus(*get_viewport()));
     if (galactic_mode_) galactic_mode_->observe_pointer(event);

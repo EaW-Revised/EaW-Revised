@@ -1,0 +1,5 @@
+{"input":"help","output_keys":["TEXT_EAWR_CONSOLE_HELP"],"output":"help list clear history fps version cheats","envelope":"","tick":null,"state_hash":null,"requested_ticks":3}
+{"input":"ls commands h","output_keys":["TEXT_EAWR_CONSOLE_LIST"],"output":"help history","envelope":"","tick":null,"state_hash":null,"requested_ticks":3}
+{"input":"history 2","output_keys":["TEXT_EAWR_CONSOLE_HISTORY"],"output":"help\nls commands h","envelope":"","tick":null,"state_hash":null,"requested_ticks":3}
+{"input":"unknown","output_keys":["TEXT_EAWR_CONSOLE_ERROR_UNKNOWN"],"output":"","envelope":"","tick":null,"state_hash":null,"requested_ticks":3}
+{"input":"fps","output_keys":["TEXT_EAWR_CONSOLE_FPS"],"output":"","envelope":"","tick":null,"state_hash":null,"requested_ticks":3}

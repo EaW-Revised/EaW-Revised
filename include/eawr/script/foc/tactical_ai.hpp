@@ -87,6 +87,7 @@ inline constexpr std::string_view verb_take_damage = "foc.take_damage"; // issue
 // legacy #6634 (HCB-75): Letter_Box_In / Letter_Box_Out from a tactical script, a presentation verb: "in" or "out", then the seconds as
 // text. It never reaches the world (ScriptedTacticalSession::register_presentation_verb); the viewer draws the battle bands.
 inline constexpr std::string_view verb_letter_box = authoritative::verb_tactical_letter_box;
+inline constexpr std::string_view verb_lock_controls = "foc.lock_controls";
 inline constexpr std::string_view verb_campaign_retreat = "foc.campaign_retreat"; // issuer, owning campaign translates
 
 // Event producer of the engine side (EventKey::producer).

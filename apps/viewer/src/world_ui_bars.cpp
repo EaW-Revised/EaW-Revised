@@ -63,8 +63,10 @@ struct Bounds final {
     Vec3 high{-1.0e30F, -1.0e30F, -1.0e30F};
     const auto& m = box.model_to_world;
     for (int corner = 0; corner < 8; ++corner) {
-        const Vec3 local{(corner & 1) ? box.high[0] : box.low[0], (corner & 2) ? box.high[1] : box.low[1],
-                         (corner & 4) ? box.high[2] : box.low[2]};
+        // #8313: the hull's own bounds when known; the pick box also holds the (larger) shield bubble.
+        const auto& lo = box.has_hull ? box.hull_low : box.low;
+        const auto& hi = box.has_hull ? box.hull_high : box.high;
+        const Vec3 local{(corner & 1) ? hi[0] : lo[0], (corner & 2) ? hi[1] : lo[1], (corner & 4) ? hi[2] : lo[2]};
         for (std::size_t row = 0; row < 3; ++row) {
             const float world = m[row * 4] * local[0] + m[row * 4 + 1] * local[1] + m[row * 4 + 2] * local[2] + m[row * 4 + 3];
             low[row] = std::min(low[row], world);

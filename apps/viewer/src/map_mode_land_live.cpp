@@ -219,7 +219,7 @@ std::optional<int> MapMode::State::process_land_live(double delta, const core::t
         if (data) land_overlay->frame(data.get(), *live_session->land_terrain());
     }
     LandBattleCamera view(camera, map_camera.get());
-    battle->frame(*live_session, *land_population, view);
+    battle->frame(*live_session, *land_population, view, story_controls_locked);
     // #7190: the drag of a pool entry asks the simulation about the point under the cursor (the cursor shows its verdict) and
     // draws the ground the company may land on. Read-only; the drop itself is a Reinforce command.
     live_session->placement_preview(battle->placing(), battle->placement_point());

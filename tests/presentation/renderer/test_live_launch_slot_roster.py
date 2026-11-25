@@ -996,7 +996,7 @@ struct PopulationStorage {
     std::vector<bool> live_shown_, live_defend_, live_stealth_, live_blast_charging_, live_blast_charged_,
         live_retired_, live_death_clone_, backdrop_ships_;
     std::vector<int> live_alternates_, live_alternate_counts_;
-    std::vector<std::optional<int>> live_bounds_, live_transforms_;
+    std::vector<std::optional<int>> live_bounds_, live_hull_bounds_, live_transforms_;
     unsigned shadow_receiving_ = 3, shadow_variant_failures_ = 4;
     std::optional<std::uint32_t> pending_unit_sample_, last_unit_sample_, animation_sample_, effect_sample_;
     void schedule_arrival_sample() noexcept;

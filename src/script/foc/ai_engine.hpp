@@ -1305,6 +1305,7 @@ private:
     [[nodiscard]] bool proposable(const PlayerAi& player, const GoalFunctionEntry& function) const;
     [[nodiscard]] bool applies(const PlayerAi& player, const GoalType& goal, const Target* target) const;
     [[nodiscard]] bool like(const PlayerAi& player, const Goal& a, const Goal& b) const;
+    [[nodiscard]] bool galactic_culled(const PlayerAi& player, std::size_t function_index, const Target* target) const;
     [[nodiscard]] bool plan_goal(PlayerAi& player, Goal& goal);
     [[nodiscard]] bool select_units(PlayerAi& player, const Goal& goal, PotentialPlan& potential);
     [[nodiscard]] bool select_galactic_units(PlayerAi&, const Goal&, PotentialPlan&);

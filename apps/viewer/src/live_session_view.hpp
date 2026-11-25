@@ -126,6 +126,9 @@ public:
     [[nodiscard]] std::vector<platform::LiveLetterboxRequest> take_letterbox_requests() {
         return session_ ? session_->take_letterbox_requests() : std::vector<platform::LiveLetterboxRequest>{};
     }
+    [[nodiscard]] std::vector<platform::LiveStoryPresentationRequest> take_story_presentation_requests() {
+        return session_ ? session_->take_story_presentation_requests() : std::vector<platform::LiveStoryPresentationRequest>{};
+    }
     [[nodiscard]] std::vector<platform::LiveSubObjectHideRequest> take_sub_object_hide_requests() {
         return session_ ? session_->take_sub_object_hide_requests() : std::vector<platform::LiveSubObjectHideRequest>{};
     }

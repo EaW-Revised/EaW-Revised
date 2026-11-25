@@ -685,6 +685,58 @@ void story_presentation_contracts() {
     }
 }
 
+void story_lock_contracts() {
+    namespace t = eawr::sim::tactical;
+    namespace m = eawr::sim::math;
+    const auto fixed = [](std::int64_t value) { return m::Fixed::from_integer(value).value(); };
+    t::TacticalSetup setup;
+    setup.players = {{1, 1, 100, 1}, {2, 2, 200, 1}};
+    setup.units = {{10, 100, 1, {fixed(50), fixed(-50), {}}}, {20, 200, 2, {fixed(450), fixed(-450), {}}}};
+    auto world = t::TacticalSession::create(setup, {}, {}, {}, t::FogRules{{}, {}, fixed(100), 6, 6});
+    if (!world) { expect(false, "story presentation world starts"); return; }
+    auto host = ai::make_tactical_host();
+    host->world = &world.value();
+    host->view = foc::detail::build_view(world.value(), *world.value().snapshot());
+    auth::ModuleManifest manifest;
+    expect(manifest.add("STORY.LUA", "function Scene() Lock_Controls(1) Lock_Controls(0) Lock_Controls(-1) Lock_Controls(1e-12) Lock_Controls(1) Lock_Controls('bad') end").has_value(), "story presentation module loads");
+    auth::SessionConfig config; config.tick_duration = {1, 30};
+    auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+    if (!scripts) { expect(false, "story presentation scheduler starts"); return; }
+    std::vector<eawr::core::Diagnostic> errors;
+    foc::tactical_ai_detail::register_globals(scripts.value(), host, errors);
+    foc::tactical_ai_detail::register_methods(scripts.value(), host, errors);
+    foc::tactical_ai_detail::register_tactical_presentation(scripts.value(), host, errors);
+    expect(errors.empty() && scripts.value().create_instance(1, "STORY.LUA").has_value(), "story bindings register");
+    auth::ScriptEvent event; event.key = {2, auth::first_simulation_producer, 1, 2};
+    event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Scene";
+    expect(scripts.value().submit_event(std::move(event)).has_value(), "story scene queues");
+    auto linked = auth::ScriptedTacticalSession::create(std::move(world).value(), std::move(scripts).value());
+    if (!linked) { expect(false, "story presentation session links"); return; }
+    auto& session = linked.value();
+    expect(session.register_presentation_verb(foc::verb_lock_controls).has_value(), "lock is presentation");
+    std::vector<auth::ScriptCommand> requests;
+    std::size_t diagnostics = 0;
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    for (int tick = 0; tick < 6; ++tick) {
+        host->world = &session.world();
+        host->view = foc::detail::build_view(session.world(), *session.world().snapshot());
+        auto step = session.step(executor);
+        if (!step) { expect(false, "story presentation session steps"); return; }
+        diagnostics += step.value().scripts.diagnostics.size();
+        requests.insert(requests.end(), step.value().presentation.begin(), step.value().presentation.end());
+    }
+    expect(requests.size() == 6, "six story presentation requests");
+    if (requests.size() == 6) {
+        expect(requests[0].verb == foc::verb_lock_controls && std::get<bool>(requests[0].arguments[0].data), "lock on request");
+        expect(requests[1].verb == foc::verb_lock_controls && !std::get<bool>(requests[1].arguments[0].data), "lock off request");
+        expect(!std::get<bool>(requests[2].arguments[0].data), "negative flag unlocks");
+        expect(std::get<bool>(requests[3].arguments[0].data), "small positive flag locks");
+        expect(std::get<bool>(requests[4].arguments[0].data) && !std::get<bool>(requests[5].arguments[0].data), "invalid flag unlocks");
+    }
+    expect(diagnostics == 1, "invalid flag is diagnosed");
+    expect(session.record().commands.empty(), "story presentation never enters replay input");
+}
+
 void faction_controller_inventory() {
     // WSS-35 / GS-02: assigning a faction's controller is insufficient unless
     // its definition and space function set also reach the goal engine.

@@ -68,7 +68,7 @@ public:
     // After the view drew a frame: refreshes the pickable units, drops destroyed ones from the
     // selection, replays due --eawr-live-input gestures through the engine's input queue and
     // redraws the overlay.
-    void frame(LiveSessionView& live, const BattleScene& population, BattleCamera& space);
+    void frame(LiveSessionView& live, const BattleScene& population, BattleCamera& space, bool controls_locked = false);
     // CU-10: after the live preview evaluated its placement predicate.
     void cursor_frame(const LiveSessionView& live, const BattleCamera& space, double delta, bool capture);
     // Records pointer position ahead of GUI ownership without issuing a world action.

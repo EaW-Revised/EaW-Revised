@@ -372,7 +372,8 @@ void layer_ids_map_to_mod_ids() {
 void objects_are_counted_exactly() {
     deg::reset_for_tests();
     for (int i = 0; i < 500; ++i) deg::record("EAWR-BIG-0001", "m", "object " + std::to_string(i), "d");
-    const auto* big = find_class(deg::snapshot(), "EAWR-BIG-0001", "m");
+    const auto snapshot = deg::snapshot();
+    const auto* big = find_class(snapshot, "EAWR-BIG-0001", "m");
     check(big && big->objects == 500 && big->occurrences == 500, "500 distinct objects are counted exactly");
 }
 

@@ -1462,6 +1462,80 @@ void capture_structure_cleanup() {
         if (reference.empty()) reference = hashes; else expect(hashes == reference, "special removal is equal on 1/2/4/8 workers");
     }
 }
+// WAR-43: an auto-resolve space return that destroys the losing planet's base clears the planet's space special structures
+// through the ordinary special removal; ground specials and ordinary units stay. A real battle return (WGM-57) clears only
+// what died in the fight, so the same station loss leaves every structure.
+void space_return_special_structures() {
+    using eawr::testing::result_diagnostic::take;
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (const bool auto_resolve : {true, false}) {
+            auto s = setup(); s.planets[1].owner = 2;
+            s.control->planets[1].ground_base = {2, 1}; s.control->planets[1].starbase = {2, 2};
+            s.player_economy.emplace(); s.fiscal.emplace(); s.fiscal->credit_cap_per_planet = f(1000);
+            for (const auto& player : s.players) {
+                s.player_economy->players.push_back({player.player_id, f(100), f(1000), 0, 5});
+                s.fiscal->players.push_back({player.player_id, true, f(1)});
+            }
+            for (const auto& planet : s.planets) s.fiscal->planets.push_back({planet.id, f(1)});
+            enable_production(s);
+            s.production->planets[1].objects = {{40, 3, 2, f(20), gc::ProductionDomain::ground, gc::ProductionKind::structure},
+                {41, 3, 2, f(30), gc::ProductionDomain::space, gc::ProductionKind::structure},
+                {42, 3, 2, f(30), gc::ProductionDomain::space, gc::ProductionKind::structure},
+                {43, 3, 2, f(30), gc::ProductionDomain::space, gc::ProductionKind::structure},
+                {44, 1, 2, f(10), gc::ProductionDomain::ground, gc::ProductionKind::unit}};
+            s.census = gc::PopulationCensus{{{1, f(1), 0}, {2, {}, 0}, {3, f(1), 0}},
+                {{1, 100, false, {}}, {2, 100, false, {}}, {3, 100, false, {}}},
+                {{20, 1, 1, 1, 10, false, false}, {21, 2, 1, 1, 10, false, false}, {22, 1, 2, 3, 11, false, false},
+                 {40, 3, 2, 2, 2, false, false}, {41, 3, 2, 2, 2, false, false}, {42, 3, 2, 2, 2, false, false},
+                 {43, 3, 2, 2, 2, false, false}, {44, 1, 2, 2, 2, false, false}}};
+            qualify_census_roles(*s.census);
+            auto world = take(gc::GalacticSession::create(s));
+            std::vector<eawr::sim::EntityId> lost;
+            world.set_native_actor_changes_handler([&](const auto& snapshot, const auto changes) {
+                for (const auto& change : changes) if (change.kind == gc::GalacticSession::NativeActorChange::Kind::lost) {
+                    lost.push_back(change.actor);
+                    expect(snapshot.production()->planets[1].objects.size() == 2,
+                        "WGM-188 loss listeners receive the committed special actor removal");
+                }
+                return eawr::core::Result<void>::success();
+            });
+            const auto count = [&](gc::ProductionDomain domain, gc::ProductionKind kind) {
+                std::size_t n{};
+                for (const auto& object : world.snapshot()->production()->planets[1].objects)
+                    if (object.kind == kind && object.domain == domain) ++n;
+                return n;
+            };
+            expect(count(gc::ProductionDomain::space, gc::ProductionKind::structure) == 3, "fixture starts with three space structures");
+            for (int round = 1; round <= 2; ++round) {
+                gc::ControlBattleReturn returned; returned.planet = 2; returned.invader = 1; returned.defender = 2;
+                returned.winner = 1; returned.land = false; returned.station_level = 0;
+                returned.clear_space_structures = auto_resolve;
+                expect(bool(world.apply_control_battle(returned)), "space return applies");
+                expect(world.snapshot()->control()->planets[1].starbase.level == 0, "the destroyed station is gone in both return paths");
+                expect(count(gc::ProductionDomain::space, gc::ProductionKind::structure) == (auto_resolve ? 0U : 3U),
+                    auto_resolve ? "WAR-43 the lost auto-resolve clears every space structure of the planet (round " + std::to_string(round) + ")"
+                                 : "WGM-57 a real battle return leaves structures that did not die in the fight (round " + std::to_string(round) + ")");
+                expect(count(gc::ProductionDomain::ground, gc::ProductionKind::structure) == 1, "a space return leaves ground structures");
+                expect(count(gc::ProductionDomain::ground, gc::ProductionKind::unit) == 1, "a space return leaves ordinary units");
+            }
+            expect(lost == (auto_resolve ? std::vector<eawr::sim::EntityId>{41, 42, 43} : std::vector<eawr::sim::EntityId>{}),
+                "only the cleared structures are reported lost, once");
+            // The flag never clears a planet whose station survived.
+            if (auto_resolve) {
+                auto kept = take(gc::GalacticSession::create(s));
+                gc::ControlBattleReturn returned; returned.planet = 2; returned.invader = 1; returned.defender = 2;
+                returned.winner = 2; returned.station_level = 1; returned.clear_space_structures = true;
+                expect(bool(kept.apply_control_battle(returned)) && kept.snapshot()->control()->planets[1].starbase.level == 1
+                    && kept.snapshot()->production()->planets[1].objects.size() == 5, "a surviving station keeps its structures");
+            }
+            hashes.push_back(take(world.step(executor)).state_hash.get());
+        }
+        if (reference.empty()) reference = hashes; else expect(hashes == reference, "space structure clearing is equal on 1/2/4/8 workers");
+    }
+}
 // WGM-70 / GFS-07: political categories follow the real production roster on
 // the next admitted control service, including after restoring saved work.
 void live_special_lifecycle() {
@@ -4834,6 +4908,9 @@ int main(int argc, const char* const argv[]) {
         if (argc == 2 && std::string_view(argv[1]) == "--host-work-bench") { host_work_bench(); return galactic_test::failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); return galactic_test::failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--protection") { protection_lifecycle(); adapter(); transitions(); return galactic_test::failures == 0 ? 0 : 1; }
+        if (argc == 2 && std::string_view(argv[1]) == "--space-return-specials") {
+            space_return_special_structures(); return galactic_test::failures == 0 ? 0 : 1;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--capture-build-list") {
             capture_build_and_ground_views(); return galactic_test::failures == 0 ? 0 : 1;
         }

@@ -133,6 +133,16 @@ std::optional<bool> GalacticWorld::goal_reachable(tactical::PlayerId owner,
     }
     return {}; // named production-site producer dependency, never an execution-cost substitute
 }
+std::optional<bool> GalacticWorld::goal_target_staged(tactical::PlayerId owner, galactic::PlanetId target,
+    std::string_view policy) const {
+    if (!planet(target) || !player(owner)) return {};
+    const auto canonical = goal_reach_policy(upper_case(trimmed(policy)));
+    if (!canonical) return {};
+    if (*canonical == GoalReachPolicy::single_hop_disconnected) return true; // the stage location is the target itself
+    if (const auto* found = bound().goal_reach_index_->find(owner, target, *canonical))
+        return !bound().connectivity_->goal_reach[found->row].production_sites.empty();
+    return {};
+}
 std::optional<GoalReachPolicy> goal_reach_policy(std::string_view upper_cased) {
     static constexpr std::pair<std::string_view, GoalReachPolicy> names[] = {
         {"FRIENDLY_ONLY", GoalReachPolicy::friendly_only}, {"FRIENDLY_IGNORE_THREAT", GoalReachPolicy::friendly_ignore_threat},

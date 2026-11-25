@@ -642,6 +642,9 @@ public:
     // nullopt: production-site relation not supplied; false: known nonmember.
     [[nodiscard]] std::optional<bool> goal_reachable(tactical::PlayerId, galactic::PlanetId,
         galactic::PlanetId, std::string_view) const;
+    // WGA-18 / GS-04: whether the owner has a stage location for a goal on this planet target under the policy: some
+    // production site reaches it (SINGLE_HOP_DISCONNECTED stages at the target itself). nullopt: relation not supplied.
+    [[nodiscard]] std::optional<bool> goal_target_staged(tactical::PlayerId, galactic::PlanetId, std::string_view) const;
     [[nodiscard]] GalacticPerceptionWork work() const noexcept { return bound().work_; }
     // Ordered owner boundary, between equations: reclaim derived spellings
     // that are no longer referenced by native remembered records.

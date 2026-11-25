@@ -606,6 +606,32 @@ void publication() {
         "the passive prompt answers nothing: no fight, no auto-resolve, no retreat, no refusal text");
     expect(!fighter.passive && fighter.involved, "the fighting side's prompt is not passive");
     expect(view::pending_battle_radar_planet(frame, 3) == 0, "the passive prompt adds no radar flash");
+    // #8451: battle-choice refusals never reach the passive panel's advisor line: a forced tactical battle (one button)
+    // without a tactical route, and a refusal row published for the bystander's own seat.
+    const auto saved_responses = frame.battle_choice_responses;
+    const auto saved_refusal = frame.tactical_refusal;
+    pending->arbitration.forced_tactical = true;
+    frame.tactical_refusal = "reachable ship has an unsupported rocket curve";
+    frame.battle_choice_responses = {{70, 9, {3}, "unavailable"}};
+    cp::PendingBattleAlertInputs forced = bystander; forced.linked_tactical = true;
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, forced, true);
+    const auto passive_forced = view::live_battle_dialog_view(frame, {3}, 3, {}, names);
+    expect(passive_forced.passive && passive_forced.single_button && passive_forced.refusal.empty()
+        && passive_forced.tactical_refusal.empty() && !passive_forced.fight_allowed && !passive_forced.auto_allowed,
+        "a forced tactical battle shows the bystander one view-only button and no refusal text");
+    expect(view::live_battle_dialog_view(frame, {1}, 1, {}, names).refusal == frame.tactical_refusal,
+        "the fighting side of the same forced battle keeps its refusal text");
+    // Untimed co-op: the bystander's panel has no countdown and still no refusal text.
+    cp::PendingBattleAlertInputs coop = bystander; coop.untimed = true;
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, coop, true);
+    const auto passive_coop = view::live_battle_dialog_view(frame, {3}, 3, {}, names);
+    expect(passive_coop.passive && !passive_coop.pending_countdown && passive_coop.refusal.empty()
+        && !passive_coop.choice_ready && !passive_coop.fight_allowed && !passive_coop.auto_allowed,
+        "an untimed co-op vote shows the bystander a view-only panel with no countdown and no refusal text");
+    pending->arbitration.forced_tactical = false;
+    frame.tactical_refusal = saved_refusal;
+    frame.battle_choice_responses = saved_responses;
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, bystander, true);
     // The alert alone is not enough: a solo game, a fighting side with someone else's alert, or no alert gives no prompt.
     pending->alert = cp::pending_battle_alert_view(pending->conflict, countdown, true);
     expect(view::live_battle_dialog_view(frame, {3}, 3, {}, names).phase == view::BattleDialogPhase::hidden,

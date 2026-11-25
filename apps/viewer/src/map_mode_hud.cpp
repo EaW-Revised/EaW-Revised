@@ -336,6 +336,7 @@ bool MapMode::State::open_game_menu() {
     }
     game_menu->show(*menu_host, EawrOptionsScreen::Page::game_menu);
     menu_open = game_menu->shown();
+    if (menu_open) ++game_menu_opens;
     UtilityFunctions::print("EAWR in-game menu opened: paused ", live_session->time().paused(), "; by menu ", menu_paused);
     return true;
 }

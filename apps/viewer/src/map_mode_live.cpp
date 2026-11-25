@@ -542,7 +542,7 @@ bool MapMode::State::update_follow_camera(const std::optional<int>& finished) {
 
 bool MapMode::State::advance_map_camera(double delta) {
     State& state = *this;
-    if (state.map_camera && state.phases.empty() && !state.map_camera_settle_started) {
+    if (state.map_camera && state.phases.empty() && !state.map_camera_settle_started && !state.story_controls_locked) {
         if (!std::isfinite(delta) || delta < 0.0
             || delta > static_cast<double>(std::numeric_limits<float>::max())) {
             state.failure = "map camera process delta is invalid";
@@ -937,7 +937,7 @@ std::optional<int> MapMode::State::capture_map_frame() {
 std::optional<int> MapMode::process(const double delta) {
     State& state = *state_;
     state.service_game_menu();
-    if (state.pointer_host && state.options.interactive) {
+    if (state.pointer_host && state.options.interactive && !state.story_controls_locked) {
         const auto focus = input_focus(*state.pointer_host->get_viewport());
         const bool ready = state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready;
         const bool movie = state.space && state.space->live_camera_movie();
@@ -1010,6 +1010,17 @@ std::optional<int> MapMode::process(const double delta) {
     // (and hides the GUI the same way); applied in script order before the slide of this frame.
     if (state.hud && state.live_session)
         for (const auto& request : state.live_session->take_letterbox_requests()) state.hud->set_script_letterbox(request.in, request.seconds);
+    if (state.live_session) {
+        for (const auto& request : state.live_session->take_story_presentation_requests()) {
+            if (request.kind == platform::LiveStoryPresentationRequest::Kind::lock_controls) {
+                state.story_controls_locked = request.locked;
+                if (state.space) state.space->camera_user_lock(request.locked);
+                if (state.map_camera) state.map_camera->set_user_locked(request.locked);
+            }
+        }
+    }
+    if (state.space) state.space->camera_user_lock(state.story_controls_locked);
+    if (state.map_camera) state.map_camera->set_user_locked(state.story_controls_locked);
     if (state.hud) state.hud->advance_movie_bands(delta);
     // TSC-01..TSC-14: a tactical script's story cinematic camera, fades and environment calls, in script order, then this frame's
     // fade step (render time).
@@ -1034,7 +1045,7 @@ std::optional<int> MapMode::process(const double delta) {
         if (!finished) state.sync_overview_ui();
         if (!finished && state.battle && state.live_session && state.space_population) {
             FrameTimer timer(state.perf_trace ? &state.hud_ms : nullptr, true);
-            state.battle->frame(*state.live_session, *state.space_population, *state.space);
+            state.battle->frame(*state.live_session, *state.space_population, *state.space, state.story_controls_locked);
             gpu_memory_trace.at_tick(state.live_session->presented_tick());
             if (state.hud && state.hud->minimap()) {
                 state.hud->minimap()->order_frame(state.live_session->presented_tick() / 30.0);
@@ -1106,6 +1117,7 @@ std::optional<int> MapMode::process(const double delta) {
 void MapMode::observe_pointer(const Ref<InputEvent>& event, const presentation::ui::InputFocus pointer_focus) {
     State& state = *state_;
     if (state.battle) state.battle->observe_pointer(event);
+    if (state.story_controls_locked) return;
     // #4571: edge scroll reads the pointer position, but a HUD Control with a stopping mouse
     // filter consumes the motion before the world layer (MapMode::input) sees it, so the camera
     // kept the last position from before the cursor entered the HUD and the bottom edge never
@@ -1139,6 +1151,8 @@ void MapMode::observe_pointer(const Ref<InputEvent>& event, const presentation::
         state.failure = core::format_diagnostic(handled.error());
     }
 }
+
+bool MapMode::story_controls_locked() const noexcept { return state_->story_controls_locked; }
 
 void MapMode::input(const Ref<InputEvent>& event) {
     State& state = *state_;
@@ -1206,6 +1220,7 @@ void MapMode::input(const Ref<InputEvent>& event) {
             return;
         }
         if (raw && state.space->battlecam_key(*raw)) {
+            if (state.story_controls_locked) return; // HCB-77: the Lua lock gates the battle-camera hotkey.
             if (!raw->echo) {
                 if (raw->pressed) state.movie_key_down = true;
                 else if (state.movie_key_down) { state.movie_key_down = false; state.set_movie_mode(true); }
@@ -1267,7 +1282,7 @@ void MapMode::input(const Ref<InputEvent>& event) {
         LandBattleCamera view(state.camera, state.map_camera.get());
         if (state.battle->input(event, *state.live_session, *state.land_population, view)) return;
     }
-    if (state.map_camera && event.is_valid()) {
+    if (state.map_camera && !state.story_controls_locked && event.is_valid()) {
         if (const auto* saved = ActiveSettings::get()) {
             if (auto bound = state.map_camera->set_camera_keys(saved->camera_wasd); !bound) {
                 state.failure = core::format_diagnostic(bound.error());

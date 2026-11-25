@@ -751,6 +751,11 @@ public:
         return std::exchange(story_requests_, {});
     }
 
+    std::vector<LiveStoryPresentationRequest> take_story_presentation_requests() {
+        const std::lock_guard lock(story_presentation_mutex_);
+        return std::exchange(story_presentation_requests_, {});
+    }
+
 private:
     [[nodiscard]] const tactical::TacticalSession& world() const {
         return scripted_ ? scripted_->world() : *session_;
@@ -1386,6 +1391,18 @@ private:
         publish_letterbox(result.presentation, result.world.completed_tick);
         publish_sub_object_hide(result.presentation);
         publish_story(result.presentation, result.world.completed_tick);
+        publish_story_presentation(result.presentation, result.world.completed_tick);
+        if (!options_.debug_story_lock.empty()) {
+            std::vector<script::authoritative::ScriptCommand> injected;
+            for (const auto& request : options_.debug_story_lock) {
+                if (request.tick != result.world.completed_tick) continue;
+                script::authoritative::ScriptCommand command;
+                command.verb = std::string(script::foc::verb_lock_controls);
+                command.arguments = {script::authoritative::Value{request.locked}};
+                injected.push_back(std::move(command));
+            }
+            publish_story_presentation(injected, result.world.completed_tick);
+        }
         if (!options_.debug_letterbox.empty()) {
             std::vector<script::authoritative::ScriptCommand> injected;
             for (const auto& request : options_.debug_letterbox) {
@@ -1481,6 +1498,22 @@ private:
             story_requests_.erase(story_requests_.begin(), story_requests_.end() - static_cast<std::ptrdiff_t>(keep));
     }
 
+    void publish_story_presentation(const std::vector<script::authoritative::ScriptCommand>& commands, std::uint64_t tick) {
+        std::vector<LiveStoryPresentationRequest> made;
+        for (const auto& command : commands) {
+            if (command.verb == script::foc::verb_lock_controls && command.arguments.size() == 1) {
+                if (const auto* flag = std::get_if<bool>(&command.arguments[0].data))
+                    made.push_back({LiveStoryPresentationRequest::Kind::lock_controls, tick, *flag});
+            }
+        }
+        if (made.empty()) return;
+        const std::lock_guard lock(story_presentation_mutex_);
+        story_presentation_requests_.insert(story_presentation_requests_.end(), made.begin(), made.end());
+        constexpr std::size_t keep = 256;
+        if (story_presentation_requests_.size() > keep)
+            story_presentation_requests_.erase(story_presentation_requests_.begin(), story_presentation_requests_.end() - static_cast<std::ptrdiff_t>(keep));
+    }
+
     std::unique_lock<std::mutex>* active_driver_lock_{};
     std::vector<tactical::PlayerCommand> driver_input_;
     std::vector<std::pair<sim::EntityId, sim::EntityId>> land_roster_;
@@ -1495,6 +1528,8 @@ private:
     std::mutex sub_object_hide_mutex_;
     LiveScriptHideRequests sub_object_hide_requests_;
     std::vector<LiveStoryRequest> story_requests_; // guarded by letterbox_mutex_ too
+    std::mutex story_presentation_mutex_;
+    std::vector<LiveStoryPresentationRequest> story_presentation_requests_;
     double ai_ms_{}; // #957: the last scripted step's AI step and Lua service, for the cost phases
     double lua_ms_{};
     double world_ms_{};
@@ -1819,6 +1854,8 @@ LiveScriptReport LiveSession::script_report() const { return impl_->script_repor
 std::vector<LiveLetterboxRequest> LiveSession::take_letterbox_requests() { return impl_->take_letterbox_requests(); }
 std::vector<LiveSubObjectHideRequest> LiveSession::take_sub_object_hide_requests() { return impl_->take_sub_object_hide_requests(); }
 std::vector<LiveStoryRequest> LiveSession::take_story_requests() { return impl_->take_story_requests(); }
+
+std::vector<LiveStoryPresentationRequest> LiveSession::take_story_presentation_requests() { return impl_->take_story_presentation_requests(); }
 void LiveSession::stop() { impl_->stop(); }
 std::vector<std::string> LiveSession::tick_hashes() const { return impl_->tick_hashes(); }
 void LiveSession::require_tick_hashes() { impl_->require_tick_hashes(); }

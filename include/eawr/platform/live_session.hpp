@@ -76,6 +76,13 @@ struct LiveStoryRequest {
     StoryRequest request;
 };
 
+struct LiveStoryPresentationRequest {
+    enum class Kind { lock_controls };
+    Kind kind{};
+    std::uint64_t tick{};
+    bool locked{};
+};
+
 // One order for the session's command queue (scripted and debug orders; a local player's input
 // arrives through Options::command_source instead). The issuer is the commanding player; the
 // units are nonzero and strictly increasing. Without `tick` the order is stamped with the next
@@ -368,6 +375,7 @@ public:
             std::vector<std::string> arguments;
         };
         std::vector<DebugStory> debug_story{};
+        std::vector<LiveStoryPresentationRequest> debug_story_lock{};
     };
 
     // The pool size of the game build: the hardware threads minus the Godot main and render
@@ -501,6 +509,7 @@ public:
     [[nodiscard]] std::vector<LiveSubObjectHideRequest> take_sub_object_hide_requests();
     // The story cinematic, fade and environment requests made since the last call, in script order. Never blocks on a running step.
     [[nodiscard]] std::vector<LiveStoryRequest> take_story_requests();
+    [[nodiscard]] std::vector<LiveStoryPresentationRequest> take_story_presentation_requests();
 
     // Stops and joins the simulation thread; idempotent. The session keeps its last state.
     void stop();

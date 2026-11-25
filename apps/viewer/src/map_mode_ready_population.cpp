@@ -318,6 +318,9 @@ SpacePopulateHook MapMode::State::make_population_hook() {
             };
             result.write_report = [population, live_session, map_state, effects, debris, emitters,
                                    sound, fog](std::ostream& output) {
+                output << "  \"story_controls_locked\": " << (map_state->story_controls_locked ? "true" : "false")
+                       << ",\n  \"game_menu_open\": " << (map_state->menu_open ? "true" : "false")
+                       << ",\n  \"game_menu_opens\": " << map_state->game_menu_opens << ",\n";
                 population->write_report(output);
                 if (live_session) live_session->write_report(output);
                 if (fog) fog->write_report(output);

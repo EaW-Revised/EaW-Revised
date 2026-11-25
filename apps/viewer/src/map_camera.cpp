@@ -805,6 +805,7 @@ core::Result<void> MapCameraBridge::set_viewport(const float requested_width, co
 }
 
 core::Result<void> MapCameraBridge::handle(const camera_input::RawEvent& event) {
+    if (user_locked_) return core::Result<void>::success();
     ++input_callbacks_;
     auto handled = adapter_.handle(event);
     if (!handled) rejected_event_ = core::format_diagnostic(handled.error());

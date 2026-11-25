@@ -160,7 +160,7 @@ private:
         for (const auto& response : frame.battle_choice_responses)
             if (response.conflict == entry.id && response.seat == seat) {
                 view.response_revision = response.revision;
-                view.refusal = response.refusal;
+                if (!view.passive) view.refusal = response.refusal; // #8451: a bystander's panel has no advisor refusal
             }
         view.tactical_available = tactical_available;
         view.fight_allowed = !view.passive && platform::battle_choice_order(frame, seat, entry.id, true).has_value();
@@ -177,7 +177,7 @@ private:
             }
         }
         // H073/H074 remain WGM-BP-U01 seams; no extra modal or pending retreat.
-        if (pending.arbitration.forced_tactical && !tactical_available && view.refusal.empty())
+        if (pending.arbitration.forced_tactical && !tactical_available && view.refusal.empty() && !view.passive)
             view.refusal = "This conflict requires a tactical battle.";
         if ((view.involved || view.passive) && !frame.auto_resolve_progress) {
             // WGUI-176: per side, the unit count and the best ship (greatest Tactical_Health, first on a tie).

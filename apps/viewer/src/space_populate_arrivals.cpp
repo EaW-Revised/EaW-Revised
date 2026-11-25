@@ -199,7 +199,7 @@ void SpacePopulation::prepare_compose_slots(bool appending) {
         hardpoint_turret_bindings_.clear();
         parent_hardpoint_turret_bindings_.clear();
         live_death_clone_.clear(); live_alternates_.clear(); live_alternate_counts_.clear();
-        live_bounds_.clear(); live_transforms_.clear(); backdrop_ships_.clear();
+        live_bounds_.clear(); live_hull_bounds_.clear(); live_transforms_.clear(); backdrop_ships_.clear();
         hardpoint_states_.clear();
         shadow_receiving_ = shadow_variant_failures_ = 0;
     }
@@ -226,6 +226,7 @@ void SpacePopulation::prepare_compose_slots(bool appending) {
     live_alternates_.resize(options_.placed_ships.size(), 0);
     live_alternate_counts_.resize(options_.placed_ships.size(), 0);
     live_bounds_.resize(options_.placed_ships.size(), std::nullopt);
+    live_hull_bounds_.resize(options_.placed_ships.size(), std::nullopt);
     live_transforms_.resize(options_.placed_ships.size(), std::nullopt);
     backdrop_ships_.resize(options_.placed_ships.size(), false);
 }
@@ -1201,6 +1202,8 @@ float SpacePopulation::commit_composed_pieces(ComposeContext& context, ComposeBa
         if (piece.live && *piece.live < live_bounds_.size()) {
             // #82: the ship's pick box grows by the piece's corners in the ship's model space.
             auto& bounds = live_bounds_[*piece.live];
+            auto& hull_bounds = live_hull_bounds_[*piece.live];
+            const bool hull_piece = !piece.shield && !piece.cloak && !piece.gate;
             for (int corner = 0; corner < 8; ++corner) {
                 const std::array<float, 3> local = apply(piece.local, {(corner & 1) ? high[0] : low[0],
                     (corner & 2) ? high[1] : low[1], (corner & 4) ? high[2] : low[2]});
@@ -1208,6 +1211,12 @@ float SpacePopulation::commit_composed_pieces(ComposeContext& context, ComposeBa
                 for (std::size_t axis = 0; axis < 3; ++axis) {
                     bounds->first[axis] = std::min(bounds->first[axis], local[axis]);
                     bounds->second[axis] = std::max(bounds->second[axis], local[axis]);
+                }
+                if (!hull_piece) continue;
+                if (!hull_bounds) hull_bounds = std::pair{local, local};
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    hull_bounds->first[axis] = std::min(hull_bounds->first[axis], local[axis]);
+                    hull_bounds->second[axis] = std::max(hull_bounds->second[axis], local[axis]);
                 }
             }
         }
@@ -1746,6 +1755,7 @@ GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(GodotRenderer& 
             live_clips_[ship] = copy_clip(live_clips_[recipe_ship]);
             live_alternate_clips_[ship] = copy_clip(live_alternate_clips_[recipe_ship]);
             live_bounds_[ship] = live_bounds_[recipe_ship];
+            live_hull_bounds_[ship] = live_hull_bounds_[recipe_ship];
             live_alternate_counts_[ship] = live_alternate_counts_[recipe_ship];
             live_death_clone_[ship] = options_.placed_ships[ship].death_clone;
             backdrop_ships_[ship] = backdrop_ships_[recipe_ship];

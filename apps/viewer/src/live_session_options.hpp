@@ -49,6 +49,7 @@ struct DebugLetterbox final {
     bool in{};
     double seconds{};
 };
+struct DebugStoryLock final { std::uint64_t tick{}; bool locked{}; };
 
 // One injected tactical-script story call (--eawr-live-story): the verb of story_presentation.hpp and its staged text arguments, at the
 // tick of the script service that makes it.
@@ -220,6 +221,7 @@ struct Options final {
     // cinematic, fade or environment call the same way (the arguments are the ones the script host stages, e.g.
     // 30:camera:start,1 or 60:fade:out,2); the battle must run scripts (the AI on).
     std::vector<DebugStory> debug_story;
+    std::vector<DebugStoryLock> debug_story_lock;
     // A saved battle the host already prepared for exactly this `load_path` (the queue step, skirmish_prepare.hpp). The
     // first load stage takes it only for the same mounted content and path; otherwise it prepares the battle itself.
     std::shared_ptr<SavedBattlePreparation> saved_preparation;

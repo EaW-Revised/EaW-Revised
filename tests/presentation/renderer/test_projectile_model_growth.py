@@ -96,7 +96,7 @@ struct SpacePopulation {
     std::vector<std::vector<int>> hardpoint_states_;
     std::vector<std::vector<sim::AssetId>> hull_surface_assets_;
     std::vector<int> live_mesh_names_;
-    std::vector<std::optional<std::size_t>> live_decisions_, live_models_, live_clips_, live_alternate_clips_, live_bounds_, live_alternate_counts_;
+    std::vector<std::optional<std::size_t>> live_decisions_, live_models_, live_clips_, live_alternate_clips_, live_bounds_, live_hull_bounds_, live_alternate_counts_;
     std::optional<scene::Scene> scene_{scene::Scene{}};
     space::PopulationIndex piece_index_;
     space::AttachmentMarks attachment_marks_;
@@ -109,7 +109,7 @@ struct SpacePopulation {
     void prepare_compose_slots(bool) {
         const auto size = options_.placed_ships.size();
         live_decisions_.resize(size); hull_surface_assets_.resize(size); live_models_.resize(size); live_mesh_names_.resize(size);
-        live_clips_.resize(size); live_alternate_clips_.resize(size); live_bounds_.resize(size); live_alternate_counts_.resize(size);
+        live_clips_.resize(size); live_alternate_clips_.resize(size); live_bounds_.resize(size); live_hull_bounds_.resize(size); live_alternate_counts_.resize(size);
         turret_bindings_.resize(size); parent_hardpoint_turret_bindings_.resize(size); hardpoint_turret_bindings_.resize(size);
         contact_bones_.resize(size); live_death_clone_.resize(size); backdrop_ships_.resize(size);
     }
@@ -235,6 +235,47 @@ class ProjectileProxyGrowth(unittest.TestCase):
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             else:
                 self.assertNotEqual(run.returncode, 0, "mutant unexpectedly passed")
+
+    def test_world_bar_anchor_ignores_effect_mesh_bounds(self):
+        bars = (ROOT / 'apps/viewer/src/world_ui_bars.cpp').read_text()
+        bounds = bars[bars.index('struct Bounds final'):bars.index('} // namespace', bars.index('struct Bounds final'))]
+        arrivals = (ROOT / 'apps/viewer/src/space_populate_arrivals.cpp').read_text()
+        start = arrivals.index('            const bool hull_piece = !piece.shield')
+        end = arrivals.index('\n        }\n        for (int corner', start)
+        accumulation = arrivals[start:end]
+        harness = r'''
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <optional>
+#include <utility>
+#include "eawr/presentation/ui/selection.hpp"
+using Vec3 = std::array<float, 3>;
+namespace ui = eawr::presentation::ui;
+__BOUNDS__
+struct Piece { bool shield{}, cloak{}, gate{}; int local{}; };
+Vec3 apply(int, Vec3 v) { return v; }
+int main() {
+    std::optional<std::pair<Vec3, Vec3>> bounds, hull_bounds;
+    auto add = [&](Piece piece, Vec3 low, Vec3 high) {
+__ACCUMULATION__
+    };
+    add({}, {-2,-2,-1}, {2,2,1});
+    add({true,false,false}, {-20,-20,-20}, {20,20,20});
+    add({false,true,false}, {-30,-30,-30}, {30,30,30});
+    add({false,false,true}, {-40,-40,-40}, {40,40,40});
+    ui::UnitBox box; box.low = bounds->first; box.high = bounds->second;
+    box.hull_low = hull_bounds->first; box.hull_high = hull_bounds->second; box.has_hull = true;
+    auto hull = world_bounds(box);
+    assert(hull.centre[2] + hull.half[2] == 1.0F);
+    assert(box.high[2] == 40.0F);
+    box.has_hull = false;
+    auto fallback = world_bounds(box);
+    assert(fallback.centre[2] + fallback.half[2] == 40.0F);
+}
+'''
+        self.run_fixture(harness.replace('__BOUNDS__', bounds).replace('__ACCUMULATION__', accumulation))
 
     def test_shared_idle_detach_restores_exact_bones(self):
         source = (ROOT / 'src/presentation/godot/renderer_instances.cpp').read_text()

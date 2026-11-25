@@ -137,6 +137,12 @@ struct ScriptedGalacticSession::Impl {
         std::string ai_digest, digest;
     };
     CachedScriptHash cached_script_hash;
+    // #8427: set by a restore whose save carries the legacy full-archive script digest; cleared by the next step.
+    bool legacy_digest{};
+    static constexpr std::string_view galactic_script_state_identity = "eawr-script-galactic-state-v3";
+    static constexpr std::string_view galactic_script_sync_identity = "eawr-script-galactic-sync-state-v3";
+    static constexpr std::string_view legacy_state_identity = "eawr-script-galactic-state-v1";
+    static constexpr std::string_view legacy_sync_identity = "eawr-script-galactic-sync-state-v2";
     std::uint64_t verified_reuses{};
     std::uint64_t routing_revision{};
     void invalidate_routing() noexcept {
@@ -335,15 +341,23 @@ struct ScriptedGalacticSession::Impl {
             && cache.objects_present == objects.has_value() && cache.object_revision == object_revision
             && cache.published_ai == published.has_value() && cache.ai_revision == ai_revision
             && cache.sync_ai == sync_ai && cache.ai_digest == a.value();
-        if (hit && !verify_hash_reuse) return core::Result<std::string>::success(cache.digest);
-        auto s = story.state_hash();
+        if (hit && !verify_hash_reuse && !legacy_digest) return core::Result<std::string>::success(cache.digest);
+        // #8427: story and object schedulers enter through their sync digest (metadata plus the cached per-graph
+        // fingerprints), not a full save plus SHA-256 every tick. It covers the same state as the archive; the
+        // versioned domain keeps the two identities apart. A restore of an older save keeps the legacy full-archive
+        // identity until the next step so its saved barrier and game digests still validate.
+        const auto component = [&](ScriptScheduler& scripts) {
+            return legacy_digest ? scripts.state_hash(executor) : scripts.sync_hash(executor, verify_hash_reuse);
+        };
+        auto s = component(story);
         if (!s) return core::Result<std::string>::failure(s.error());
         std::string bytes;
-        field(bytes, sync_ai ? "eawr-script-galactic-sync-state-v2" : "eawr-script-galactic-state-v1");
+        field(bytes, legacy_digest ? (sync_ai ? legacy_sync_identity : legacy_state_identity)
+                                   : (sync_ai ? galactic_script_sync_identity : galactic_script_state_identity));
         field(bytes, "ai"); field(bytes, a.value());
         field(bytes, "story"); field(bytes, s.value());
         if (objects) {
-            auto digest = objects->state_hash();
+            auto digest = component(*objects);
             if (!digest) return core::Result<std::string>::failure(digest.error());
             field(bytes, "objects"); field(bytes, digest.value());
         }
@@ -360,6 +374,7 @@ struct ScriptedGalacticSession::Impl {
             value(bytes, Value{command.arguments});
         }
         auto digest = hash(bytes);
+        if (legacy_digest) return core::Result<std::string>::success(std::move(digest));
         if (hit && digest != cache.digest)
             return core::Result<std::string>::failure(error(codes::session_abort, "script hash reuse verification mismatch"));
         if (hit && verified_reuses != std::numeric_limits<std::uint64_t>::max()) ++verified_reuses;
@@ -480,7 +495,14 @@ core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preservin
     impl->next_sequence = saved.next_sequence;
     impl->exhausted_seats = saved.exhausted_seats;
     auto digest = impl->script_hash();
-    if (!digest || digest.value() != saved.scripts_sha256) return refuse("saved script barrier digest differs");
+    if (!digest) return refuse("saved script barrier digest differs");
+    if (digest.value() != saved.scripts_sha256) {
+        // #8427: a save written before the sync-digest identity holds the full-archive digest. Accept it for this
+        // restore only; the session reports that identity until its next step, then the current one.
+        impl->legacy_digest = true;
+        auto legacy = impl->script_hash();
+        if (!legacy || legacy.value() != saved.scripts_sha256) return refuse("saved script barrier digest differs");
+    }
     impl->world = std::move(world);
     impl->world.defer_history_service(true);
     return core::Result<ScriptedGalacticSession>::success(ScriptedGalacticSession(std::move(impl)));
@@ -520,6 +542,7 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
     Impl& impl = *impl_;
     if (impl.failure) return core::Result<ScriptedGalacticTick>::failure(*impl.failure);
     impl.stepped = true;
+    impl.legacy_digest = false;
     auto abort = [&](core::Diagnostic diagnostic) {
         impl.failure = std::move(diagnostic);
         return core::Result<ScriptedGalacticTick>::failure(*impl.failure);

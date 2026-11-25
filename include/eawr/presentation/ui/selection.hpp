@@ -52,6 +52,11 @@ struct UnitBox {
     std::array<float, 12> model_to_world{1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F};
     Vec3f low{};
     Vec3f high{};
+    // #8313: the box over the hull's own pieces (shield bubble, cloak and gate meshes left out); only the
+    // world-UI bar anchor reads it, picking keeps `low`/`high`.
+    Vec3f hull_low{};
+    Vec3f hull_high{};
+    bool has_hull{};
 };
 
 // #665 (WSU-11): a type's collidable triangles in the model space of its UnitBox frame, with

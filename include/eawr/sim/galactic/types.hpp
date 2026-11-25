@@ -441,6 +441,9 @@ struct ControlBattleReturn {
     PlayerId station_owner{}; // space return: the owner whose starbase fought; zero means the defender
     bool land{};
     std::uint32_t station_level{};
+    // WAR-43: an auto-resolve space return that destroys the losing planet's base also clears the planet's space special
+    // structures. A real battle return leaves them (WGM-57: only structures that died in the fight leave).
+    bool clear_space_structures{};
     std::vector<EntityId> destroyed;
     std::vector<SurfaceForce> surviving_invaders;
 };

@@ -204,7 +204,19 @@ struct BuiltinText final {
     std::string_view key;
     std::u16string_view value;
 };
-constexpr std::array<BuiltinText, 76> builtin_texts{{
+constexpr std::array<BuiltinText, 88> builtin_texts{{
+    {"TEXT_EAWR_CONSOLE_NO_ACTIVE_GAME", u"No active game."},
+    {"TEXT_EAWR_CONSOLE_ERROR_SYNTAX", u"Invalid console syntax."},
+    {"TEXT_EAWR_CONSOLE_ERROR_ARGUMENT", u"Invalid console argument."},
+    {"TEXT_EAWR_CONSOLE_ERROR_CONTEXT", u"That command is not available here."},
+    {"TEXT_EAWR_CONSOLE_ERROR_UNKNOWN", u"Unknown console command."},
+    {"TEXT_EAWR_CONSOLE_HELP", u"List commands or show help for one command."},
+    {"TEXT_EAWR_CONSOLE_LIST", u"List known names."},
+    {"TEXT_EAWR_CONSOLE_CLEAR", u"Clear console output."},
+    {"TEXT_EAWR_CONSOLE_HISTORY", u"Show command history."},
+    {"TEXT_EAWR_CONSOLE_FPS", u"Toggle the performance overlay."},
+    {"TEXT_EAWR_CONSOLE_VERSION", u"Show version and mounted mods."},
+    {"TEXT_EAWR_CONSOLE_CHEATS", u"Show cheat permission and use."},
     {"TEXT_EAWR_HIDDEN_PLANET", u"Hidden planet"},
     // ADR-020 project caption; an authored language database overrides this default.
     {"TEXT_EAWR_GIFT_UNITS", u"Gift"},

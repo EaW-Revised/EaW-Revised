@@ -71,7 +71,7 @@ jobs:
   build-and-test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ (matrix.name == 'linux-x64-clang' || matrix.name == 'linux-x64-gcc') && 150 || 90 }}
+    timeout-minutes: ${{ (matrix.name == 'linux-x64-clang' || matrix.name == 'linux-x64-gcc' || matrix.experimental) && 150 || 90 }}
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -140,7 +140,7 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-L$llvm/lib/c++ -Wl,-rpath,$llvm/lib/c++" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DEAWR_WARNINGS_AS_ERRORS=ON -DEAWR_ENABLE_SIM_BOUNDARY_CHECK=ON
           cmake --build out/build/macos
-          ctest --test-dir out/build/macos --output-on-failure -LE "game-data|installed-required"
+          ctest --test-dir out/build/macos --output-on-failure --parallel "$(sysctl -n hw.logicalcpu)" -LE "game-data|installed-required"
 
   windows-clang:
     name: windows-clang
