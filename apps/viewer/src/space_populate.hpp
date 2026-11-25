@@ -29,6 +29,7 @@
 #include <optional>
 #include <ostream>
 #include <span>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -216,6 +217,7 @@ public:
     // The placed ships that compose drew; the others are listed with a reason
     // in the report.
     [[nodiscard]] bool live_ship_drawn(std::size_t ship) const noexcept override;
+    bool hide_sub_object(sim::EntityId entity, std::string_view name, bool hidden) override;
     // Whether the unit emitters have anything to do for this slot besides stopping what it runs:
     // it is drawn and not retired, and is posed this frame or is a death clone (which they step
     // on its clip). A slot that fails this and runs nothing needs no visit (5000+ pooled slots).
@@ -467,6 +469,7 @@ private:
         std::optional<bool> blast_charged{}; // BP-74: false=buildup, true=charged
         std::optional<std::array<std::uint8_t, 3>> colour; // current tint, restored on slot reuse
         bool colorizable{};
+        std::optional<std::uint32_t> model_mesh{};
     };
     // False while a death clone's pose hides the bone this piece's attached model hangs on (UA-12).
     [[nodiscard]] bool attached_art_shown(const GatedInstance& piece) const;
@@ -600,6 +603,9 @@ private:
     // last pose_live() listed it; the reasons a live ship was not drawn.
     std::vector<std::optional<std::size_t>> live_decisions_;
     std::vector<std::optional<bool>> live_models_;
+    std::map<std::string, std::shared_ptr<const std::vector<std::string>>> model_mesh_names_;
+    std::vector<std::shared_ptr<const std::vector<std::string>>> live_mesh_names_;
+    std::vector<std::set<std::uint32_t>> live_script_hidden_meshes_;
     std::vector<bool> live_shown_;
     std::vector<bool> live_death_clone_;  // per placed ship, PlacedShip::death_clone (fixed at compose)
     // #427: per placed ship, whether the last pose_live() gave it an active DEFEND; the

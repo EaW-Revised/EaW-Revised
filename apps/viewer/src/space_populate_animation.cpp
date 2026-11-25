@@ -925,6 +925,13 @@ bool SpacePopulation::pose_live(const std::span<const LivePose> poses, const par
         }
         auto& states = hardpoint_states_[decision];
         for (std::size_t index = 0; index < pose.hardpoints.size() && index < states.size(); ++index) {
+            if (states[index] != pose.hardpoints[index] && pose.ship < live_script_hidden_meshes_.size()) {
+                for (const auto piece_index : piece_index_.pieces(pose.ship)) {
+                    const auto& piece = pieces_[piece_index];
+                    if (piece.gate && piece.gate->hardpoint == index && piece.model_mesh)
+                        live_script_hidden_meshes_[pose.ship].erase(*piece.model_mesh);
+                }
+            }
             states[index] = pose.hardpoints[index];
         }
     }
@@ -1135,6 +1142,7 @@ void SpacePopulation::retire_live_ship(GodotRenderer& renderer, const std::size_
     std::vector<animation::BonePose>{}.swap(contact_bones_[ship]);
     live_transforms_[ship].reset();
     std::erase_if(contact_live_ships_, [&](const auto& entry) { return entry.second == ship; });
+    if (ship < live_script_hidden_meshes_.size()) live_script_hidden_meshes_[ship].clear();
     live_shown_[ship] = false;
     piece_index_.reset_opacity(ship);
     // Uploads are shared by model and surface: another clone of the same type keeps them.

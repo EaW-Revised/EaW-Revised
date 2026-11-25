@@ -185,6 +185,9 @@ struct UnitType final {
     std::vector<Hardpoint> hardpoints; // in HardPoints order
     std::optional<Weapon> weapon;      // object weapon (Projectile_Types)
     std::vector<BonePoint> target_bones;
+    // Get_Bone_Position: every skeleton bone of the unit's model with its rest-pose translation in model space, in
+    // skeleton order. Empty without a skeleton model. Scripting data only: not part of the unit identity.
+    std::vector<std::pair<std::string, sim::math::Vec3>> bone_rests;
     // WWP-47 (docs/behaviour/walks/weapons.md U-06): the object weapon's muzzle bones, the
     // Muzzle_Bone_Name prefix (default MUZZLEA) with _00 and consecutive two-digit suffixes while
     // the model has them. Empty without an object weapon or without a _00 bone.

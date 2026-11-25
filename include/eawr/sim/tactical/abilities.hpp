@@ -311,14 +311,17 @@ struct LureProfile {
 // WLU-03: whether a LURE switched on at `started` pulses at `tick`.
 [[nodiscard]] bool lure_pulses(const LureProfile& lure, std::uint64_t started, std::uint64_t tick) noexcept;
 
-// Lua Hide(b) and Set_Selectable(b) on one unit: the model (and its attached sound) is hidden, and the unit refuses
-// selection by players. Neither changes combat; both persist until a script changes them.
+// Lua Hide(b), Set_Selectable(b) and Prevent_AI_Usage(b) on one unit: the model (and its attached sound) is hidden,
+// the unit refuses selection by players, and the AI's unit selection skips it. None changes combat; all persist until
+// a script changes them. The state is held only while any flag is set.
 struct ScriptViewState {
     bool hidden{};
     bool unselectable{};
+    bool ai_excluded{};
     // The script reference (script_creation_namespace bit set) a direct creation gave this object, or zero. Later script
     // commands that name the reference reach the object through it, in the same tick and after.
     std::uint64_t identity{};
+    [[nodiscard]] constexpr bool any() const noexcept { return hidden || unselectable || ai_excluded || identity != 0; }
     friend constexpr bool operator==(const ScriptViewState&, const ScriptViewState&) noexcept = default;
 };
 

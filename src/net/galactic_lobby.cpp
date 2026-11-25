@@ -66,11 +66,6 @@ std::uint32_t galactic_lobby_max_humans(const gc::MpLobbyCampaign& campaign, con
     return campaign.single_player_rules ? ceiling : std::clamp<std::uint32_t>(playable, 2U, ceiling);
 }
 
-std::uint32_t galactic_lobby_default_humans(const gc::MpLobbyCampaign& campaign, const std::uint32_t seat_limit) noexcept {
-    // Two by default for every campaign; the host may choose a larger capacity.
-    return std::min<std::uint32_t>(2U, galactic_lobby_max_humans(campaign, seat_limit));
-}
-
 LobbyGameMode lobby_game_mode(const LobbyGame& game) noexcept {
     const std::string_view bytes(reinterpret_cast<const char*>(game.options.data()), game.options.size());
     return has_tag(bytes) ? LobbyGameMode::galactic : LobbyGameMode::skirmish;
@@ -378,15 +373,6 @@ std::optional<GalacticLobbyReseat> galactic_lobby_reseat(GalacticLobbyOptions fr
     }
     result.options = std::move(fresh);
     return result;
-}
-
-std::optional<std::string> galactic_lobby_switch_refusal(const gc::MpLobbyCampaign& campaign, const LobbySnapshot& room) {
-    if (room.seats.size() < 2U || campaign.single_player_rules) return std::nullopt;
-    const auto playable = static_cast<std::size_t>(std::count_if(campaign.factions.begin(), campaign.factions.end(),
-        [](const gc::MpLobbyFaction& faction) { return faction.playable && !faction.neutral; }));
-    if (playable >= room.capacity) return std::nullopt;
-    return "This room waits for " + std::to_string(room.capacity) + " players, but this campaign has only " + std::to_string(playable)
-        + " factions to take, so it could never start. Open the room again to play it.";
 }
 
 void follow_galactic_departure(const LobbySnapshot& before, LobbySnapshot& after, const PeerIndex peer,

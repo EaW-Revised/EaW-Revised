@@ -204,6 +204,7 @@ struct SpacePopulation {
         std::optional<bool> alternate,blast_charged;
         bool shield{},cloak{},cloak_hidden{};
         std::optional<HardpointGate> gate;
+        std::optional<std::uint32_t> model_mesh{};
     };
     using GatedInstance = Piece;
     struct Index {
@@ -271,6 +272,7 @@ struct SpacePopulation {
     std::vector<sim::RenderInstance> instances_;
     std::vector<std::uint8_t> piece_visibility_, piece_counts_;
     std::vector<bool> live_shown_,live_alternates_,live_defend_,live_stealth_,live_blast_charged_,live_blast_charging_;
+    std::vector<std::set<std::uint32_t>> live_script_hidden_meshes_;
     std::vector<std::vector<scene::HardpointState>> hardpoint_states_;
     std::map<std::string,std::uint64_t> blast_meshes_shown_;
     std::uint64_t instance_count_{},attachments_drawn_{},shield_shells_shown_{},stealth_shells_shown_{};
@@ -363,6 +365,16 @@ int main() {
         && turret_renderer.uploads[2].entity==11 && turret_renderer.uploads[3].entity==10);
     auto visibility=visibility_population(); visibility.refresh_instances(nullptr);
     assert(GodotRenderer::builds==0 && visibility.piece_visibility_.empty());
+    {
+        auto p=visibility_population(); p.live_script_hidden_meshes_.resize(3);
+        p.pieces_[3].model_mesh=8; p.refresh_instances(nullptr);
+        const auto has_piece=[&] { return std::any_of(p.instances_.begin(), p.instances_.end(),
+            [](const auto& instance) { return instance.entity_id==4; }); };
+        assert(has_piece());
+        p.live_script_hidden_meshes_[0].insert(8); p.refresh_instances(nullptr); assert(!has_piece());
+        Executor workers(2); p.refresh_instances(&workers); assert(!has_piece());
+        p.live_script_hidden_meshes_[0].clear(); p.refresh_instances(nullptr); assert(has_piece());
+    }
     {
         // PF idle skin: a clean placement with a byte-equal palette is not visited again.
         Executor executor(2); auto p=idle_population(); GodotRenderer r;

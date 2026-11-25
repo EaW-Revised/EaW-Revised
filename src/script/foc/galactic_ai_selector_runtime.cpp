@@ -861,7 +861,9 @@ Engine::GalacticFreestoreActorFacts Engine::galactic_freestore_selection_batch(
         if (b.stage_failure) return Result::failure(*b.stage_failure);
         const auto& stages = b.stages;
         const auto* actor = host_->view->find(object);
-        if (!actor || actor->owner != id) return refuse("BTP-U04: live stage actor unavailable");
+        // A free-store actor the AI's roster does not show (or shows under another owner) cannot be staged: it is rejected
+        // for this proposal (BTP-S02), the same as an unreachable one, never a fault that stops the player's AI.
+        if (!actor || actor->owner != id) return Result::success({gg::rejected_estimate(), garrison.value()});
         auto source = facts->object.planet;
         if (!source && facts->parent && facts->enroute) {
             const auto fleet = std::lower_bound(snapshot->fleets().begin(), snapshot->fleets().end(), facts->parent,

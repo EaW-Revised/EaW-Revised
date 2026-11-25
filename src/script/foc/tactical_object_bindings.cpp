@@ -5,6 +5,7 @@
 #include "tactical_ai_internal.hpp"
 #include "discrete_distribution.hpp"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 
@@ -131,9 +132,36 @@ void register_battle_object_bindings(authoritative::ScriptScheduler& scripts, co
         return none();
     });
 
+    // Get_Bone_Position(name) (debug build): exactly one string; the case-insensitive exact name of a bone of the
+    // object's skeleton model (the root included, the first match winning). Answers a position of the bone's world
+    // translation: the object's position and facing (roll included) applied to the bone's rest pose. Our sim has no
+    // fixed-step animation pose, so animated bone motion is not modelled (deliberate deviation). A type with no
+    // skeleton model and an unknown bone are script errors that answer nothing, never the object's own position.
+    method("Get_Bone_Position", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        const std::size_t count = arguments.size() - 1;
+        if (count != 1)
+            return object_call_error("Get_Bone_Position", "invalid number of parameters.  Expected 1, got " + std::to_string(count) + ".");
+        const std::string* name = as_text(arguments[1]);
+        if (name == nullptr) return object_call_error("Get_Bone_Position", "invalid type for parameter 1.  Expected string.");
+        const AiType* type = host->type(unit->type);
+        const std::string type_name = type != nullptr ? type->name : std::string("object");
+        if (type == nullptr || type->bones.empty()) return object_call_error("Get_Bone_Position", "object " + type_name + " has no model");
+        const std::string wanted = upper(*name);
+        const auto bone = std::find_if(type->bones.begin(), type->bones.end(),
+            [&](const auto& row) { return upper(row.first) == wanted; });
+        if (bone == type->bones.end())
+            return object_call_error("Get_Bone_Position", "could not find named bone " + *name + " in model for object " + type_name);
+        const auto frame = math::to_matrix(unit->rotation, unit->position);
+        const auto world = frame ? math::transform_point(frame.value(), bone->second) : core::Result<math::Vec3>::failure(frame.error());
+        if (!world) return object_call_error("Get_Bone_Position", "bone position out of range");
+        return one(position_object(world.value()));
+    });
+
     // TL-08: Prevent_AI_Usage(flag). Without an AI player on the owner the original warns and does nothing; with one
-    // it takes the object out of (true) or back into (false) the owner's free store. The battle's free store is
-    // computed from the live roster, with no per-object switch to set, so that last step is accepted and noted.
+    // it takes the object out of (true) or back into (false) the owner's free store: a replayed command (opcode 50)
+    // sets the unit's hashed flag, and the AI's unit selection skips a flagged unit.
     method("Prevent_AI_Usage", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
         const ViewUnit* unit = live_object(*host, arguments[0]);
         if (unit == nullptr) return none();
@@ -144,8 +172,9 @@ void register_battle_object_bindings(authoritative::ScriptScheduler& scripts, co
                 "Prevent_AI_Usage -- No AI Player active on the owner of this object.");
             return none();
         }
-        context.report(authoritative::codes::unsupported_api,
-            "Prevent_AI_Usage skipped: the free-store exclusion switch is not hosted");
+        // The flag is simulation state (the AI's unit selection reads it): one replayed command, applied next tick.
+        context.issue_command(std::string(verb_prevent_ai_usage),
+            {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
         return none();
     });
 }

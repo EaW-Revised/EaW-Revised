@@ -277,7 +277,9 @@ void ViewerHost::_ready() try {
         targets.texture_detail = !options_->texture_mip_drop_explicit;
         // ST-V5: missing, damaged and other-version files take the same FIFO-on defaults;
         // the shared apply checks current state and preserves launch geometry for a fallback.
-        apply_startup_video(saved, targets, applied);
+        apply_startup_video(saved, store, targets, applied);
+        // #8382: this player's window place is remembered at exit (evidence runs keep their pinned geometry).
+        window_memory_settings_ = store.file();
         if (!saved.defaulted) {
             // #3165: saved volumes reach the shared buses before the front end's music starts.
             apply_audio(saved.settings.audio, applied);

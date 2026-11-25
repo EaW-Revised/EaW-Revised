@@ -101,6 +101,7 @@ set(EAWR_VIEWER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/unit_emitters_frame.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/unit_emitters_report.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/perf_trace.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/frame_diag.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/debris_props.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/particle_lane.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/particle_workers.cpp"

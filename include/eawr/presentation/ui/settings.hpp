@@ -399,8 +399,37 @@ struct WindowPlacement final {
     friend bool operator==(const WindowPlacement&, const WindowPlacement&) = default;
 };
 
-// Resolve the transient launcher hint; absent, malformed or disconnected screens keep the current screen.
-[[nodiscard]] std::size_t startup_window_screen(std::span<const std::string> arguments, int current, int count);
+// The game window keeps only its own place (#8382): the monitor it was on and, when windowed, its client position.
+// It never reads the launcher's window or a launcher hint. `screen` is the whole monitor rectangle in desktop pixels.
+struct SavedWindow final {
+    ScreenArea screen;
+    std::optional<std::pair<int, int>> position; // empty when the window was full screen
+
+    friend bool operator==(const SavedWindow&, const SavedWindow&) = default;
+};
+
+// The text form ("eawr-window 1", then screen=x,y,w,h and an optional position=x,y). A missing, damaged or foreign
+// version text parses to nothing, which means "no saved place".
+[[nodiscard]] std::string serialize_saved_window(const SavedWindow& window);
+[[nodiscard]] std::optional<SavedWindow> parse_saved_window(std::string_view text);
+
+// Where a start goes: the monitor index and, when the saved place still fits, the client position to keep. The saved
+// monitor is found by its rectangle (same origin; a changed resolution still matches); a monitor that is gone, or no
+// saved place, gives the current monitor, centred.
+struct StartupPlace final {
+    std::size_t screen{};
+    std::optional<std::pair<int, int>> keep;
+};
+[[nodiscard]] StartupPlace startup_window_place(const std::optional<SavedWindow>& saved,
+                                                std::span<const ScreenArea> monitors, int current);
+
+// What the game keeps of its window when it exits: nothing when minimized (the earlier file stays); else the monitor
+// it is on and, windowed, its client position. Full screen or maximized keeps the earlier windowed position only when
+// that was on the same monitor; on another monitor the position is dropped, so the next start centres there.
+enum class ExitWindowMode : std::uint8_t { windowed, minimized, other };
+[[nodiscard]] std::optional<SavedWindow> window_to_save(ExitWindowMode mode, const ScreenArea& monitor,
+                                                        std::pair<int, int> position,
+                                                        const std::optional<SavedWindow>& previous);
 
 // Where a window of client size `wanted` goes on screen `screen_index` (clamped into the list; no screens gives
 // the wanted size at the origin). The size shrinks to the usable area, frame included, and the whole frame ends up

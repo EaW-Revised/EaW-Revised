@@ -189,7 +189,8 @@ class LanLobbyStructure(unittest.TestCase):
 
     def test_host_count_preserves_the_password_and_teams_belong_to_staging(self):
         screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
-        self.assertIn('label->set_text("Human players")', screen)
+        self.assertNotIn('label->set_text("Human players")', screen)
+        self.assertNotIn('gadget == "IDC_INTERNET_HOST_CLAN_COMBO"', screen)
         self.assertNotIn("EAWR_LAN_HOST_TEAMS", screen)
         self.assertIn('impl.host_options.password = online && password != nullptr', screen)
         self.assertIn('argument.find_first_of(":=")', screen)
@@ -301,15 +302,18 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertIn("--eawr-online-room", mode)
         self.assertIn("FixedOnlineLobbySource", mode)
 
-    def test_a_campaign_room_defaults_to_two_humans_and_lists_the_campaign_title(self):
-        # A campaign room opens its mesh only when every configured human joined: the skirmish
-        # transport capacity must not become its default seat count, or a joiner waits at Connecting. The default is two until
-        # the campaign list is known, then galactic_lobby_default_humans (two until #8130 lets a room start with fewer humans than seats, LLB-22).
+    def test_a_campaign_room_opens_for_the_playable_rows_and_lists_the_campaign_title(self):
+        # #8130: no "Human players" choice. A campaign room's capacity is the campaign's playable rows (2..8, co-op the seat ceiling), the
+        # room opens with staged capacity like a skirmish room, and it starts with the humans present.
         staging = (SRC / "lan_lobby_screen_staging.cpp").read_text(encoding="utf-8")
-        self.assertIn("requested_count == 0 ? impl_->galactic_humans : requested_count", staging)
-        self.assertIn("std::uint32_t galactic_humans{2};", (SRC / "lan_lobby_screen_internal.hpp").read_text(encoding="utf-8"))
-        # D8 (#8071): the count is how many players the room waits for; the host is told so where it chooses.
-        self.assertIn("The room waits for this many players before the campaign can start.", staging)
+        internal = (SRC / "lan_lobby_screen_internal.hpp").read_text(encoding="utf-8")
+        self.assertIn("net::galactic_lobby_max_humans(*hostable, seat_limit)", staging)
+        self.assertIn("match_->configure_staging_capacity(true);", staging)
+        self.assertNotIn("configure_staging_capacity(false)", staging)
+        self.assertNotIn("configure_staging_capacity(impl.host_options.game_type != galactic_game_type)", staging)
+        for gone in ("galactic_humans", "galactic_humans_chosen", "galactic_humans_defaulted", "requested_count", "The room waits for this many players"):
+            self.assertNotIn(gone, staging + internal)
+        self.assertNotIn("galactic_lobby_default_humans", staging)
         chat = (SRC / "lan_lobby_screen_chat.cpp").read_text(encoding="utf-8")
         self.assertIn("campaign_display_name(impl_->galactic_campaign)", chat)
 
@@ -1206,10 +1210,10 @@ class LanLobbyGraphical(unittest.TestCase):
             self.assertEqual(rows[8]["name"], "+4 AI factions")
             self.assertTrue(rows[8]["visible"])
 
-    def test_galactic_room_opens_for_two_by_default_and_two_humans_with_ai_rows_can_start(self):
-        # #8130 stop-gap (owner P1 11-23): the host leaves "Human players" at its default. The room opens for two players whatever the
-        # campaign (the stock one has three playable factions, a mod stack more), the guest claims a row, every other faction stays an
-        # AI row, and Start unlocks once both humans accepted: a room never waits for seats nobody asked for.
+    def test_galactic_room_opens_for_all_rows_and_two_humans_with_ai_rows_can_start(self):
+        # #8130: the room opens for every playable row of the campaign (the stock one has three, a mod stack more), the guest claims a
+        # row, every other faction stays an AI row, and Start unlocks once both present humans accepted: a room never waits for seats
+        # nobody took.
         names = ["Solo", "Guest B"]
         tag = "gc-rows-default-two"
         with socket.socket() as available:

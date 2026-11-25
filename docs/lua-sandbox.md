@@ -341,11 +341,12 @@ works outside threads (debug build, L-28; Focumentation: Lua Commands describes 
 which FoC does not do).
 
 **Uncaught errors in the GC profile.** An uncaught Lua error ends the thread or call that raised it, rolls back that
-transaction's output and leaves a diagnostic. For the AI providers it also retires the instance for the rest of the
-campaign (the owner's provider rule). Story and object scripts do not retire: their engine ends only the failing
-thread or call, so a handler that calls one unimplemented function costs that call, not every later one
-(`SessionConfig::retire_on_lua_error`, a host policy that is not saved). A budget or quota fault retires the
-instance either way. A story sub-plot whose script was retired, or had a thread end in an uncaught error, releases
+transaction's output and leaves a diagnostic. The instance itself keeps running: AI providers, story and object scripts
+alike end only the failing thread or call, so a handler that calls one unimplemented function, or indexes one nil value,
+costs that call, not every later one, and never stops a player's AI (owner rule, 2026-11-24). An AI plan whose last
+thread ended this way has no live thread and ends at its next pump (PL-42); its goal system picks other plans.
+(`SessionConfig::retire_on_lua_error`, a host policy that is not saved; the scheduler's default still retires, for
+hosts and tests that ask for it.) A budget or quota fault retires the instance either way. A story sub-plot whose script was retired, or had a thread end in an uncaught error, releases
 the control locks its plot set, since nothing will unlock them; a script that only finished keeps its plot's locks. The
 service reports the instances that had a thread fail (`ServiceReport::thread_failures`, ascending instance ID) so the host
 can do this.

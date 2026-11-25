@@ -22,6 +22,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace eawr::vfs { class Vfs; }
@@ -210,6 +211,7 @@ public:
     [[nodiscard]] virtual std::span<const sim::EntityId> live_hull_entities(std::size_t ship) const = 0;
     [[nodiscard]] virtual std::optional<LiveShipBox> live_ship_box(std::size_t ship) const = 0;
     [[nodiscard]] virtual bool live_ship_drawn(std::size_t ship) const noexcept = 0;
+    virtual bool hide_sub_object(sim::EntityId, std::string_view, bool) { return false; }
     [[nodiscard]] virtual std::span<const sim::EntityId> live_ship_entities(std::size_t ship) const = 0;
     [[nodiscard]] virtual std::optional<bool> live_ship_model_present(std::size_t ship) const noexcept = 0;
     [[nodiscard]] virtual bool pose_live(std::span<const LivePose> poses, const particles::StepExecutor* workers = nullptr) = 0;

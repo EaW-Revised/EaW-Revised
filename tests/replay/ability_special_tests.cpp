@@ -1317,6 +1317,7 @@ void test_script_layering() {
         submit(18, 1, 2, tactical::ScriptCancelHyperspacePayload{});
         submit(18, 1, 1, tactical::ScriptHidePayload{true});
         submit(18, 1, 1, tactical::ScriptSelectablePayload{false});
+        submit(18, 1, 1, tactical::ScriptPreventAiPayload{true});
         const eawr::platform::ThreadWorkerAdapter executor(workers);
         std::vector<std::string> hashes;
         for (unsigned frame = 0; frame < 26; ++frame) {
@@ -1351,6 +1352,7 @@ void test_script_layering() {
                 }
                 submit(22, 1, 1, tactical::ScriptHidePayload{false});
                 submit(23, 1, 1, tactical::ScriptSelectablePayload{true});
+                submit(23, 1, 1, tactical::ScriptPreventAiPayload{false});
             }
             if (frame == 20) {
                 // TL-14/TL-15: the published snapshot carries both flags for the viewer, selection and orders to read.
@@ -1362,8 +1364,8 @@ void test_script_layering() {
                 };
                 const auto flagged = find(1);
                 const auto plain = find(2);
-                expect(flagged && flagged->script_hidden && flagged->script_unselectable
-                           && plain && !plain->script_hidden && !plain->script_unselectable,
+                expect(flagged && flagged->script_hidden && flagged->script_unselectable && flagged->script_ai_excluded
+                           && plain && !plain->script_hidden && !plain->script_unselectable && !plain->script_ai_excluded,
                        "layering: the snapshot publishes the Hide and Set_Selectable flags of the flagged unit only");
             }
             if (frame == 22) {
@@ -1376,7 +1378,7 @@ void test_script_layering() {
                 const auto cleared = world.snapshot();
                 const tactical::TacticalInstance* unit_one = nullptr;
                 if (cleared) for (const auto& row : cleared->instances()) if (row.entity_id == 1) unit_one = &row;
-                expect(unit_one && !unit_one->script_hidden && !unit_one->script_unselectable,
+                expect(unit_one && !unit_one->script_hidden && !unit_one->script_unselectable && !unit_one->script_ai_excluded,
                        "layering: clearing the flags clears the published view");
             }
             if (frame == 20) {
@@ -1395,18 +1397,19 @@ void test_script_layering() {
             }
         }
         const auto bytes = tactical::write_replay(world.record());
-        expect(static_cast<bool>(bytes), "layering: the replay with opcodes 44 to 48 writes");
+        expect(static_cast<bool>(bytes), "layering: the replay with opcodes 44 to 50 writes");
         if (bytes) {
             const auto parsed = tactical::parse_replay(bytes.value());
-            bool point = false, hide = false, selectable = false, hyperspace = false;
+            bool point = false, hide = false, selectable = false, hyperspace = false, prevent = false;
             if (parsed) for (const auto& recorded : parsed.value().commands) {
                 if (const auto* payload = std::get_if<tactical::ScriptTeleportPositionPayload>(&recorded.payload))
                     point = point || payload->position == at(100, 200, 50);
                 if (const auto* payload = std::get_if<tactical::ScriptHidePayload>(&recorded.payload)) hide = hide || payload->hidden;
                 if (const auto* payload = std::get_if<tactical::ScriptSelectablePayload>(&recorded.payload)) selectable = selectable || !payload->selectable;
+                if (const auto* payload = std::get_if<tactical::ScriptPreventAiPayload>(&recorded.payload)) prevent = prevent || payload->excluded;
                 if (const auto* payload = std::get_if<tactical::ScriptHyperspaceInPayload>(&recorded.payload)) hyperspace = hyperspace || payload->frames == 10U;
             }
-            expect(point && hide && selectable && hyperspace, "layering: opcodes 44, 45, 47 and 48 round-trip through the replay writer and parser");
+            expect(point && hide && selectable && hyperspace && prevent, "layering: opcodes 44, 45, 47, 48 and 50 round-trip through the replay writer and parser");
         }
         {
             // Opcode 46 is reserved and unused: a body carrying it is refused.

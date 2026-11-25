@@ -1282,7 +1282,7 @@ core::Result<void> LobbyRuntime::begin_start(const std::uint64_t revision) {
             auto encoded_manifest = encode_lobby_frame(manifest);
             if (!encoded_manifest) return core::Result<void>::failure(encoded_manifest.error());
             // Capacity TCP may have irreversibly frozen its roster even if Lock confirmation is still pending.
-            if (value.hooks.lock_at_start && value.hooks.lock_room_progress) {
+            if (value.hooks.lock_at_start && !value.hooks.lock_after_preparation && value.hooks.lock_room_progress) {
                 auto locked = value.hooks.lock_room_progress();
                 if (!locked) {
                     if (locked.error().code != "EAWR-NET-1774") static_cast<void>(value.terminal(LobbyReason::setup_failed, locked.error().message));

@@ -5,6 +5,7 @@
 #include "../../support/check.hpp"
 #include "eawr/presentation/live/live_units.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
+#include "eawr/presentation/space/script_mesh_hide.hpp"
 #include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/particles/render.hpp"
 
@@ -443,6 +444,19 @@ void test_script_view_lists() {
     expect(index.script_hidden().empty() && index.script_unselectable().empty(), "TL-14/TL-15: cleared flags leave the lists");
 }
 
+void test_script_mesh_hide() {
+    const std::vector<std::string> names{"Hull", "hULL", "HullChild", "Wing"};
+    std::set<std::uint32_t> hidden;
+    space::set_script_mesh_hidden(names, hidden, "HULL", true);
+    expect(hidden == std::set<std::uint32_t>{0}, "mesh hide matches case-insensitively and only the first full name");
+    space::set_script_mesh_hidden(names, hidden, "HullC", true);
+    space::set_script_mesh_hidden(names, hidden, "missing", true);
+    expect(hidden == std::set<std::uint32_t>{0}, "mesh hide ignores prefixes and missing names");
+    space::set_script_mesh_hidden(names, hidden, "wing", true);
+    space::set_script_mesh_hidden(names, hidden, "hull", false);
+    expect(hidden == std::set<std::uint32_t>{3}, "mesh show clears only the named mesh");
+}
+
 void test_pose_worker_budget() {
     std::vector<tactical::TacticalInstance> before(512), after(512);
     for (std::size_t i = 0; i < before.size(); ++i) {
@@ -488,6 +502,7 @@ int main() {
     test_snapshot_index_budget();
     test_stealth_visibility();
     test_script_view_lists();
+    test_script_mesh_hide();
     test_pose_worker_budget();
     test_fading_entities();
     test_spinning();

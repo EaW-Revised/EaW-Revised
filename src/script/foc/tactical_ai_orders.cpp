@@ -150,6 +150,13 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         const auto clamped = std::clamp<std::int64_t>(whole, 0, static_cast<std::int64_t>(tactical::arrival_frames));
         return OrderResult::success(make_order({unit->id}, tactical::ScriptHyperspaceInPayload{static_cast<std::uint32_t>(clamped)}));
     }
+    if (command.verb == verb_prevent_ai_usage) {
+        if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
+            return bad("expects issuer, unit and excluded");
+        const auto* excluded = std::get_if<bool>(&arguments[2].data);
+        if (excluded == nullptr) return bad("malformed excluded flag");
+        return OrderResult::success(make_order({unit->id}, tactical::ScriptPreventAiPayload{*excluded}));
+    }
     if (command.verb == verb_prevent_all_fire) {
         if (arguments.size() != 3 || player.value() > std::numeric_limits<tactical::PlayerId>::max())
             return bad("expects issuer, unit and enabled");

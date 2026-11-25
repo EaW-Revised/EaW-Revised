@@ -51,6 +51,7 @@ EAWR_PAYLOAD_POLICY(ScriptTeleportPositionPayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptHidePayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptHyperspaceInPayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptSelectablePayload, engine_only);
+EAWR_PAYLOAD_POLICY(ScriptPreventAiPayload, engine_only);
 EAWR_PAYLOAD_POLICY(ScriptCancelHyperspacePayload, engine_only);
 EAWR_PAYLOAD_POLICY(LandGarrisonPayload, human_wire);
 EAWR_PAYLOAD_POLICY(LandUnloadPayload, human_wire);

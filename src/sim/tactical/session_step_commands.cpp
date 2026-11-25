@@ -911,7 +911,7 @@ core::Result<void> session_detail::Tick::commands() {
                 if (found == staged.end()) return;
                 auto view = found->second.script_view.value_or(ScriptViewState{});
                 view.hidden = hide->hidden;
-                found->second.script_view = (view.hidden || view.unselectable || view.identity != 0) ? std::optional(view) : std::nullopt;
+                found->second.script_view = view.any() ? std::optional(view) : std::nullopt;
             };
             const auto& born_squadrons = staging_->arrived_squadrons.value();
             for (const auto id : command.units) {
@@ -932,7 +932,28 @@ core::Result<void> session_detail::Tick::commands() {
                 if (found == staged.end()) return;
                 auto view = found->second.script_view.value_or(ScriptViewState{});
                 view.unselectable = !selectable->selectable;
-                found->second.script_view = (view.hidden || view.unselectable || view.identity != 0) ? std::optional(view) : std::nullopt;
+                found->second.script_view = view.any() ? std::optional(view) : std::nullopt;
+            };
+            const auto& born_squadrons = staging_->arrived_squadrons.value();
+            for (const auto id : command.units) {
+                apply(id);
+                const auto group = std::lower_bound(impl_->squadrons.begin(), impl_->squadrons.end(), id,
+                    [](const auto& row, const EntityId value) { return row.container < value; });
+                if (group != impl_->squadrons.end() && group->container == id)
+                    for (const auto member : group->members) apply(member);
+                for (const auto& arrival : born_squadrons)
+                    if (arrival.container == id) for (const auto member : arrival.members) apply(member);
+            }
+            continue;
+        }
+        if (const auto* prevent = std::get_if<ScriptPreventAiPayload>(&command.payload)) {
+            // Lua Prevent_AI_Usage(flag) (TL-08): the AI's unit selection skips the unit while it is true. Same group rules as Hide.
+            const auto apply = [&](const EntityId id) {
+                const auto found = staged.find(id);
+                if (found == staged.end()) return;
+                auto view = found->second.script_view.value_or(ScriptViewState{});
+                view.ai_excluded = prevent->excluded;
+                found->second.script_view = view.any() ? std::optional(view) : std::nullopt;
             };
             const auto& born_squadrons = staging_->arrived_squadrons.value();
             for (const auto id : command.units) {

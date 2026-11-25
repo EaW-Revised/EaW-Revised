@@ -27,6 +27,7 @@ StructuralIndex build_structural_index(std::span<const ReaderPlanet> planets, co
     namespace galactic = sim::galactic;
     std::size_t expected = planets.size() + snapshot.fleets().size() * 4;
     if (snapshot.control()) for (const auto& control : snapshot.control()->planets) expected += control.landed.size();
+    if (snapshot.fleet_control()) expected += snapshot.fleet_control()->detached_units.size();
     std::vector<ReaderObject> objects;
     objects.reserve(expected);
     FlatIdMap identities(expected);
@@ -50,6 +51,14 @@ StructuralIndex build_structural_index(std::span<const ReaderPlanet> planets, co
             if (fleet.motion.transit) transit.insert(member.id);
         }
         if (fleet.motion.transit) transit.insert(fleet.id);
+    }
+    // A unit that left its fleet without landing or joining a new one (WGA-413) stays in orbit outside any fleet. It is a
+    // live object of its owner and the free store serves it, so the roster carries it: every object read (Get_Type, the
+    // stage estimate, free-store selection) answers for it as for any orbiting unit.
+    if (const auto& control = snapshot.fleet_control()) for (const auto& unit : control->detached_units) {
+        const auto* at = find_row(planets, unit.planet, [](const auto& p) { return p.id; });
+        if (!at) continue;
+        add(unit.member.id, unit.member.type, unit.owner, at->position, unit.planet, galactic::IntelligenceContainer::orbit);
     }
     if (snapshot.control()) for (const auto& control : snapshot.control()->planets) {
         const auto* at = find_row(planets, control.planet, [](const auto& p) { return p.id; });

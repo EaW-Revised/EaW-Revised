@@ -51,7 +51,7 @@ bool player_start_requested(const std::vector<std::wstring>& extra) {
     constexpr std::wstring_view player_switches[] = {
         L"--eawr-render-profile", L"--eawr-depth-prepass", L"--eawr-allow-unknown-build", L"--eawr-engine-unverified",
         L"--eawr-audio", L"--eawr-mod-profile", L"--eawr-save-dir", L"--eawr-digest-cache", L"--eawr-game-root",
-        L"--eawr-front-end", L"--eawr-aa", L"--eawr-launcher-screen",
+        L"--eawr-front-end", L"--eawr-aa",
     };
     return std::all_of(extra.begin(), extra.end(), [&](const std::wstring& arg) {
         if (arg.rfind(L"--eawr-", 0) != 0) return true; // a value, an engine switch or another program's switch
@@ -69,7 +69,6 @@ std::vector<std::wstring> godot_arguments(const LaunchInputs& inputs) {
     }
     args.insert(args.end(), {L"--", L"--eawr-game-root", inputs.game_root.wstring(), L"--eawr-front-end"});
     if (player_start_requested(inputs.extra)) args.push_back(L"--eawr-launcher-start");
-    if (inputs.launcher_screen) args.insert(args.end(), {L"--eawr-launcher-screen", std::to_wstring(*inputs.launcher_screen)});
     if (inputs.allow_unknown_build) args.push_back(L"--eawr-allow-unknown-build");
     if (inputs.engine_unverified) args.push_back(L"--eawr-engine-unverified");
     if (inputs.no_fog) args.push_back(L"--eawr-no-fog");

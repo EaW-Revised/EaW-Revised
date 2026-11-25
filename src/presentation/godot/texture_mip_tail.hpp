@@ -26,6 +26,36 @@ namespace eawr::presentation::godot_backend::detail {
     }
 }
 
+// Godot's Image consumes top-left-first rows. An uncompressed texture the
+// decoder kept in bottom-left order (a TGA without the top-origin bit) would
+// sample upside down, unlike the original which reads every file top-first.
+[[nodiscard]] inline bool texture_needs_row_flip(const assets::Texture& texture) {
+    return texture.source_origin == assets::ImageOrigin::bottom_left && texture_block_bytes(texture.format) == 0;
+}
+
+// One level's rows in reverse order, written to `destination` (mip.bytes.size() bytes). A level whose
+// pitch does not match its size is copied as stored.
+inline void copy_mip_rows_top_first(const assets::MipLevel& mip, std::byte* destination) {
+    const std::size_t pitch = mip.row_pitch;
+    if (mip.bytes.empty()) return;
+    if (pitch == 0 || mip.height < 2 || mip.bytes.size() != pitch * mip.height) {
+        std::copy(mip.bytes.begin(), mip.bytes.end(), destination);
+        return;
+    }
+    for (std::size_t row = 0; row < mip.height; ++row) {
+        const auto from = mip.bytes.begin() + static_cast<std::ptrdiff_t>((mip.height - 1 - row) * pitch);
+        std::copy(from, from + static_cast<std::ptrdiff_t>(pitch),
+            destination + static_cast<std::ptrdiff_t>(row * pitch));
+    }
+}
+
+// A copy of one level with its rows reversed (the tail generator's last level).
+[[nodiscard]] inline assets::MipLevel mip_rows_top_first(const assets::MipLevel& mip) {
+    assets::MipLevel result = mip;
+    copy_mip_rows_top_first(mip, result.bytes.data());
+    return result;
+}
+
 // A single-level source remains unmipped. Only an authored multi-level chain
 // needs a tail to satisfy Godot's all-or-nothing mip flag (MT-01).
 [[nodiscard]] inline std::uint64_t texture_mip_tail_bytes(const assets::Texture& texture) {

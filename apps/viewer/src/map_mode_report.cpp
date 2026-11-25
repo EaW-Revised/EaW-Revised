@@ -2,6 +2,7 @@
 #include "eawr/presentation/ui/production.hpp"
 #include "viewer_path.hpp"
 #include "map_mode_internal.hpp"
+#include "frame_diag.hpp"
 #include "land_battle_camera.hpp"
 #include "startup_trace.hpp"
 #include "gpu_memory_trace.hpp"
@@ -85,6 +86,7 @@ std::optional<int> MapMode::State::finish() {
 // drives the record, the clip's provenance and status, and the lifecycle
 // counters and events. The mesh still draws the bind pose.
 bool MapMode::State::write_report() const {
+    FrameDiag::instance().write_files();
     if (options.report_path.empty()) return true;
     std::error_code error;
     const std::filesystem::path parent = options.report_path.parent_path();
@@ -152,6 +154,7 @@ bool MapMode::State::write_report() const {
     gpu_memory_trace.write(output);
     if (hud) output << "  \"hud\": " << hud->report_json() << ",\n";
     output << "  \"perf_overlay\": " << perf_report_json() << ",\n";
+    output << "  \"frame_diag\": " << FrameDiag::instance().report_json() << ",\n";
     output << "  \"net_perf\": " << net_perf_json() << ",\n";
     write_report_scene(output);
     write_shader_activation_report(output, shader_receipt.get());

@@ -5,10 +5,12 @@
 #include "eawr/platform/live_session.hpp"
 
 #include "eawr/platform/live_scripts.hpp"
+#include "live_script_hide_requests.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/letter_box.hpp"
 #include "eawr/script/authoritative/story_presentation.hpp"
 #include "eawr/script/authoritative/tactical_bridge.hpp"
+#include "eawr/script/foc/tactical_ai.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/world.hpp"
 #include "eawr/core/tick_profile.hpp"
@@ -605,7 +607,9 @@ public:
     }
 
     LiveFrame frame() const {
-        const std::lock_guard lock(mutex_);
+        // #8058 P3: the wait for the mutex is a "ui.lock." phase like the other accessors (nothing without a recording).
+        std::unique_lock lock(mutex_, std::defer_lock);
+        { core::tick_profile::Scope wait("ui.lock.frame"); lock.lock(); }
         return frame_;
     }
 
@@ -641,7 +645,8 @@ public:
     }
 
     std::vector<LiveTickCost> tick_costs_after(const std::uint64_t after) const {
-        const std::lock_guard lock(mutex_);
+        std::unique_lock lock(mutex_, std::defer_lock);
+        { core::tick_profile::Scope wait("ui.lock.tick-costs"); lock.lock(); }
         std::vector<LiveTickCost> costs;
         for (auto it = costs_.rbegin(); it != costs_.rend() && it->tick > after; ++it) costs.push_back(*it);
         std::reverse(costs.begin(), costs.end());
@@ -733,6 +738,11 @@ public:
     std::vector<LiveLetterboxRequest> take_letterbox_requests() {
         const std::lock_guard lock(letterbox_mutex_);
         return std::exchange(letterbox_requests_, {});
+    }
+
+    std::vector<LiveSubObjectHideRequest> take_sub_object_hide_requests() {
+        const std::lock_guard lock(sub_object_hide_mutex_);
+        return sub_object_hide_requests_.take();
     }
 
     std::vector<LiveStoryRequest> take_story_requests() {
@@ -1373,6 +1383,7 @@ private:
             sequence = std::max(sequence, routed.key.sequence + 1U);
         }
         publish_letterbox(result.presentation, result.world.completed_tick);
+        publish_sub_object_hide(result.presentation);
         publish_story(result.presentation, result.world.completed_tick);
         if (!options_.debug_letterbox.empty()) {
             std::vector<script::authoritative::ScriptCommand> injected;
@@ -1437,6 +1448,22 @@ private:
             letterbox_requests_.erase(letterbox_requests_.begin(), letterbox_requests_.end() - static_cast<std::ptrdiff_t>(keep));
     }
 
+    void publish_sub_object_hide(const std::vector<script::authoritative::ScriptCommand>& commands) {
+        std::vector<LiveSubObjectHideRequest> made;
+        for (const auto& command : commands) {
+            const bool sub_object = command.verb == script::foc::verb_hide_sub_object;
+            if ((!sub_object && command.verb != script::foc::verb_hide_sound)
+                || command.arguments.size() != (sub_object ? 3U : 2U)) continue;
+            const auto* object = std::get_if<script::authoritative::Handle>(&command.arguments[0].data);
+            const auto* hidden = std::get_if<bool>(&command.arguments[1].data);
+            const auto* name = sub_object ? std::get_if<std::string>(&command.arguments[2].data) : nullptr;
+            if (object && hidden && (!sub_object || name)) made.push_back({object->id, *hidden, name ? *name : std::string{}, sub_object});
+        }
+        if (made.empty()) return;
+        const std::lock_guard lock(sub_object_hide_mutex_);
+        for (auto& request : made) sub_object_hide_requests_.add(std::move(request));
+    }
+
     // The story cinematic, fade and environment calls (the three story verbs); one that does not read back is dropped.
     void publish_story(const std::vector<script::authoritative::ScriptCommand>& commands, const std::uint64_t tick) {
         std::vector<LiveStoryRequest> made;
@@ -1464,6 +1491,8 @@ private:
     LiveScriptReport script_report_;
     std::mutex letterbox_mutex_; // legacy #6634: guards letterbox_requests_ only, so the UI never waits for a step
     std::vector<LiveLetterboxRequest> letterbox_requests_;
+    std::mutex sub_object_hide_mutex_;
+    LiveScriptHideRequests sub_object_hide_requests_;
     std::vector<LiveStoryRequest> story_requests_; // guarded by letterbox_mutex_ too
     double ai_ms_{}; // #957: the last scripted step's AI step and Lua service, for the cost phases
     double lua_ms_{};
@@ -1785,6 +1814,7 @@ void LiveSession::request_save(SaveSink sink) { impl_->request_save(std::move(si
 diagnostics::MemoryCapacity LiveSession::memory_capacity() const { return impl_->memory_capacity(); }
 LiveScriptReport LiveSession::script_report() const { return impl_->script_report(); }
 std::vector<LiveLetterboxRequest> LiveSession::take_letterbox_requests() { return impl_->take_letterbox_requests(); }
+std::vector<LiveSubObjectHideRequest> LiveSession::take_sub_object_hide_requests() { return impl_->take_sub_object_hide_requests(); }
 std::vector<LiveStoryRequest> LiveSession::take_story_requests() { return impl_->take_story_requests(); }
 void LiveSession::stop() { impl_->stop(); }
 std::vector<std::string> LiveSession::tick_hashes() const { return impl_->tick_hashes(); }

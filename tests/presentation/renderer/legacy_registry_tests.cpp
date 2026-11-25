@@ -275,6 +275,31 @@ void source_contracts() {
     check(!legacy::reads_effect_time(shield), "three zero scroll rates require no clock writes");
     shield.bindings[2].value = 0.5F;
     check(!rejection(shield).empty(), "compiled shield rejects a scalar distortion sampler");
+    {
+        const std::array<float, 3> authored{0.0F, 0.0F, 1.0F};
+        const std::array<float, 3> rotated{1.0F, 0.0F, 0.0F};
+        check(legacy::upload_normal(true, authored, rotated) == authored
+                  && legacy::upload_normal(false, authored, rotated) == rotated,
+            "a bone-space-normal family uploads the authored normal, every other family the bind-space one");
+    }
+    {
+        // 8308: the shield family carries the authored normal in its own vertex channel (skinning cannot rotate it).
+        const auto channel = legacy::authored_normal_channel({0.0F, -2.0F, 0.0F});
+        check(channel[0] == 0.0F && channel[1] == -1.0F && channel[2] == 0.0F,
+            "the authored normal channel holds the unit authored normal");
+        const auto none = legacy::authored_normal_channel({0.0F, 0.0F, 0.0F});
+        check(none[0] == 0.0F && none[1] == 0.0F && none[2] == 0.0F, "a zero normal stays zero in the channel");
+        check(legacy::carries_custom0(shield) && legacy::carries_custom0(false, true) && legacy::carries_custom0(true, false)
+                  && !legacy::carries_custom0(false, false),
+            "a bone-space-normal family uploads the CUSTOM0 channel");
+        bool exclusive = true;
+        for (const legacy::Family& family : legacy::families) exclusive = exclusive && !(family.authored_binormals && family.bone_space_normals);
+        check(exclusive, "no family uses CUSTOM0 for both the binormal and the authored normal");
+        const std::string_view source = legacy::mesh_shield::source;
+        check(source.find("CUSTOM0.y + eawr_edge_brightness") != std::string_view::npos
+                  && source.find("NORMAL.y") == std::string_view::npos,
+            "the shield edge term reads the carried normal, not the skinned one");
+    }
     check(legacy::bone_space_normals(shield) && !legacy::bone_space_normals(selector(legacy::mesh_shield::farseer_family, RenderPass::transparent)),
         "the shield edge term reads the normal in the mesh's authored space; the rim family reads the uploaded one");
     auto farseer = selector(legacy::mesh_shield::farseer_family, RenderPass::transparent);

@@ -1165,23 +1165,64 @@ void test_window_placement() {
     const ui::ScreenArea left_of{-1600, 120, 1600, 860};  // a monitor left of the primary: negative origin
     const ui::ScreenArea screens[] = {primary, beside, left_of};
 
-    const std::vector<std::string> requested{"--eawr-launcher-screen", "2"};
-    const auto selected = ui::startup_window_screen(requested, 0, 3);
-    expect(selected == 2, "startup screen: launcher monitor wins over the game's current screen");
-    const auto on_launcher = ui::place_window({1000, 600}, frame, screens, selected, std::nullopt);
-    expect(on_launcher.x < 0 && on_launcher.x + on_launcher.width <= 0,
-           "startup screen: game is placed on the launcher's negative-origin monitor");
-    expect(ui::startup_window_screen({}, 1, 3) == 1, "startup screen: absent hint keeps the current screen");
-    for (const std::string_view value : {"-1", "3", "9999999999999999", "1.5", "bad", ""}) {
-        const std::vector<std::string> invalid{"--eawr-launcher-screen", std::string(value)};
-        const auto fallback = ui::startup_window_screen(invalid, 1, 3);
-        expect(fallback == 1, "startup screen: invalid or disconnected hint keeps the current screen");
-        const auto visible = ui::place_window({1280, 720}, frame, screens, fallback, std::nullopt);
-        expect(visible.x >= 1920, "startup screen: fallback placement stays on the current monitor");
+    // #8382: the game starts on the monitor it last used, from its OWN saved place; there is no launcher hint.
+    // The monitor rectangles are the whole monitors (a saved place names them), not the usable areas above.
+    const ui::ScreenArea monitors[] = {{0, 0, 1920, 1080}, {1920, 0, 2560, 1440}, {-1600, 120, 1600, 900}};
+    const ui::SavedWindow on_beside{{1920, 0, 2560, 1440}, std::make_pair(2400, 200)};
+    const auto beside_start = ui::startup_window_place(on_beside, monitors, 0);
+    expect(beside_start.screen == 1 && beside_start.keep == std::make_pair(2400, 200),
+           "startup place: the saved monitor and position win over the current monitor");
+    const ui::SavedWindow on_left{{-1600, 120, 1600, 900}, std::nullopt};
+    const auto left_start = ui::startup_window_place(on_left, monitors, 1);
+    expect(left_start.screen == 2 && !left_start.keep,
+           "startup place: a full-screen last run reopens on its monitor and is centred");
+    const auto on_saved = ui::place_window({1000, 600}, frame, screens, left_start.screen, left_start.keep);
+    expect(on_saved.x < 0 && on_saved.x + on_saved.width <= 0,
+           "startup place: the game is placed on its saved negative-origin monitor");
+    const ui::SavedWindow resized{{1920, 0, 3840, 2160}, std::make_pair(2000, 100)};
+    expect(ui::startup_window_place(resized, monitors, 0).screen == 1,
+           "startup place: a changed resolution on the same origin still finds the monitor");
+    const ui::SavedWindow gone{{5000, 0, 1920, 1080}, std::make_pair(5100, 50)};
+    const auto gone_start = ui::startup_window_place(gone, monitors, 1);
+    expect(gone_start.screen == 1 && !gone_start.keep,
+           "startup place: a disconnected monitor falls back to the current one, centred");
+    expect(ui::startup_window_place(std::nullopt, monitors, 1).screen == 1,
+           "startup place: no saved place keeps the current monitor");
+    expect(ui::startup_window_place(std::nullopt, monitors, 7).screen == 0 && ui::startup_window_place(on_beside, {}, 0).screen == 0,
+           "startup place: an out-of-range current monitor or no monitors stays safe");
+    const auto kept = ui::place_window({1280, 720}, frame, screens, 1, std::make_pair(100000, 100000));
+    expect(kept.x + kept.width + frame.right <= 1920 + 2560 && kept.y + kept.height + frame.bottom <= 1400,
+           "startup place: a saved position that no longer fits is pulled back onto the monitor");
+    for (const ui::SavedWindow& saved : {on_beside, on_left, resized, gone}) {
+        const auto round_trip = ui::parse_saved_window(ui::serialize_saved_window(saved));
+        expect(round_trip && *round_trip == saved, "saved window: the text form round-trips");
     }
-    const std::vector<std::string> missing{"--eawr-launcher-screen"};
-    expect(ui::startup_window_screen(missing, 1, 3) == 1, "startup screen: missing value keeps current screen");
-    expect(ui::startup_window_screen(requested, 0, 0) == 0, "startup screen: no displays remains safe");
+    for (const std::string_view text : {"", "eawr-window 2\nscreen=0,0,1920,1080\n", "eawr-window 1\n",
+                                        "eawr-window 1\nscreen=0,0,1920\n", "eawr-window 1\nscreen=0,0,0,1080\n",
+                                        "eawr-window 1\nscreen=a,b,c,d\n", "eawr-window 1\nscreen=0,0,1920,1080\nposition=5\n",
+                                        "screen=0,0,1920,1080\n"}) {
+        expect(!ui::parse_saved_window(text), "saved window: a damaged or foreign file is no saved place");
+    }
+    const auto crlf = ui::parse_saved_window("eawr-window 1\r\nscreen=0,0,1920,1080\r\nposition=10,20\r\n");
+    expect(crlf && crlf->screen.width == 1920 && crlf->position == std::make_pair(10, 20),
+           "saved window: a CRLF file parses");
+
+    // What the game writes at exit: minimized writes nothing; windowed keeps its position; full screen or maximized
+    // keeps the earlier windowed position only on the same monitor.
+    const ui::ScreenArea second{1920, 0, 2560, 1440};
+    const std::optional<ui::SavedWindow> earlier = ui::SavedWindow{second, std::make_pair(2400, 200)};
+    expect(!ui::window_to_save(ui::ExitWindowMode::minimized, second, {0, 0}, earlier),
+           "exit place: a minimized window writes nothing");
+    expect(ui::window_to_save(ui::ExitWindowMode::windowed, second, {2500, 300}, earlier)
+               == ui::SavedWindow{second, std::make_pair(2500, 300)},
+           "exit place: a windowed window keeps its monitor and position");
+    expect(ui::window_to_save(ui::ExitWindowMode::other, second, {1920, 0}, earlier) == earlier,
+           "exit place: full screen on the same monitor keeps the earlier windowed position");
+    expect(ui::window_to_save(ui::ExitWindowMode::other, ui::ScreenArea{0, 0, 1920, 1080}, {0, 0}, earlier)
+               == ui::SavedWindow{{0, 0, 1920, 1080}, std::nullopt},
+           "exit place: full screen on another monitor drops the position");
+    expect(ui::window_to_save(ui::ExitWindowMode::other, second, {1920, 0}, std::nullopt) == ui::SavedWindow{second, std::nullopt},
+           "exit place: full screen with no earlier place keeps the monitor only");
 
     ui::WindowPlacement place = ui::place_window({1280, 720}, frame, screens, 0, std::nullopt);
     expect(place.width == 1280 && place.height == 720, "window placement: the size follows the window setting");

@@ -21,18 +21,18 @@ an independently specified v4 suffix and malformed count/identity/order cases.
 Tracked galactic replay fixtures contain world input, not scheduler save blobs,
 so this profile bump does not require rewriting their binary payloads or pins.
 
-During running GC service, Lua errors, rejected binding Results and deterministic
-sandbox quota faults retire only the failing AI-provider instance. Its entire uncommitted
+During running GC service, deterministic sandbox quota faults retire only the
+failing AI-provider instance; a Lua error or a rejected binding Result there ends
+only the failing call or thread (below) and the instance keeps running. Its entire uncommitted
 service output and private immediate-effect shadow are discarded; sibling
 instances continue in the existing partitioned phase or bounded native chain.
-The ordered commit records runtime LoadNote `EAWR-LOAD-1400`. Story and object
-scripts (`retire_on_lua_error` off, host policy, not saved) retire only on a quota
-or budget fault: an uncaught Lua error there ends the failing thread or call, rolls
-back its output and leaves a diagnostic, and the instance stays (see the named
-assumption in `lua-sandbox.md`). Warnings remain
-nonfatal, as do API diagnostics that return a sourced fallback. Retirement follows
-an uncaught protected Lua call failure (providers) or a sandbox quota fault, never a diagnostic
-code by itself. Retirement enters both full and optimized scheduler hashes and
+The ordered commit records runtime LoadNote `EAWR-LOAD-1400`. AI provider, story and
+object scripts (`retire_on_lua_error` off, host policy, not saved) retire only on a
+quota or budget fault: an uncaught Lua error there ends the failing thread or call, rolls
+back its output and leaves a diagnostic, and the instance stays (see `lua-sandbox.md`).
+Warnings remain nonfatal, as do API diagnostics that return a sourced fallback. Retirement
+follows a sandbox quota fault (or, for a host that keeps `retire_on_lua_error` on, an
+uncaught protected Lua call failure), never a diagnostic code by itself. Retirement enters both full and optimized scheduler hashes and
 checkpoint blobs; diagnostics stay outside authoritative state. Infrastructure
 and executor failures still refuse. Native AI/story callback retirement needs
 per-provider transactions and remains a separate follow-up.

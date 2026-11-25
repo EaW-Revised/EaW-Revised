@@ -39,10 +39,32 @@ class PerfTraceNoRenderTimingStructure(unittest.TestCase):
 
     def test_no_other_viewer_source_queries_the_render_time_of_the_trace(self):
         for path in SRC.glob("*.cpp"):
-            if path.name == "perf_trace.cpp":
+            if path.name in ("perf_trace.cpp", "frame_diag.cpp"):
                 continue
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("viewport_get_measured_render_time", text, path.name)
+
+    def test_frame_diag_reads_the_times_only_inside_the_render_thread_callback(self):
+        # #8058 P3: the sync-free path. The main-thread getters appear once, behind the calibration switch.
+        source = (SRC / "frame_diag.cpp").read_text(encoding="utf-8")
+        callback = source[source.index("void FrameDiag::render_thread_sample"):source.index("void FrameDiag::begin_frame")]
+        self.assertIn("viewport_get_measured_render_time_cpu", callback)
+        self.assertIn("viewport_get_measured_render_time_gpu", callback)
+        self.assertEqual(source.count("viewport_get_measured_render_time_cpu"), 2)
+        self.assertEqual(source.count("viewport_get_measured_render_time_gpu"), 2)
+        self.assertIn("if (calibrate_ && viewport_.is_valid())", source)
+        self.assertIn("call_on_render_thread", source)
+        # Off costs one bool test and queues nothing.
+        self.assertIn("if (!enabled_) return;", source[source.index("void FrameDiag::begin_frame"):])
+
+    def test_driven_frames_clear_the_stale_flag(self):
+        source = (SRC / "live_session_frame.cpp").read_text(encoding="utf-8")
+        realtime = source.index("frame_stale_ = rate > 0.0 && wanted_tick > newest;")
+        driven = source.index("frame_stale_ = false;", realtime)
+        self.assertIn("} else {", source[realtime:driven])
+        self.assertLess(driven, source.index("session_->advance_to(base + 1U)", driven))
+        diag = (SRC / "frame_diag.cpp").read_text(encoding="utf-8")
+        self.assertIn("pd::count_stale_frame(summary_.stale_frames, sample.main.flags);", diag)
 
     def test_the_flag_is_documented(self):
         for relative in ("apps/viewer/README.md", "docs/performance/battle-bench.md"):

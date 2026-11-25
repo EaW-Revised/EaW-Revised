@@ -98,6 +98,7 @@ struct GameTick {
     sim::StateHash battle_state_hash;
     std::vector<sim::tactical::AsteroidImpact> asteroid_impacts;
     std::vector<sim::tactical::DamageChange> damage_changes; // transient child presentation facts, not campaign state
+    std::vector<script::authoritative::ScriptCommand> battle_presentation; // transient child script presentation
     std::optional<BattleResult> result;
     std::vector<core::Diagnostic> diagnostics;
     std::vector<BattleChoiceResponse> battle_choice_responses;

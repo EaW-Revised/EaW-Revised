@@ -458,11 +458,8 @@ struct EawrLanLobby::Impl final {
     model::HostOptions host_options;
     std::vector<sim::tactical::PlayerId> human_owners{1, 2};
     std::uint32_t direct_seats{2};
-    // Campaign rooms open the mesh only once every configured human has joined. Until the host chooses a number, the room opens for
-    // two (net::galactic_lobby_default_humans; #8130 lifts this). The skirmish transport capacity (human_owners) must not leak into it.
-    std::uint32_t galactic_humans{2};
-    bool galactic_humans_chosen{};      // the host picked a number in the dropdown: it stays while the campaign can start with it
-    bool galactic_humans_defaulted{};   // the default was fitted to the campaign list on the host options page
+    // A campaign room opens with a seat for every playable row of the campaign (human_owners) and starts with the humans present (#8130).
+    bool galactic_capacity_fitted{};    // the room's seats were fitted to the campaign list on the host options page
     std::uint32_t galactic_seat_limit{}; // the transport's seats of the room (the map's rows) when the room was opened
     bool host_port_mapping{};           // the router mapping the host asked for, kept for a re-opened room
     skirmish::SetupSelection selection;

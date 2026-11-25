@@ -74,6 +74,11 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
             return sim::math::Vec3{sim::math::multiply(point.x, scale).value(),
                 sim::math::multiply(point.y, scale).value(), sim::math::multiply(point.z, scale).value()};
         };
+        // The unit frame turns model points by +90 degrees about Z (x, y, z) -> (-y, x, z) after scaling.
+        for (const auto& [bone, point] : unit.bone_rests) {
+            const auto placed = bound(point);
+            type.bones.emplace_back(bone, sim::math::Vec3{sim::math::Fixed::from_raw(-placed.y.raw()), placed.x, placed.z});
+        }
         if (unit.collision) type.proximity_bounds = std::array{bound(unit.collision->min), bound(unit.collision->max)};
         type.category_bits = unit.category_bits;
         type.property_bits = unit.property_bits;

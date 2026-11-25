@@ -1483,7 +1483,8 @@ void test_modifier_removal() {
     steps(value, 620, executor);
     const auto retained_before = value.ledgers()[2].credits;
     steps(value, 621, executor);
-    const auto& attached = value.ledgers()[0].completed.front().income_modifiers.front().attached;
+    const auto value_ledgers = value.ledgers();
+    const auto& attached = value_ledgers[0].completed.front().income_modifiers.front().attached;
     expect(value.ledgers()[2].credits.raw() - retained_before.raw() == 2 * low.raw() + base.raw()
         && attached == std::vector<eawr::sim::EntityId>{10, 11},
         "WBP-45/46 repeated scans neither duplicate contributions nor expire them at five seconds");
@@ -1505,7 +1506,8 @@ void test_modifier_removal() {
     auto reversed = session(modifier_setup(), content);
     expect(reversed.submit({{0, 1, 0}, {10}, t::BuyPayload{90}}).has_value(), "reverse modifier delivers");
     steps(reversed, 4, executor);
-    const auto& reverse_state = reversed.ledgers()[0].completed.front().income_modifiers.front();
+    const auto reversed_ledgers = reversed.ledgers();
+    const auto& reverse_state = reversed_ledgers[0].completed.front().income_modifiers.front();
     expect(reverse_state.initialized && reverse_state.attached.empty() && reverse_state.next_scan_frame == 0,
         "WBP-45 reverse activation removes contributions and schedules no periodic service");
     const auto reverse_before = reversed.ledgers()[2].credits;
@@ -1520,7 +1522,8 @@ void test_modifier_removal() {
     expect(termination.submit({{0, 1, 0}, {10}, t::BuyPayload{90}}).has_value()
         && termination.submit({{4, 1, 1}, {10}, t::BuyPayload{91}}).has_value(), "reverse termination commands deliver");
     steps(termination, 8, executor);
-    const auto& residuals = termination.ledgers()[0].income_residuals;
+    const auto termination_ledgers = termination.ledgers();
+    const auto& residuals = termination_ledgers[0].income_residuals;
     expect(residuals.size() == 1 && residuals.front().income_modifiers.front().attached
         == std::vector<eawr::sim::EntityId>{10, 11}
         && residuals.front().income_modifiers.front().next_scan_frame == 0,

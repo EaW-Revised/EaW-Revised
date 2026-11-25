@@ -706,16 +706,87 @@ std::vector<DisplaySize> resolution_choices(const DisplaySize screen, const std:
     return sizes;
 }
 
-std::size_t startup_window_screen(const std::span<const std::string> arguments, const int current, const int count) {
-    const int fallback = current >= 0 && current < count ? current : 0;
-    // -1 means "no usable hint"; a plain int keeps gcc's -Wmaybe-uninitialized quiet about an optional's payload.
-    int requested = -1;
-    for (std::size_t i = 0; i < arguments.size(); ++i) {
-        if (arguments[i] == "--eawr-launcher-screen") {
-            requested = i + 1 < arguments.size() ? parse_int(arguments[++i]).value_or(-1) : -1;
+std::string serialize_saved_window(const SavedWindow& window) {
+    std::string text = "eawr-window 1\nscreen=" + std::to_string(window.screen.x) + "," + std::to_string(window.screen.y)
+        + "," + std::to_string(window.screen.width) + "," + std::to_string(window.screen.height) + "\n";
+    if (window.position) {
+        text += "position=" + std::to_string(window.position->first) + "," + std::to_string(window.position->second) + "\n";
+    }
+    return text;
+}
+
+namespace {
+
+// "a,b[,c,d]" as exactly `count` integers; anything else is nothing.
+std::optional<std::array<int, 4>> parse_int_list(std::string_view text, const std::size_t count) {
+    std::array<int, 4> values{};
+    for (std::size_t index = 0; index < count; ++index) {
+        const std::size_t comma = text.find(',');
+        if ((comma == std::string_view::npos) != (index + 1 == count)) return std::nullopt;
+        const auto number = parse_int(text.substr(0, comma));
+        if (!number) return std::nullopt;
+        values[index] = *number;
+        text = comma == std::string_view::npos ? std::string_view{} : text.substr(comma + 1);
+    }
+    return values;
+}
+
+} // namespace
+
+std::optional<SavedWindow> parse_saved_window(const std::string_view text) {
+    std::size_t at = text.find('\n');
+    if (at == std::string_view::npos) return std::nullopt;
+    std::string_view first = text.substr(0, at);
+    if (!first.empty() && first.back() == '\r') first.remove_suffix(1);
+    if (first != "eawr-window 1") return std::nullopt;
+    ++at;
+    std::optional<SavedWindow> window;
+    std::optional<std::pair<int, int>> position;
+    while (at < text.size()) {
+        std::size_t end = text.find('\n', at);
+        if (end == std::string_view::npos) end = text.size();
+        std::string_view line = text.substr(at, end - at);
+        at = end + 1;
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        if (line.starts_with("screen=")) {
+            const auto values = parse_int_list(line.substr(7), 4);
+            if (!values || (*values)[2] <= 0 || (*values)[3] <= 0) return std::nullopt;
+            window = SavedWindow{{(*values)[0], (*values)[1], (*values)[2], (*values)[3]}, std::nullopt};
+        } else if (line.starts_with("position=")) {
+            const auto values = parse_int_list(line.substr(9), 2);
+            if (!values) return std::nullopt;
+            position = std::make_pair((*values)[0], (*values)[1]);
         }
     }
-    return static_cast<std::size_t>(requested >= 0 && requested < count ? requested : fallback);
+    if (!window) return std::nullopt;
+    window->position = position;
+    return window;
+}
+
+StartupPlace startup_window_place(const std::optional<SavedWindow>& saved, const std::span<const ScreenArea> monitors,
+                                  const int current) {
+    const int count = static_cast<int>(monitors.size());
+    const std::size_t fallback = static_cast<std::size_t>(current >= 0 && current < count ? current : 0);
+    if (!saved) return {fallback, std::nullopt};
+    std::optional<std::size_t> origin_match;
+    for (std::size_t index = 0; index < monitors.size(); ++index) {
+        if (monitors[index] == saved->screen) return {index, saved->position};
+        if (!origin_match && monitors[index].x == saved->screen.x && monitors[index].y == saved->screen.y) origin_match = index;
+    }
+    if (origin_match) return {*origin_match, saved->position};
+    return {fallback, std::nullopt};
+}
+
+std::optional<SavedWindow> window_to_save(const ExitWindowMode mode, const ScreenArea& monitor,
+                                          const std::pair<int, int> position, const std::optional<SavedWindow>& previous) {
+    if (mode == ExitWindowMode::minimized) return std::nullopt; // a minimized window has no place worth keeping
+    SavedWindow place{monitor, std::nullopt};
+    if (mode == ExitWindowMode::windowed) {
+        place.position = position;
+    } else if (previous && previous->screen == monitor) {
+        place.position = previous->position; // full screen keeps the windowed position it had on this monitor
+    }
+    return place;
 }
 
 WindowPlacement place_window(const DisplaySize wanted, const FrameInsets frame, const std::span<const ScreenArea> screens,

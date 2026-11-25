@@ -27,7 +27,6 @@ struct LaunchInputs {
     std::optional<unsigned> lan_game_port; // instance n >= 2: --eawr-lan-game-port (47624 + 2*(n-1))
     std::optional<std::wstring> render_thread; // profile mode or saved fallback, before Godot user arguments
     std::optional<int> quit_after; // smoke checks: Godot --quit-after N frames
-    std::optional<int> launcher_screen; // transient monitor hint from the manager's launch request
     std::vector<std::wstring> extra; // appended after the viewer arguments (after "--")
 };
 

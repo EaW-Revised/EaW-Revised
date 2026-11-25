@@ -228,7 +228,7 @@ private:
     // Pages
     void open_lobby();
     void open_host_options();
-    void fill_host_seats(std::uint32_t requested_count = 0);
+    void fill_host_seats();
     void prepare_host_rows(const skirmish::SetupMap&);
     void configure_staging();
     [[nodiscard]] bool publish_staging_selection();

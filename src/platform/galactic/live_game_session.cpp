@@ -8,6 +8,8 @@
 #include "eawr/net/galactic_clock_policy.hpp"
 #include "eawr/platform/agreed_campaign.hpp"
 #include "eawr/platform/tactical_feed.hpp"
+#include "../live_script_hide_requests.hpp"
+#include "eawr/script/foc/tactical_ai.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
 #include "eawr/platform/campaign_end_provider.hpp"
 #include "eawr/assets/map.hpp"
@@ -1172,6 +1174,7 @@ public:
                 battle_snapshots_.clear();
                 battle_hashes_.clear();
                 battle_events_ = LiveEventLog{LiveEventLog::Bounds{}};
+                battle_sub_object_hides_.clear();
                 battle_fog_.clear();
                 ready_conflict_ = 0;
                 battle_paused_ = true;
@@ -1206,6 +1209,16 @@ public:
             battle_snapshots_.push_back(snapshot);
             if (battle_snapshots_.size() > 64) battle_snapshots_.pop_front();
             battle_events_.record(*snapshot, stepped.value().asteroid_impacts, battle_base_types_, stepped.value().damage_changes);
+            for (const auto& command : stepped.value().battle_presentation) {
+                const bool sub_object = command.verb == script::foc::verb_hide_sub_object;
+                if ((!sub_object && command.verb != script::foc::verb_hide_sound)
+                    || command.arguments.size() != (sub_object ? 3U : 2U)) continue;
+                const auto* object = std::get_if<script::authoritative::Handle>(&command.arguments[0].data);
+                const auto* hidden = std::get_if<bool>(&command.arguments[1].data);
+                const auto* name = sub_object ? std::get_if<std::string>(&command.arguments[2].data) : nullptr;
+                if (object && hidden && (!sub_object || name))
+                    battle_sub_object_hides_.add({object->id, *hidden, name ? *name : std::string{}, sub_object});
+            }
             if (const auto* world = session_->battle()) {
                 if (const auto* cells = world->fog_cells()) {
                     for (std::size_t player = 0; player < world->players().size(); ++player) {
@@ -2108,6 +2121,7 @@ public:
     galactic::SeatId summary_closed_seat_{};
     std::deque<std::shared_ptr<const sim::tactical::TacticalSnapshot>> battle_snapshots_;
     LiveEventLog battle_events_{LiveEventLog::Bounds{}};
+    LiveScriptHideRequests battle_sub_object_hides_;
     std::uint64_t galactic_cursor_{};
     std::deque<LiveGalacticEvent> galactic_events_;
     LiveStoryFeed story_feed_;
@@ -2194,6 +2208,10 @@ public:
         galactic::SeatId seat, sim::tactical::PlayerId player, sim::tactical::PlayerId view_player)
         : owner_(std::move(owner)), conflict_(std::move(conflict)), seat_(seat), player_(player), view_player_(view_player) {}
     bool current() const { return owner_->active_conflict_ && owner_->active_conflict_->id == conflict_->id; }
+    std::vector<LiveSubObjectHideRequest> take_sub_object_hide_requests() override {
+        const std::lock_guard lock(owner_->mutex_);
+        return current() ? owner_->battle_sub_object_hides_.take() : std::vector<LiveSubObjectHideRequest>{};
+    }
     bool running() const { return !owner_->stopping_ && current() && owner_->frame_.conflict && owner_->frame_.conflict->id == conflict_->id; }
     std::optional<AgreedPacing> agreed_pacing() const override {
         if (!owner_->options_.step_driver) return {};

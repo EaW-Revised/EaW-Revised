@@ -943,42 +943,6 @@ void test_flow_launch_loop() {
     CHECK(f.runner.calls == 6);
 }
 
-void test_flow_launcher_screen() {
-    // Both manager handoffs forward the transient screen; malformed hints cannot become an index.
-    for (const bool stay_open : {false, true}) {
-        for (const std::string_view screen : {"0", "2", "-1", "1.5", "2147483648", "\"2\"", "null"}) {
-            FlowFixture f;
-            auto options = f.options();
-            options.game_root = f.game;
-            options.mods = true;
-            write_file(f.package / "launcher/project.godot", "manager");
-            write_file(f.package / "eawr_mods_service.exe", "service");
-            write_file(f.user_data / "mods/profiles/sample.json",
-                       R"({"format":"eawr-mod-profile","version":1,"id":"sample","launch":{"render_thread":"safe"}})");
-            const auto request = f.user_data / "launcher/next-action.json";
-            const auto publish = [&] {
-                write_file(request, std::string(R"({"action":"launch-profile","profile":"sample","screen":)")
-                           + std::string(screen) + (stay_open ? ",\"stay_open\":true}" : "}"));
-            };
-            const auto check_game = [&] {
-                const auto& args = f.runner.args;
-                const auto hint = std::find(args.begin(), args.end(), L"--eawr-launcher-screen");
-                if (screen == "0" || screen == "2") {
-                    CHECK(hint != args.end() && hint + 1 != args.end() && *(hint + 1) == widen_ascii(screen));
-                } else CHECK(hint == args.end());
-                CHECK(std::find(args.begin(), args.end(), L"--eawr-launcher-start") != args.end());
-            };
-            f.runner.on_run = [&] { if (f.runner.calls == 1) publish(); else check_game(); };
-            f.runner.on_monitored = [&](const auto& poll, const auto& started) {
-                if (poll) { publish(); poll(); }
-                else { CHECK(started && started(1234)); check_game(); }
-            };
-            CHECK(f.run(options) == kExitOk);
-            CHECK(f.runner.calls == 2);
-        }
-    }
-}
-
 void test_stale_running_state_at_start() {
     FlowFixture f;
     auto options = f.options();
@@ -2405,7 +2369,6 @@ int main(int argc, char** argv) {
     test_depth_prepass_precedence();
     test_flow_mods();
     test_flow_launch_loop();
-    test_flow_launcher_screen();
     test_stale_running_state_at_start();
     test_flow_stay_open();
     test_flow_stay_open_failures();

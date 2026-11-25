@@ -987,6 +987,8 @@ struct PopulationStorage {
     struct { std::vector<int> placed_ships; } options_;
     struct { std::vector<int> players; void clear() { players.clear(); } } bind_players_;
     std::vector<std::optional<int>> live_decisions_, live_models_, live_clips_, turret_bindings_, live_alternate_clips_;
+    std::map<int, int> model_mesh_names_;
+    std::vector<int> live_mesh_names_, live_script_hidden_meshes_;
     std::vector<std::optional<int>> land_clips_, land_idle_, land_clip_bindings_;
     std::vector<std::vector<int>> hull_surface_assets_, contact_bones_, hardpoint_states_;
     std::vector<std::map<std::uint32_t, int>> hardpoint_turret_bindings_;

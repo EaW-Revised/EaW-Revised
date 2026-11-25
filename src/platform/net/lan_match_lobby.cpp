@@ -193,10 +193,8 @@ bool TcpLanMatch::lobby_galactic_game(const net::GalacticLobbyOptions& requested
             for (const auto& candidate : galactic_->campaigns()) if (candidate.name == options.campaign) campaign = &candidate;
             if (campaign == nullptr)
                 return lobby_feedback(lobby_fail<void>(net::LobbyReason::invalid_choice, "This room does not list that campaign."));
-            // The seats of the room cannot change while guests are connected: a campaign with fewer playable factions than the room has
-            // seats could never start.
-            if (const auto refusal = net::galactic_lobby_switch_refusal(*campaign, lobby_->snapshot()))
-                return lobby_feedback(lobby_fail<void>(net::LobbyReason::invalid_choice, *refusal));
+            // The room starts with the humans present, so a campaign with fewer playable factions than the room has seats is fine
+            // (#8130): every guest keeps a row of its own or shares one.
             auto reseated = net::galactic_lobby_reseat(options, *campaign, lobby_->snapshot(), galactic_->dialog_rows());
             if (!reseated)
                 return lobby_feedback(lobby_fail<void>(net::LobbyReason::invalid_choice, "The campaign has no row left for every player."));
@@ -743,8 +741,10 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
         };
         hooks.remove_peer = [this](net::PeerIndex peer, net::LobbyReason) { closing_peers_.insert(peer); removed_peers_.insert(peer); };
         if (online_options_ || (io_->transport.tcp && io_->transport.tcp->staging_capacity())) {
-            // A campaign freezes the roster when its setup is ready, not at Start: its preparation is long and cancels back to staging (#8130).
-            hooks.lock_at_start = io_->transport.tcp && io_->transport.tcp->staging_capacity() && !galactic_room();
+            hooks.lock_at_start = io_->transport.tcp && io_->transport.tcp->staging_capacity();
+            // A campaign's preparation is long and cancels back to staging: it freezes the roster after the preparation, before the
+            // setup (which needs the staged mesh open between every pair), not at Start (#8130).
+            hooks.lock_after_preparation = galactic_room();
             hooks.mesh_complete = [this]() -> core::Result<void> {
                 if (io_->transport.tcp && io_->transport.tcp->mesh_complete(admitted_seats(lobby_->snapshot()))) return core::Result<void>::success();
                 return lobby_fail<void>(net::LobbyReason::mesh_incomplete, "The room mesh is incomplete.");
@@ -929,6 +929,10 @@ void TcpLanMatch::pump_lobby(const skirmish::FixtureOptions& selected) {
         lobby_clock_ = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
         if (online_options_ && !drain_mesh_events()) return;
         sample_online_route();
+        // A campaign Start prepares for a long time before its roster freezes (at setup-ready): a staged host refuses new attachments
+        // meanwhile, so the freeze cannot be raced by a stray join; a cancel back to staging reopens joins (#8130).
+        if (lobby_ && view().host && galactic_room() && io_->transport.tcp)
+            io_->transport.tcp->hold_staging_joins(lobby_->start_pending() || lobby_->snapshot().phase == net::LobbyPhase::starting);
         if (galactic_start_) { pump_galactic_start(); return; }
         if (lobby_ && lobby_->snapshot().phase == net::LobbyPhase::starting
             && !lobby_->start_pending() && !lobby_->setup_pending()

@@ -91,10 +91,7 @@ void EawrLanLobby::open_host_options() {
         seats->set_retail_list(true);
     }
     fill_host_seats();
-    if (auto* seats = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO"))
-        seats->connect("item_selected", callable_mp(this, &EawrLanLobby::on_item_selected).bind(String("IDC_INTERNET_HOST_CLAN_COMBO")));
-    if (auto* label = EAWR_CONTROL(EawrUiLabel, "IDC_TEXT_HOST_CLAN")) label->set_text("Human players");
-    // Human players use the clan row; the LAN password row remains available for mapping.
+    // The clan row is unused (a room's seats follow the campaign or the map); the LAN password row remains available for mapping.
     if (auto* password = EAWR_CONTROL(Control, "IDC_INTERNET_GAME_PASSWORD_EDIT");
         password != nullptr && impl_->join_selection.source() == model::LobbySourceKind::lan) {
         password->set_visible(false);

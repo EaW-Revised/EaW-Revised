@@ -163,4 +163,9 @@ inline constexpr Family families[]{
     return family != nullptr && family->bone_space_normals;
 }
 
+// Whether the material's meshes upload a CUSTOM0 channel (authored binormal or authored normal).
+[[nodiscard]] inline bool carries_custom0(const MaterialDescription& material) noexcept {
+    return carries_custom0(authored_binormals(material), bone_space_normals(material));
+}
+
 } // namespace eawr::presentation::godot_backend::legacy

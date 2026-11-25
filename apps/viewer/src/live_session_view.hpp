@@ -126,6 +126,9 @@ public:
     [[nodiscard]] std::vector<platform::LiveLetterboxRequest> take_letterbox_requests() {
         return session_ ? session_->take_letterbox_requests() : std::vector<platform::LiveLetterboxRequest>{};
     }
+    [[nodiscard]] std::vector<platform::LiveSubObjectHideRequest> take_sub_object_hide_requests() {
+        return session_ ? session_->take_sub_object_hide_requests() : std::vector<platform::LiveSubObjectHideRequest>{};
+    }
 
     // The story cinematic camera, screen fade and environment requests of the tactical scripts since the last call, in script
     // order (docs/behaviour/tactical-story-cinematic.md). Local presentation: nothing here is part of the world, replay or a save.
@@ -379,6 +382,8 @@ public:
     [[nodiscard]] const battle::BattleStart* start_data() const noexcept { return start_ ? &*start_ : nullptr; }
     // The tick the last frame drew (fractional between ticks).
     [[nodiscard]] double presented_tick() const noexcept { return presented_tick_; }
+    // #8058 P3: the last frame wanted a tick past the newest published one (the sim did not publish in time; the picture held).
+    [[nodiscard]] bool frame_stale() const noexcept { return frame_stale_; }
     // WU-60: the local player just ordered an attack (or a targeted ability) on `target`: flash it, and every member
     // of its squadron. Presentation only.
     void flash_order_target(sim::EntityId target);
@@ -597,6 +602,10 @@ public:
     }
     [[nodiscard]] const RenderClock& render_clock() const noexcept { return render_clock_; }
     [[nodiscard]] std::optional<BattleEffects::UnitFrame> unit_frame(sim::EntityId entity) const;
+    [[nodiscard]] bool script_sound_silent(sim::EntityId entity, bool fallback) const {
+        const auto found = script_sound_silent_.find(entity);
+        return found == script_sound_silent_.end() ? fallback : found->second;
+    }
     // Report path only (--eawr-perf-movers): the content name of a unit type, empty while the type table is not indexed yet
     // or for a type that is not a unit. Not hashed, saved or replayed.
     [[nodiscard]] std::string unit_type_name(sim::tactical::TypeId type) const {
@@ -855,6 +864,7 @@ private:
     std::vector<sim::tactical::PlayerId> ai_players_;
     // --eawr-live-ai has no effect outside the live m2/skirmish starts (report row + warning).
     bool ai_flag_ignored_{};
+    bool frame_stale_{};
     std::optional<sim::tactical::TacticalSetup> setup_;
     std::map<sim::tactical::PlayerId, std::size_t> beacon_ships_;
     std::optional<sim::tactical::TacticalReplay> replay_;
@@ -941,6 +951,8 @@ private:
     std::map<sim::EntityId, sim::tactical::Squadron> squadrons_;  // by container, as first registered
     std::map<sim::EntityId, std::uint64_t> squadron_seen_;       // the tick of the snapshot that first listed it
     std::map<sim::EntityId, BattleEffects::UnitFrame> unit_frames_;
+    std::map<sim::EntityId, bool> script_sound_silent_;
+    std::map<std::pair<sim::EntityId, std::string>, platform::LiveSubObjectHideRequest> pending_sub_object_hides_;
     // #427 BP-21: per unit, the presented tick its last shield colour flash started at, while
     // the flash runs; how many flashes started.
     presentation_constants::Flash shield_flash_constants_;

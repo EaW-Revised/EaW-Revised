@@ -42,7 +42,7 @@ inline constexpr std::uint32_t hold_fire_block_version = 1;
 inline constexpr std::array<std::uint8_t, 4> suspended_locomotor_tag{'S', 'L', 'O', 'C'};
 inline constexpr std::uint32_t suspended_locomotor_block_version = 1;
 inline constexpr std::array<std::uint8_t, 4> script_view_tag{'S', 'V', 'E', 'W'};
-inline constexpr std::uint32_t script_view_block_version = 1;
+inline constexpr std::uint32_t script_view_block_version = 2;
 // The target scans' collection trees (#469, space-targeting CO rules), once a unit with a combat
 // profile has stepped.
 inline constexpr std::array<std::uint8_t, 4> collection_tag{'C', 'U', 'L', 'L'};

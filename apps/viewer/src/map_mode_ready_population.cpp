@@ -7,6 +7,7 @@
 #include "battle_content.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
+#include "frame_diag.hpp"
 #include "eawr/presentation/camera/overview.hpp"
 #include "render_profile_viewport.hpp"
 #include "settings_store.hpp"
@@ -1038,6 +1039,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 },
             } : SpaceEffectsHook{},
             .write_hud_report = [&state](std::ostream& output) {
+                FrameDiag::instance().write_files();
                 if (state.loading) output << "  \"loading_screen\": " << state.loading->report_json() << ",\n";
                 else if (!state.loading_failure.empty())
                     output << "  \"loading_screen\": {\"shown\": false, \"failure\": " << json(state.loading_failure) << "},\n";
@@ -1045,6 +1047,7 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 // #5355: the shared battle speed notice as last shown (empty outside multiplayer).
                 output << "  \"speed_notice\": " << json(state.speed_notice_text.text()) << ",\n";
                 output << "  \"perf_overlay\": " << state.perf_report_json() << ",\n";
+                output << "  \"frame_diag\": " << FrameDiag::instance().report_json() << ",\n";
                 output << "  \"net_perf\": " << state.net_perf_json() << ",\n";
                 if (state.live_session) output << "  \"overview_ui\": " << state.overview_report_json() << ",\n";
             },

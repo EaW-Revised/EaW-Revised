@@ -551,15 +551,7 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
         return true;
     };
     const auto select_profile = [&](const JsonValue& action) {
-        if (!select_profile_id(action.string_member("profile"))) return false;
-        // Screen is a launch-time hint, never a saved profile or video setting.
-        inputs.launcher_screen.reset();
-        if (const auto* screen = action.member("screen"); screen && screen->kind == JsonValue::Kind::number
-            && screen->number >= 0 && screen->number <= std::numeric_limits<int>::max()
-            && std::floor(screen->number) == screen->number) {
-            inputs.launcher_screen = static_cast<int>(screen->number);
-        }
-        return true;
+        return select_profile_id(action.string_member("profile"));
     };
     // Instance n >= 2: the game's user:// follows APPDATA, set only for the game child (never the manager).
     const auto game_environment = [&](bool on) {
