@@ -1,5 +1,14 @@
 # Python source and synthetic evidence contracts.
 
+add_executable(console_core_tests ../console/core_tests.cpp)
+target_link_libraries(console_core_tests PRIVATE eawr::presentation eawr::ui_data)
+target_compile_features(console_core_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(console_core_tests)
+add_test(NAME console_core_contracts COMMAND console_core_tests)
+eawr_add_python_contract(python_console_registry tests.console.test_registry)
+add_test(NAME console_transcript COMMAND "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/console/test_transcript.py" "$<TARGET_FILE:sim_headless>")
+
 add_executable(shader_translation_cache_tests shader_translation_cache_tests.cpp)
 target_link_libraries(shader_translation_cache_tests PRIVATE eawr::presentation eawr::assets)
 target_compile_features(shader_translation_cache_tests PRIVATE cxx_std_20)

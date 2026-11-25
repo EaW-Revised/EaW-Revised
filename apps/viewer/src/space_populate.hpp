@@ -624,6 +624,8 @@ private:
     std::uint64_t shield_shells_shown_{};
     // #82: each live ship's model-space box (min, max) and last pose transform.
     std::vector<std::optional<std::pair<std::array<float, 3>, std::array<float, 3>>>> live_bounds_;
+    // #8313: the same box over hull pieces only (no shield bubble, cloak or gate piece): the bar anchor's model bounds.
+    std::vector<std::optional<std::pair<std::array<float, 3>, std::array<float, 3>>>> live_hull_bounds_;
     std::vector<std::optional<sim::math::Mat3x4>> live_transforms_;
     std::vector<bool> backdrop_ships_;
     std::vector<std::string> live_undrawn_;

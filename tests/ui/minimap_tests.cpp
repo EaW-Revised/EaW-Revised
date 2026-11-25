@@ -142,6 +142,49 @@ void test_faction_registry() {
         "WNO-40: a later definition replaces the complete earlier faction colour input");
 }
 
+// PROVISIONAL (#8359): Factions.xml `Coop_Player_Colours` (list honoured, bad lists rejected, absent list = no entry).
+void test_coop_player_colours() {
+    const auto faction = [](const std::string& name, const std::vector<std::string>& entries, const bool list = true) {
+        data::XmlNode node = tag("Faction", "");
+        node.attributes.push_back(attribute("Name", name));
+        node.children = {tag("Color", "10,20,30,255"), tag("No_Colorization_Color", "40,50,60,255")};
+        data::XmlNode colours = tag("Coop_Player_Colours", "");
+        colours.source.logical_path = "data/xml/" + name + ".xml";
+        for (const auto& entry : entries) colours.children.push_back(tag("Coop_Player_Colour", entry));
+        if (list) node.children.push_back(colours);
+        return node;
+    };
+    data::XmlNode factions = tag("Factions", "");
+    factions.children = {
+        faction("Good", {"0 128 128 255", "200,10,10", "1 2 3 4"}),   // honoured, in order, alpha optional
+        faction("Short", {"9 9 9"}),                                   // a shorter list is just a shorter list
+        faction("Absent", {}, false),                                  // no list: no entry
+        faction("Bad", {"0 128 128", "300 0 0"}),                      // not a colour: rejected whole
+        faction("Twice", {"5 5 5", "5 5 5 255"}),                      // duplicate (alpha ignored)
+        faction("Own", {"7 7 7", "10 20 30"}),                         // equals the faction's own Color
+        faction("OwnNo", {"40 50 60"}),                                // equals its No_Colorization_Color
+        faction("Many", {"1 0 0", "2 0 0", "3 0 0", "4 0 0", "5 0 0", "6 0 0", "7 0 0", "8 0 0"})}; // 8 > 7
+    const ui::MinimapSettings settings = ui::minimap_settings(nullptr, nullptr, &factions);
+    const auto good = ui::faction_coop_colours(settings, "GOOD");
+    expect(good.size() == 3 && good[0] == data::ui::Rgba8{0, 128, 128, 255} && good[1] == data::ui::Rgba8{200, 10, 10, 255}
+               && good[2] == data::ui::Rgba8{1, 2, 3, 4},
+           "#8359: a Coop_Player_Colours list is read in order, any case of the faction name");
+    expect(ui::faction_coop_colours(settings, "Short").size() == 1, "#8359: a shorter list keeps its length");
+    for (const char* name : {"Absent", "Bad", "Twice", "Own", "OwnNo", "Many", "Unknown"})
+        expect(ui::faction_coop_colours(settings, name).empty(), "#8359: an absent or rejected list gives the faction no entry");
+    std::vector<core::Diagnostic> coop; // the null radar and constants roots add their own fallback diagnostics
+    for (const auto& diagnostic : settings.diagnostics)
+        if (diagnostic.code == ui::diagnostic_codes::coop_player_colours) coop.push_back(diagnostic);
+    expect(coop.size() == 5, "#8359: each rejected list is diagnosed once");
+    bool named = true;
+    for (const auto& diagnostic : coop)
+        named = named && diagnostic.logical_path && diagnostic.message.find("Faction ") == 0
+            && diagnostic.logical_path->find("data/xml/") == 0 && diagnostic.logical_path->find(".xml") != std::string::npos;
+    expect(named && !coop.empty() && coop[0].message.find("Bad") != std::string::npos
+               && *coop[0].logical_path == "data/xml/Bad.xml",
+           "#8359: the diagnostic names the faction and the file");
+}
+
 // MM-09: the outline's lines stop at the minimap's edge.
 void test_clip() {
     const auto inside = ui::minimap_clip({-0.5, -0.5}, {0.5, 0.5});
@@ -751,6 +794,7 @@ int main() {
     expect(ui::minimap_hazards(overlap, extents, {}, 0, 80).empty(), "WHZ-72: invalid drawable dimensions leave retry to the view");
     test_settings();
     test_faction_registry();
+    test_coop_player_colours();
     test_mapping();
     test_blips();
     test_point_and_scale();

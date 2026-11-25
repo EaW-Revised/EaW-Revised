@@ -50,6 +50,8 @@ using BattleRgb = std::array<std::uint8_t, 3>;
 // (shades by default; with `ally_shades` off a palette colour of their own). AI seats the caller names in `ai_mates`
 // (allied AI) are mates too and take the shades after the human mates. Script and unknown seats get no entry.
 // The inputs are the saved galactic seat and side tables in their canonical order, so every peer derives the same table.
+// PROVISIONAL (#8359): `coop_colours` is the local faction's Factions.xml `Coop_Player_Colours` list; entry n is the n-th mate
+// (human mates in seat order, then allied AI), and a mate past the end of the list, or an empty list, takes the shade.
 // The one switch for the enemy rule: true would give each enemy side a palette colour instead (not the owner's choice).
 inline constexpr bool gc_enemy_humans_use_palette = false;
 
@@ -82,7 +84,12 @@ namespace detail {
     const std::span<const sim::galactic::TeamLead> teams,
     const std::span<const BattleRgb> palette, const bool ally_shades,
     const sim::SeatId local_seat = {}, const std::optional<BattleRgb> local_faction = {},
-    const std::span<const sim::SeatId> ai_mates = {}) {
+    const std::span<const sim::SeatId> ai_mates = {}, const std::span<const BattleRgb> coop_colours = {}) {
+    // Mate number `rank` (1-based): the mod's list entry when it has one, else nothing (the caller shades).
+    const auto listed = [&](const std::size_t rank) -> std::optional<BattleRgb> {
+        if (rank == 0 || rank > coop_colours.size()) return std::nullopt;
+        return coop_colours[rank - 1];
+    };
     const auto human = [](const auto& value) { return value.kind == sim::SeatKind::human && value.human_side_id != 0; };
     const auto row = std::find_if(seats.begin(), seats.end(), [seat](const auto& value) { return value.seat_id == seat; });
     if (row == seats.end()) return {};
@@ -98,7 +105,9 @@ namespace detail {
         if (!own_colour || found == ai_mates.end()) return {};
         const auto human_mates = static_cast<std::size_t>(std::count_if(seats.begin(), seats.end(), [&](const auto& other) {
             return human(other) && other.human_side_id == own_side && other.seat_id != local_seat; }));
-        return detail::gc_shade(*local_faction, human_mates + 1 + static_cast<std::size_t>(found - ai_mates.begin()));
+        const auto ai_rank = human_mates + 1 + static_cast<std::size_t>(found - ai_mates.begin());
+        if (const auto mod = listed(ai_rank)) return mod;
+        return detail::gc_shade(*local_faction, ai_rank);
     }
     if (!human(*row) || !side_known(row->human_side_id)) return {};
     const auto leads = [&](const auto& value) {
@@ -134,6 +143,8 @@ namespace detail {
         ++rank;
     }
     if (rank == 0) return own_colour && row->human_side_id == own_side ? std::nullopt : base; // own: no tint
+    if (own_colour && row->human_side_id == own_side)
+        if (const auto mod = listed(rank)) return mod;
     if (ally_shades) return detail::gc_shade(*base, rank);
     const auto index = (gc_enemy_humans_use_palette ? enemy_sides : 0U) + extra;
     if (index >= pool.size()) return detail::gc_shade(*base, rank); // palette exhausted: fall back to a shade

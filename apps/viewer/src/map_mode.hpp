@@ -226,6 +226,7 @@ public:
     // The window's close request: a live space view writes its report before the engine quits.
     void close_requested();
     void input(const godot::Ref<godot::InputEvent>& event);
+    [[nodiscard]] bool story_controls_locked() const noexcept;
     void observe_pointer(const godot::Ref<godot::InputEvent>& event, presentation::ui::InputFocus pointer_focus);
     void focus(bool focused);
     void pointer_left();

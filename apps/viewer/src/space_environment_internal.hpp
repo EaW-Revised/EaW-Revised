@@ -289,6 +289,10 @@ public:
     void camera_pointer_left();
     void camera_sample_pointer(float x, float y);
     void camera_clear_pointer_sample();
+    void camera_user_lock(bool locked) noexcept {
+        camera_user_locked_ = locked;
+        if (bridge_) bridge_->set_user_locked(locked);
+    }
     [[nodiscard]] std::optional<std::array<float, 2>> camera_pointer_hold() const;
     [[nodiscard]] std::optional<std::array<float, 2>> camera_take_pointer_hold_warp();
     void camera_viewport(float width, float height);
@@ -416,6 +420,7 @@ private:
     std::unique_ptr<GodotRenderer> renderer_;
     FixedCamera camera_;
     std::unique_ptr<viewer::MapCameraBridge> bridge_;
+    bool camera_user_locked_{};
     // MAT-10: the attract's saved frame; the camera never changes but for the window's size.
     bool locked_view_{};
     // The attract's frame before the view's own adjustments (window size, eye and look-at).

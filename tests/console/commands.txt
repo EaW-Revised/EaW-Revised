@@ -1,0 +1,5 @@
+help
+ls commands h
+history 2
+unknown
+fps

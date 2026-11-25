@@ -1781,6 +1781,8 @@ core::Result<void> GalacticSession::apply_control_battle(const ControlBattleRetu
     } else if (!returned.land && planet.starbase.owner == (returned.station_owner ? returned.station_owner : returned.defender)) {
         planet.starbase.level = std::min(planet.starbase.level, returned.station_level);
         if (!planet.starbase.level) planet.starbase = {};
+        // WAR-43 / WGM-188: the destroyed base takes the planet's space specials with it, through the ordinary special removal.
+        if (returned.clear_space_structures && !planet.starbase.level) impl.clear_control_structures(index, ProductionDomain::space);
     }
     if (returned.land) fix_built_structures(planet.built_structures, returned.winner);
     std::erase_if(planet.ground_layout, [&](const auto& row) { return std::find(departed.begin(), departed.end(), row.object) != departed.end(); });

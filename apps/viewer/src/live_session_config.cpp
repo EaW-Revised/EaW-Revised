@@ -777,6 +777,12 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
             options.save_tick = *tick;
             options.save_path = ViewerPath{text.substr(colon + 1)}.native();
         }
+    } else if (name == "--eawr-live-story-lock") {
+        const auto colon = text.find(':');
+        const auto tick = colon == std::string::npos ? std::optional<std::uint64_t>{} : parse_u64(std::string_view(text).substr(0, colon));
+        const auto flag = colon == std::string::npos ? std::string{} : text.substr(colon + 1);
+        if (!tick || *tick == 0 || (flag != "on" && flag != "off")) error = "--eawr-live-story-lock expects <tick>:<on|off>";
+        else options.debug_story_lock.push_back({*tick, flag == "on"});
     } else if (name == "--eawr-live-letterbox") {
         // <tick>:<in|out>:<seconds>
         const auto first = text.find(':');

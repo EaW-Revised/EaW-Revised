@@ -72,7 +72,25 @@ struct EngineContractAccess {
         return engine.players_.front();
     }
     static void execution(Engine& engine) { engine.service_galactic_execution(engine.players_.front()); }
+    static bool culled(const Engine& engine, const PlayerAi& player, std::size_t function, std::uint64_t target) {
+        return engine.galactic_culled(player, function, engine.target(target));
+    }
     static void reindex(Engine& engine) { engine.rebuild_runtime_index(); }
+    // Three proposable functions over target 1 (planet 20): GOAL, GOAL_B (Is_Like GOAL) and the global GOAL_G (no target).
+    static PlayerAi& propose_fixture(Engine& engine, bool planet_goal_active) {
+        PlayerAi owner; owner.player = 1; owner.galactic = true; owner.per_frame = 1; owner.targets = {1};
+        for (const char* name : {"GOAL", "GOAL_B", "GOAL_G"}) {
+            owner.functions.push_back({&engine.data_.goals.at(name), name, nullptr, {}});
+            owner.proposal_counts[name] = 1;
+        }
+        if (planet_goal_active) { Goal goal; goal.id = 7; goal.function = 0; goal.target = 1; goal.active = true; owner.active.push_back(goal); }
+        Goal global; global.id = 9; global.function = 2; global.target = 0; global.active = true; owner.active.push_back(global);
+        engine.players_.clear(); engine.players_.push_back(std::move(owner));
+        Target target; target.id = 1; target.object = 20; engine.targets_[1] = target;
+        engine.rebuild_runtime_index();
+        return engine.players_.front();
+    }
+    static void propose(Engine& engine, PlayerAi& player) { engine.propose(player); }
 };
 }
 
@@ -282,6 +300,80 @@ void execution_work_contracts() {
         const auto trace = session.state_sha256() + std::to_string(work.stage_preparations) + std::to_string(work.stage_reuses);
         if (baseline.empty()) baseline = trace; else expect(trace == baseline, "execution work and ordered assignment agree on 1/2/4/8 workers");
     }
+}
+
+// GS-04 / WGA-18: the galactic goal cull. A pair is culled (free, uncounted) when an ACTIVE goal is alike it, or when its
+// planet target has no stage location under the goal's Reachability; the proposed set never culls; an absent relation
+// does not cull; SINGLE_HOP_DISCONNECTED stages at the target itself.
+void goal_cull_contracts() {
+    eawr::platform::ThreadWorkerAdapter executor(2);
+    ai::AiData data; ai::GoalType goal; goal.name = "GOAL"; goal.reachability = "ANY"; goal.application = {"FRIENDLY"};
+    data.goals.emplace(goal.name, goal);
+    ai::GoalType alike = goal; alike.name = "GOAL_B"; alike.is_like = {"GOAL"};
+    data.goals.emplace(alike.name, alike);
+    ai::GoalType global; global.name = "GOAL_G"; global.reachability = "ANY"; global.application = {"GLOBAL"};
+    data.goals.emplace(global.name, global);
+    ai::PlanDef plan; plan.name = "FIXTURE"; plan.allow_free_store = true; plan.taskforces.resize(2);
+    gc::GalacticSetup configured; configured.players = {{1, 1, 0}};
+    configured.planets = {{10, {}, 1}, {20, {whole(3), whole(4), {}}, 1}};
+    configured.player_economy = gc::PlayerEconomySetup{{{1, whole(200), whole(1000), 2, 5}}};
+    configured.fiscal = gc::FiscalSetup{whole(2500), {{1, true, whole(1)}}, {{10, {}}, {20, {}}}};
+    configured.rules.fiscal_cycle_frames = 10000;
+    configured.rules.maximum_fleet_movement_distance = Fixed{};
+    configured.fleets = {{30, 1, 10, {{31, 100}, {32, 100}}}};
+    configured.fleet_control = gc::FleetControlSetup{{}, {{100, false, true, false}}, {}};
+    configured.production = gc::ProductionSetup{5, {{1, false, true, true, whole(50), {}, {}, {}, {}}}, {}};
+    gc::PlanetProduction producer; producer.planet = 10; producer.target_owner = producer.starbase_owner = producer.ground_occupier = 1;
+    producer.enabled = producer.surface_accessible = true; producer.ground_slots = producer.space_slots = 3;
+    producer.maximum_ground_forces = 10;
+    gc::PlanetProduction destination; destination.planet = 20;
+    configured.production->planets = {producer, destination};
+    auto session = take(gc::GalacticSession::create(configured));
+    ai::GalacticPerceptionSetup perception; perception.seed = 42;
+    perception.players = {{1, 1, "Empire", "Normal", false, true, false, 10}};
+    perception.planets = {{10, "ALPHA", 1000, {}, {}, {}, {}, {}}, {20, "BETA", 1000, {}, {}, {}, {}, {}}};
+    auto world = std::make_shared<ai::GalacticWorld>(perception);
+    ai::GalacticConnectivity paths; paths.revision = 1; paths.execution_available = true;
+    paths.goal_reach = {{1, 20, "ANY", {10}}};
+    take(world->bind(session.snapshot(), paths, executor, 0, session.next_entity_id()));
+    auto host = std::make_shared<foc::detail::Host>(); host->ai_world = world; host->view = world->view();
+    auto engine = std::make_shared<ai::Engine>(host, data, std::vector{plan});
+    auto& player = ai::EngineContractAccess::execution_fixture(*engine, 0); // active goal 7: function 0 on target 1 (planet 20)
+    expect(ai::EngineContractAccess::culled(*engine, player, 0, 1), "an ACTIVE alike goal culls the pair");
+    player.active.front().finished = true;
+    expect(!ai::EngineContractAccess::culled(*engine, player, 0, 1), "a finished goal no longer culls; planet 20 is staged from 10");
+    player.active.clear();
+    ai::Goal proposed; proposed.id = 8; proposed.function = 0; proposed.target = 1; player.proposed.push_back(proposed);
+    expect(!ai::EngineContractAccess::culled(*engine, player, 0, 1), "the proposed set never culls");
+    expect(world->goal_target_staged(1, 20, " any ") == true && !world->goal_target_staged(1, 10, "ANY").has_value()
+        && world->goal_target_staged(1, 20, "Single_Hop_Disconnected") == true && !world->goal_target_staged(1, 20, "NOT_A_POLICY").has_value(),
+        "stage location: a production site reaches the target; no row is not a known refusal; single hop stages at the target");
+    paths.revision = 2; paths.goal_reach.front().production_sites.clear();
+    take(world->bind(session.snapshot(), paths, executor, 1, session.next_entity_id()));
+    expect(world->goal_target_staged(1, 20, "ANY") == false, "an empty production-site set has no stage location");
+    expect(ai::EngineContractAccess::culled(*engine, player, 0, 1), "an unreachable planet target culls the pair (WGA-18)");
+    expect(world->goal_target_staged(1, 20, "SINGLE_HOP_DISCONNECTED") == true, "single hop disconnected is never unreachable by the site set");
+
+    // Propose level: culled pairs are free. With a budget of 1 per frame, one proposal call walks every culled pair, counts
+    // none as non-trivial, proposes nothing and reaches the end of the function list (maintenance due, cursor reset).
+    const auto expect_free_pass = [&](ai::PlayerAi& proposer, const char* what) {
+        ai::EngineContractAccess::propose(*engine, proposer);
+        expect(proposer.maintenance_due && proposer.nontrivial == 0 && proposer.proposed.empty()
+            && proposer.next_function == 0 && proposer.next_target == 0, what);
+    };
+    paths.revision = 3; paths.goal_reach.front().production_sites = {10};
+    take(world->bind(session.snapshot(), paths, executor, 2, session.next_entity_id()));
+    auto& alike_player = ai::EngineContractAccess::propose_fixture(*engine, true);
+    expect(ai::EngineContractAccess::culled(*engine, alike_player, 1, 1), "an ACTIVE goal named in Is_Like culls the pair");
+    expect(ai::EngineContractAccess::culled(*engine, alike_player, 2, 0), "a null (global) target is culled by an ACTIVE alike global goal");
+    expect_free_pass(alike_player, "same goal, Is_Like and global pairs alike an ACTIVE goal are free: no count, no budget step, cursor past the end");
+    alike_player.active.clear();
+    expect(!ai::EngineContractAccess::culled(*engine, alike_player, 1, 1) && !ai::EngineContractAccess::culled(*engine, alike_player, 2, 0),
+        "without an ACTIVE alike goal neither the Is_Like pair (staged) nor the null target (no reach relation) culls");
+    paths.revision = 4; paths.goal_reach.front().production_sites.clear();
+    take(world->bind(session.snapshot(), paths, executor, 3, session.next_entity_id()));
+    auto& unreachable_player = ai::EngineContractAccess::propose_fixture(*engine, false);
+    expect_free_pass(unreachable_player, "unreachable planet pairs (and the global pair alike an ACTIVE goal) are free in the proposal pass");
 }
 
 void immediate_cash_contracts() {
@@ -1330,7 +1422,7 @@ void installed() {
 int case_galactic_ai_execution_tests(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
-        else { unnamed_ground_activation(); execution_work_contracts(); immediate_cash_contracts(); native_execution_state(); live_execution_restore(); paid_contracts(); routes(); packed_routes(); admission(); safety(); lua_callbacks(); }
+        else { unnamed_ground_activation(); execution_work_contracts(); goal_cull_contracts(); immediate_cash_contracts(); native_execution_state(); live_execution_restore(); paid_contracts(); routes(); packed_routes(); admission(); safety(); lua_callbacks(); }
     } catch (const std::exception& exception) { std::cerr << exception.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

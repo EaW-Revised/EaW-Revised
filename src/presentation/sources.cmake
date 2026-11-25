@@ -3,6 +3,7 @@
 # ROOT_ONLY lists preserve the root build's existing additional units.
 
 set(EAWR_PRESENTATION_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/console/core.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/shader_material.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/shader_material_activation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/shader_material_route.cpp"

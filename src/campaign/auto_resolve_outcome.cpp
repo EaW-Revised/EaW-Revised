@@ -187,6 +187,12 @@ core::Result<AutoResolveOutcomeApplication> plan_auto_resolve_outcome(const Conf
     return core::Result<AutoResolveOutcomeApplication>::success(std::move(a));
 }
 
+bool auto_resolve_clears_space_structures(const AutoResolveOutcomeApplication& a,
+    const sim::galactic::ControlPlanet* presence) noexcept {
+    return !a.land && a.base_changed && !a.result.station_level && presence && presence->starbase.level
+        && presence->starbase.owner != a.result.winner;
+}
+
 core::Result<void> apply_auto_resolve_outcome(sim::galactic::GalacticSession& galaxy,
     const AutoResolveOutcomeApplication& a, const AutoResolveOutcomeServices& services) {
     if (!valid(a)) return fail<void>("invalid auto-resolve application");

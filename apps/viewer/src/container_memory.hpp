@@ -146,6 +146,7 @@ diagnostics::MemoryCapacity SpacePopulation::memory_capacity() const {
     result.vector("population", "live_blast_charging", live_blast_charging_);
     result.vector("population", "live_blast_charged", live_blast_charged_);
     result.vector("population", "live_bounds", live_bounds_);
+    result.vector("population", "live_hull_bounds", live_hull_bounds_);
     result.vector("population", "live_transforms", live_transforms_);
     result.vector("population", "live_clips", live_clips_);
     result.vector("population", "live_alternate_clips", live_alternate_clips_);

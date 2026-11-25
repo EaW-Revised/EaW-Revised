@@ -1,5 +1,6 @@
 #include "galactic_support.hpp"
 
+#include "eawr/core/sha256.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/galactic_bridge.hpp"
 #include "eawr/script/numeric/binary64.hpp"
@@ -8,6 +9,9 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <string>
+#include <variant>
+#include <span>
 
 namespace {
 using namespace galactic_test;
@@ -1201,6 +1205,178 @@ void object_scheduler_barrier() {
         && live_commands.pending_script_commands() == 2,
         "object story commands commit in the current barrier rather than route as next-tick orders");
 }
+
+// #8427: the per-tick script digest of the story and object schedulers is their sync digest under a new identity.
+// The legacy formula below is the pre-#8427 encoding, written out independently so the restore path stays byte-exact.
+void legacy_field(std::string& out, std::string_view text) { out += std::to_string(text.size()) + ":"; out += text; }
+void legacy_value(std::string& out, const auth::Value& item) {
+    std::visit([&](const auto& part) {
+        using T = std::decay_t<decltype(part)>;
+        if constexpr (std::is_same_v<T, std::monostate>) legacy_field(out, "nil");
+        else if constexpr (std::is_same_v<T, bool>) legacy_field(out, part ? "true" : "false");
+        else if constexpr (std::is_same_v<T, LuaNumber>) { legacy_field(out, "number"); legacy_field(out, std::to_string(part.repr)); }
+        else if constexpr (std::is_same_v<T, std::string>) { legacy_field(out, "string"); legacy_field(out, part); }
+        else if constexpr (std::is_same_v<T, auth::Handle>) {
+            legacy_field(out, "handle"); legacy_field(out, std::to_string(part.kind)); legacy_field(out, std::to_string(part.id));
+        } else {
+            legacy_field(out, "list"); legacy_field(out, std::to_string(part.size()));
+            for (const auto& child : part) legacy_value(out, child);
+        }
+    }, item.data);
+}
+std::string legacy_script_digest(auth::ScriptedGalacticSession& host, const auth::GalacticScriptSave& saved) {
+    std::string bytes;
+    legacy_field(bytes, "eawr-script-galactic-state-v1");
+    legacy_field(bytes, "ai"); legacy_field(bytes, host.ai_scheduler().state_hash().value());
+    legacy_field(bytes, "story"); legacy_field(bytes, host.story_scheduler().state_hash().value());
+    if (host.object_scheduler()) { legacy_field(bytes, "objects"); legacy_field(bytes, host.object_scheduler()->state_hash().value()); }
+    legacy_field(bytes, std::to_string(saved.next_sequence.size()));
+    for (const auto& [seat, sequence] : saved.next_sequence) {
+        legacy_field(bytes, std::to_string(seat.value)); legacy_field(bytes, std::to_string(sequence));
+    }
+    legacy_field(bytes, std::to_string(saved.exhausted_seats.size()));
+    for (const auto seat : saved.exhausted_seats) legacy_field(bytes, std::to_string(seat.value));
+    legacy_field(bytes, std::to_string(saved.pending.size()));
+    for (const auto& command : saved.pending) {
+        legacy_field(bytes, std::to_string(command.tick)); legacy_field(bytes, std::to_string(command.issuer));
+        legacy_field(bytes, std::to_string(command.sequence)); legacy_field(bytes, command.verb);
+        legacy_value(bytes, auth::Value{command.arguments});
+    }
+    return eawr::core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
+}
+
+struct DigestObjectEngine final : auth::GalacticObjectScriptEngine {
+    eawr::core::Result<auth::ServiceReport> service(const eawr::sim::PartitionExecutor& executor,
+        galactic::GalacticSession& world, auth::ScriptScheduler& scripts) override {
+        if (auto set = scripts.set_galactic_frame(world.clock().galactic_frame); !set)
+            return eawr::core::Result<auth::ServiceReport>::failure(set.error());
+        auth::ServiceOptions options; options.time_tick = world.clock().galactic_frame;
+        return scripts.service(executor, options);
+    }
+};
+
+// Draws one random number when Poke is set, then clears it: the instance's random draw counter differs afterwards.
+constexpr std::string_view poke_loop = R"LUA(
+Count = 0
+function main()
+    while true do
+        Count = Count + 1
+        if Poke then Draw(); Poke = nil end
+        Emit(GetCurrentTime.Frame(), Count)
+        coroutine.yield(true)
+    end
+end
+Create_Thread("main")
+)LUA";
+
+auth::ScriptedGalacticSession digest_host(std::string_view story_script = loop) {
+    auto host = auth::ScriptedGalacticSession::create(galactic::GalacticSession::create(setup()).value(),
+        scheduler(1, std::string(loop)), scheduler(2, std::string(story_script)), scheduler(3, std::string(loop))).value();
+    wire(host);
+    expect(bool(host.set_object_engine(std::make_shared<DigestObjectEngine>())), "digest host object engine installed");
+    return host;
+}
+
+void assign(auth::ScriptScheduler& scripts, std::uint64_t id, std::string name, auth::Value value, std::uint64_t tick = 1) {
+    auth::ScriptEvent event;
+    event.key = {tick, auth::first_simulation_producer, id, 0}; event.target = id;
+    event.kind = auth::ScriptEvent::Kind::assign; event.name = std::move(name); event.parameter = std::move(value);
+    expect(bool(scripts.submit_event(std::move(event))), "assign event admitted");
+}
+
+void sync_digest_identity() {
+    const eawr::sim::InlineExecutor executor;
+    // (1) One Lua value: the same assignment with a different number, applied by a service; no event stays pending.
+    for (const bool objects : {false, true}) {
+        auto a = digest_host(), b = digest_host();
+        auto& sa = objects ? *a.object_scheduler() : a.story_scheduler();
+        auto& sb = objects ? *b.object_scheduler() : b.story_scheduler();
+        const auto id = objects ? 3U : 2U;
+        assign(sa, id, "Probe", auth::Value::number(LuaNumber(7)));
+        assign(sb, id, "Probe", auth::Value::number(LuaNumber(8)));
+        const auto ta = a.step(executor), tb = b.step(executor);
+        expect(ta && tb, "Lua value probe steps");
+        const auto da = a.script_state_hash(), db = b.script_state_hash();
+        expect(da && db && da.value() != db.value(),
+            objects ? "one object Lua value changes the script digest" : "one story Lua value changes the script digest");
+        expect(ta && tb && ta.value().state_hash.get() != tb.value().state_hash.get(), "the Lua value reaches the tick hash");
+    }
+    // (2) One pending event, for each of story and objects.
+    for (const bool objects : {false, true}) {
+        auto host = digest_host();
+        expect(bool(host.step(executor)), "pending probe step");
+        const auto before = host.script_state_hash();
+        auto& scripts = objects ? *host.object_scheduler() : host.story_scheduler();
+        assign(scripts, objects ? 3U : 2U, "Later", auth::Value::number(LuaNumber(1)), host.completed_tick() + 5);
+        const auto after = host.script_state_hash();
+        expect(before && after && before.value() != after.value(),
+            objects ? "one pending object event changes the script digest" : "one pending story event changes the script digest");
+    }
+    // (3) One instance metadata field: the random draw counter.
+    {
+        auto a = digest_host(poke_loop), b = digest_host(poke_loop);
+        assign(b.story_scheduler(), 2, "Poke", auth::Value{true});
+        expect(bool(a.step(executor)) && bool(b.step(executor)), "metadata probe steps");
+        const auto da = a.script_state_hash(), db = b.script_state_hash();
+        expect(da && db && da.value() != db.value(), "one instance random-draw counter changes the script digest");
+    }
+    // (4) Identical across runs and 1/2/4/8 workers, with the object scheduler present.
+    const auto run = [](const eawr::sim::PartitionExecutor& on) {
+        auto host = digest_host();
+        std::vector<std::string> out;
+        for (int tick = 0; tick < 24; ++tick) {
+            auto stepped = host.step(on);
+            expect(bool(stepped), "identity run step");
+            if (!stepped) return out;
+            out.push_back(stepped.value().state_hash.get());
+            out.push_back(host.script_state_hash().value());
+        }
+        return out;
+    };
+    const auto baseline = run(executor);
+    expect(baseline.size() == 48 && run(executor) == baseline, "the script digest is identical across runs");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter threads(workers);
+        expect(run(threads) == baseline, "the script digest is identical on 1/2/4/8 workers");
+    }
+    // (5) The new identity differs from the legacy full-archive one; a legacy save restores once, then moves on.
+    auto host = digest_host();
+    for (int tick = 0; tick < 6; ++tick) expect(bool(host.step(executor)), "legacy probe step");
+    auto saved = host.save_scripts();
+    expect(saved && !saved.value().pending.empty(), "legacy probe saves with pending commands");
+    if (!saved) return;
+    const auto legacy = legacy_script_digest(host, saved.value());
+    expect(legacy != saved.value().scripts_sha256, "new saves carry the new script digest identity");
+    const auto restore = [&](const auth::GalacticScriptSave& package) {
+        auto world = galactic::GalacticSession::from_replay(host.record()).value();
+        while (world.completed_tick() < host.completed_tick()) expect(bool(world.step(executor)), "legacy probe world replay");
+        return auth::ScriptedGalacticSession::restore(std::move(world), scheduler(1, std::string(loop)),
+            scheduler(2, std::string(loop)), package, scheduler(3, std::string(loop)));
+    };
+    auto current = restore(saved.value());
+    expect(bool(current) && current.value().script_state_hash().value() == saved.value().scripts_sha256,
+        "a current save restores with the current digest");
+    auto old = saved.value();
+    old.scripts_sha256 = legacy;
+    auto tampered = old;
+    tampered.scripts_sha256 = std::string(64, '0');
+    const auto refused = restore(tampered);
+    expect(!refused && refused.error().message.find("script barrier digest differs") != std::string::npos,
+        "a digest that is neither current nor legacy is refused");
+    auto restored = restore(old);
+    expect(bool(restored), "a save with the legacy full-archive digest restores");
+    if (!restored) return;
+    auto& resumed = restored.value();
+    expect(resumed.script_state_hash().value() == legacy, "the restored barrier reports the legacy digest until it steps");
+    expect(resumed.script_hash_for_final_barrier(false).value() == legacy, "the legacy barrier never reuses a cached digest");
+    auto resaved = resumed.save_scripts();
+    expect(resaved && resaved.value().scripts_sha256 == legacy, "a save before the first step keeps the legacy barrier digest");
+    wire(resumed);
+    expect(bool(resumed.set_object_engine(std::make_shared<DigestObjectEngine>())), "legacy restore object engine installed");
+    const auto live = host.step(executor), next = resumed.step(executor);
+    expect(live && next && live.value().state_hash.get() == next.value().state_hash.get(),
+        "after its first step the legacy restore uses the current digest and matches the live session");
+}
 } // namespace
 
 int main() {
@@ -1219,6 +1395,7 @@ int main() {
     ai_instance_copy_seam();
     worker_parity();
     object_scheduler_barrier();
+    sync_digest_identity();
     if (failures) return 1;
     std::cout << "galactic Lua host contracts passed\n";
     return 0;

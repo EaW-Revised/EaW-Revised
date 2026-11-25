@@ -64,7 +64,8 @@ core::Result<std::optional<GalacticGoalIdentity>> Engine::allocate_galactic_goal
     for (const auto& [name, count] : player->exclusion_counts) counts.exclusions[name] = count;
     if (!galactic_goals::proposable(counts, function.goal_name)) { player->count_refusal(GalacticRefusal::blocked, function_index); return core::Result<Answer>::success({}); }
     Goal goal; goal.function = function_index; goal.target = target_id;
-    for (const auto* goals : {&player->active, &player->proposed}) for (const auto& retained : *goals)
+    // GS-04 / WGA-18: only an ACTIVE alike goal culls; the original's cull does not consult the proposed set.
+    for (const auto& retained : player->active)
         if (!retained.finished && like(*player, retained, goal)) return core::Result<Answer>::success({});
     const auto value = run_equation(*function.equation, context_of(*player, selected));
     if (!value) { player->count_refusal(GalacticRefusal::unavailable, function_index); return core::Result<Answer>::success({}); } // unqualified perception remains unavailable

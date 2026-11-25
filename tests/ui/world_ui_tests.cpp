@@ -319,11 +319,26 @@ void bars() {
     expect(close_to(ui::bar_scale(750.0F, 1500.0F, 1.0F), 2.0F), "at half Health_Bar_Scale it doubles");
     const float small_width = ui::bar_width(ui::BarSize::small);
     const float close_scale = ui::bar_scale(1.0F, 1500.0F, 1.0F);
-    expect(close_to(small_width * ui::bounded_bar_scale(close_scale, small_width, 1280.0F), 320.0F),
-           "a close camera bounds a small ship bar to a quarter of the viewport");
+    expect(close_to(small_width * ui::bounded_bar_scale(close_scale, small_width, 1280.0F), 256.0F),
+           "a close camera bounds a small ship bar to a fifth of the viewport");
     expect(close_to(ui::bounded_bar_scale(2.0F, small_width, 1280.0F), 2.0F),
            "the bound preserves authored scaling when the bar fits");
 
+    {
+        // #8313: a corvette's medium bar at 1280x720 (UI scale 0.9375). Retail (debug-build capture, closest zoom, camera
+        // about 214 away) draws ~445 px unbounded; ours is capped at 20 percent of the viewport (owner decision, #8313).
+        const float medium = ui::bar_width(ui::BarSize::medium);
+        const float ui_scale = 720.0F / 768.0F;
+        const float close = medium * ui::bar_scale(214.0F, 1500.0F, 1.0F) * ui_scale;
+        expect(close > 430.0F && close < 460.0F, "retail's unbounded close medium bar is about 445 px");
+        const float close_bounded = medium * ui::bounded_bar_scale(
+            ui::bar_scale(214.0F, 1500.0F, 1.0F) * ui_scale, medium, 1280.0F);
+        expect(close_to(close_bounded, 256.0F), "the close medium bar is bounded to a fifth of the viewport");
+        const float medium_zoom = medium * ui::bounded_bar_scale(ui::bar_scale(1000.0F, 1500.0F, 1.0F) * ui_scale, medium, 1280.0F);
+        expect(close_to(medium_zoom, medium * 1.5F * ui_scale), "at the default distance the bar is the retail width: below the cap");
+        const float far_width = medium * ui::bounded_bar_scale(ui::bar_scale(3000.0F, 1500.0F, 1.0F) * ui_scale, medium, 1280.0F);
+        expect(close_to(far_width, medium * ui_scale), "a far medium bar keeps its authored width, below the bound");
+    }
     expect(ui::bar_level(1.0F) == 10 && ui::bar_level(0.0F) == 0, "full and empty levels");
     expect(ui::bar_level(0.91F) == 10 && ui::bar_level(0.9F) == 9, "the level is the ceiling of ten times the fraction");
     expect(ui::bar_level(0.01F) == 1, "any health shows level 1");

@@ -107,6 +107,9 @@ bool MapMode::State::write_report() const {
         }
     }
     output << "{\n  \"schema_version\": 1,\n"
+        << "  \"story_controls_locked\": " << (story_controls_locked ? "true" : "false") << ",\n"
+        << "  \"game_menu_open\": " << (menu_open ? "true" : "false") << ",\n"
+        << "  \"game_menu_opens\": " << game_menu_opens << ",\n"
         << "  \"mode\": \"map\",\n"
         << "  \"status\": " << json(status) << ",\n"
         << "  \"failure\": " << json(failure) << ",\n"

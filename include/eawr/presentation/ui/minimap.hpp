@@ -38,6 +38,7 @@ namespace eawr::presentation::ui {
 
 namespace diagnostic_codes {
 inline constexpr std::string_view minimap_settings = "EAWR-UI-0330"; // a RadarMap.xml or GameConstants value falls back
+inline constexpr std::string_view coop_player_colours = "EAWR-UI-0331"; // PROVISIONAL (#8359): a faction's list is rejected
 } // namespace diagnostic_codes
 
 // MM-01, MM-05: RadarMap.xml's space settings and the GameConstants radar colours.
@@ -56,6 +57,9 @@ struct MinimapSettings {
     // MM-07: Factions.xml `Color` per faction name, for owners without a lobby colour.
     std::vector<std::pair<std::string, data::ui::Rgba8>> faction_colours;
     std::vector<std::pair<std::string, data::ui::Rgba8>> faction_no_colorization;
+    // PROVISIONAL (#8359): Factions.xml `Coop_Player_Colours` per faction name, the colour order of the local side's
+    // team mates in a campaign battle (1st mate first). Only factions with a valid, non-empty list have an entry.
+    std::vector<std::pair<std::string, std::vector<data::ui::Rgba8>>> faction_coop_colours;
     std::vector<core::Diagnostic> diagnostics;
 };
 // Any root may be null (the file is missing); its values keep FoC's.
@@ -65,6 +69,11 @@ struct MinimapSettings {
 // A faction's colour (any case), or nothing.
 [[nodiscard]] std::optional<data::ui::Rgba8> faction_colour(const MinimapSettings& settings, std::string_view faction,
     bool no_colorization = false);
+
+// PROVISIONAL (#8359): a faction's co-op mate colours (any case); empty when it has no valid list.
+[[nodiscard]] std::span<const data::ui::Rgba8> faction_coop_colours(const MinimapSettings& settings, std::string_view faction);
+// The most entries a `Coop_Player_Colours` list may hold: a campaign battle seats at most 8 players, one is the local seat.
+inline constexpr std::size_t max_coop_player_colours = 7;
 
 // MM-06: what an object type shows on the minimap (its XML, with the engine's defaults).
 struct MinimapTypeLooks {

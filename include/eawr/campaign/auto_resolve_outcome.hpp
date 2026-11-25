@@ -46,6 +46,12 @@ struct AutoResolveOutcomeInputs {
     const ConflictRecord& conflict, const AutoResolveRoster& roster,
     const AutoResolveRoundOutcome& outcome, const AutoResolveOutcomeInputs& inputs);
 
+// WAR-43: a space auto-resolve that destroys the LOSING planet's base also clears that planet's space special structures.
+// The winner's own budget downgrade to zero (WAR-44) is not this case. `presence` is the planet's control row before the
+// return; real battle returns never use this (WGM-57: only structures that died in the fight leave).
+[[nodiscard]] bool auto_resolve_clears_space_structures(const AutoResolveOutcomeApplication& application,
+    const sim::galactic::ControlPlanet* presence) noexcept;
+
 struct AutoResolveOutcomeServices {
     // WAR-U04LethalEffects: ordinary GC death path owns bounty, hero scheduling,
     // elimination and sound. Absence retains the documented least-visible seam.

@@ -96,6 +96,46 @@ void fallback(MinimapSettings& settings, const std::string_view path, const std:
     settings.diagnostics.push_back(std::move(diagnostic));
 }
 
+// PROVISIONAL (#8359): read a faction's `Coop_Player_Colours` list. A list that breaks a load rule is rejected whole (the
+// faction then keeps the built-in colour family) with a diagnostic naming the faction and file.
+void read_coop_colours(MinimapSettings& settings, const data::XmlNode& faction, const std::string_view faction_name,
+                       const std::vector<data::ui::Rgba8>& own_colours) {
+    const data::XmlNode* list = last_child(faction, "Coop_Player_Colours");
+    if (list == nullptr) return;
+    const auto reject = [&](const std::string& why) {
+        core::Diagnostic diagnostic;
+        diagnostic.code = std::string(diagnostic_codes::coop_player_colours);
+        diagnostic.severity = core::Severity::warning;
+        diagnostic.message = "Faction " + std::string(faction_name) + " Coop_Player_Colours " + why
+            + "; the built-in colour family is used";
+        diagnostic.logical_path = list->source.logical_path;
+        diagnostic.line = list->source.line;
+        diagnostic.column = list->source.column;
+        diagnostic.source_id = list->source.source_id;
+        settings.diagnostics.push_back(std::move(diagnostic));
+    };
+    std::vector<data::ui::Rgba8> entries;
+    for (const data::XmlNode& child : list->children) {
+        if (!same_name(child.name, "Coop_Player_Colour")) continue;
+        data::tag_trace::used(child);
+        const auto parsed = colour(child.raw_text);
+        if (!parsed) return reject("entry " + std::to_string(entries.size() + 1) + " is not 3 or 4 integers from 0 to 255");
+        const auto same_rgb = [&](const data::ui::Rgba8& other) {
+            return other.r == parsed->r && other.g == parsed->g && other.b == parsed->b;
+        };
+        if (std::any_of(entries.begin(), entries.end(), same_rgb))
+            return reject("entry " + std::to_string(entries.size() + 1) + " repeats an earlier entry");
+        if (std::any_of(own_colours.begin(), own_colours.end(), same_rgb))
+            return reject("entry " + std::to_string(entries.size() + 1) + " equals the faction's own colour");
+        entries.push_back(*parsed);
+    }
+    if (entries.size() > max_coop_player_colours)
+        return reject("has " + std::to_string(entries.size()) + " entries, at most "
+                      + std::to_string(max_coop_player_colours) + " are allowed");
+    data::tag_trace::used(*list);
+    if (!entries.empty()) settings.faction_coop_colours.emplace_back(std::string(faction_name), std::move(entries));
+}
+
 } // namespace
 
 MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::XmlNode* game_constants,
@@ -112,12 +152,19 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
             // MM-07/WNO-40: later faction definitions replace the earlier registry winner.
             std::erase_if(settings.faction_colours, [&](const auto& entry) { return same_name(entry.first, name->value); });
             std::erase_if(settings.faction_no_colorization, [&](const auto& entry) { return same_name(entry.first, name->value); });
+            std::erase_if(settings.faction_coop_colours, [&](const auto& entry) { return same_name(entry.first, name->value); });
             if (node != nullptr) {
                 if (const auto parsed = colour(node->raw_text)) settings.faction_colours.emplace_back(name->value, *parsed);
             }
             if (const auto* unassigned = last_child(faction, "No_Colorization_Color")) {
                 if (const auto parsed = colour(unassigned->raw_text)) settings.faction_no_colorization.emplace_back(name->value, *parsed);
             }
+            std::vector<data::ui::Rgba8> own_colours;
+            if (!settings.faction_colours.empty() && same_name(settings.faction_colours.back().first, name->value))
+                own_colours.push_back(settings.faction_colours.back().second);
+            if (!settings.faction_no_colorization.empty() && same_name(settings.faction_no_colorization.back().first, name->value))
+                own_colours.push_back(settings.faction_no_colorization.back().second);
+            read_coop_colours(settings, faction, name->value, own_colours);
         }
     }
     const data::XmlNode* space = radar_map != nullptr ? last_child(*radar_map, "RadarMapSettings") : nullptr;
@@ -226,6 +273,13 @@ std::optional<data::ui::Rgba8> faction_colour(const MinimapSettings& settings, c
         if (same_name(name, faction)) return value;
     }
     return std::nullopt;
+}
+
+std::span<const data::ui::Rgba8> faction_coop_colours(const MinimapSettings& settings, const std::string_view faction) {
+    for (const auto& [name, list] : settings.faction_coop_colours) {
+        if (same_name(name, faction)) return list;
+    }
+    return {};
 }
 
 MinimapTypeLooks minimap_type_looks(const std::string_view type, const data::Catalog* objects) {

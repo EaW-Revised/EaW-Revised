@@ -822,6 +822,8 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         const auto parties = resolve_conflict_parties(snapshot.get(), {.admitted = &admitted, .current_station_owner = true});
         admitted.layer = a.land ? BattleLayer::land : BattleLayer::space;
         auto returned = build_control_battle_return(admitted, a.result, parties, a.result.station_level, a.destroyed);
+        // WAR-43: the losing planet's destroyed base (never the winner's budget downgrade) also clears its space specials.
+        returned.clear_space_structures = auto_resolve_clears_space_structures(a, control_planet(*snapshot, a.planet));
         for (const auto id : a.land_invaders) {
             std::optional<gc::SurfaceForce> force;
             if (const auto* planet = control_planet(*snapshot, a.planet)) for (const auto& row : planet->landed) if (row.id == id) force = row;

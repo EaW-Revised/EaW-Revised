@@ -836,6 +836,7 @@ core::Result<PreparedAiSession> prepare_session(
         if (auto added = session.register_presentation_verb(verb_hide_sound); !added) return added;
         for (const std::string_view verb : {authoritative::verb_story_camera, authoritative::verb_story_fade, authoritative::verb_story_environment})
             if (auto added = session.register_presentation_verb(verb); !added) return added;
+        if (auto added = session.register_presentation_verb(verb_lock_controls); !added) return added;
         if (host->setup.perception.campaign_game && host->setup.campaign_can_retreat && host->setup.campaign_retreat_order) {
             auto translate = [host](const authoritative::ScriptCommand& command) -> core::Result<authoritative::TacticalOrder> {
                 using OrderResult = core::Result<authoritative::TacticalOrder>;

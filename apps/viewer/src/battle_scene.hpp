@@ -119,6 +119,9 @@ public:
         sim::math::Mat3x4 model_to_world{};
         std::array<float, 3> low{};
         std::array<float, 3> high{};
+        std::array<float, 3> hull_low{}; // #8313: bounds of the hull pieces alone (no shield bubble)
+        std::array<float, 3> hull_high{};
+        bool has_hull{};
     };
 
     struct Update final {

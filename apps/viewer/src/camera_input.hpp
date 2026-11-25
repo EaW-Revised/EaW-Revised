@@ -348,6 +348,7 @@ public:
     void set_context(Context context) noexcept;
     void set_focus(bool focused) noexcept;
     void set_capture_locked(bool locked) noexcept;
+    void cancel_user_input() noexcept { cancel(); }
     // Publishes a new viewport generation. Width/height must be finite and
     // non-negative; zero suspends movement until a nonzero extent arrives.
     [[nodiscard]] core::Result<void> set_viewport(float width, float height);

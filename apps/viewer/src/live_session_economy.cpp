@@ -177,13 +177,18 @@ void LiveSessionView::ensure_gc_seat_colours() const {
             own = std::array<std::uint8_t, 3>{faction->r, faction->g, faction->b};
     }
     const bool shades = godot::OS::get_singleton()->get_environment("EAWR_GC_ALLY_OWN_COLOURS") != godot::String("1");
+    // PROVISIONAL (#8359): the local faction's Coop_Player_Colours list (absent: the shade family).
+    std::vector<std::array<std::uint8_t, 3>> coop_colours;
+    if (local != options_.colour_seats.end())
+        for (const auto& entry : ui::faction_coop_colours(faction_colours_, player_faction(local->player)))
+            coop_colours.push_back({entry.r, entry.g, entry.b});
     std::vector<sim::SeatId> ai_mates;
     for (const auto& seat : options_.colour_seats)
         if (seat.active && seat.kind == sim::SeatKind::ai && seat.player != player_ && is_ally_of_local(seat.player))
             ai_mates.push_back(seat.seat_id);
     for (const auto& seat : options_.colour_seats)
         if (const auto colour = ui::gc_participant_colour(seat.seat_id, options_.colour_seats, options_.colour_teams,
-                gc_palette_, shades, options_.controller_seat, own, ai_mates)) gc_seat_colours_.emplace(seat.seat_id, *colour);
+                gc_palette_, shades, options_.controller_seat, own, ai_mates, coop_colours)) gc_seat_colours_.emplace(seat.seat_id, *colour);
 }
 
 std::optional<std::array<std::uint8_t, 3>> LiveSessionView::participant_colour(

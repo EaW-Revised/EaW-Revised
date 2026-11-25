@@ -216,6 +216,7 @@ public:
 
     // Host lifecycle routed to the space camera; inert without one.
     void camera_event(const viewer::camera_input::RawEvent& event);
+    void camera_user_lock(bool locked);
     void camera_focus(bool focused);
     void camera_pointer_left();
     void camera_sample_pointer(float x, float y);

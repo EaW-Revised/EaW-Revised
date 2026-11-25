@@ -62,6 +62,23 @@ Fixture fixture() {
     };
     return f;
 }
+// WAR-43: only the LOSING planet's destroyed space base clears its space specials; real battles never ask.
+void space_structure_clear_rule() {
+    AutoResolveOutcomeApplication a; a.base_changed = true; a.result.winner = 1; a.result.station_level = 0;
+    gc::ControlPlanet loser; loser.starbase = {2, 2};
+    expect(auto_resolve_clears_space_structures(a, &loser), "WAR-43 the loser's destroyed space base clears the planet's space specials");
+    gc::ControlPlanet winner; winner.starbase = {1, 2};
+    expect(!auto_resolve_clears_space_structures(a, &winner), "WAR-44 the winner's own base lost to its budget clears nothing");
+    auto lowered = a; lowered.result.station_level = 1;
+    expect(!auto_resolve_clears_space_structures(lowered, &loser), "a lowered (not destroyed) base clears nothing");
+    auto unchanged = a; unchanged.base_changed = false;
+    expect(!auto_resolve_clears_space_structures(unchanged, &loser), "no base change, no clearing");
+    auto land = a; land.land = true;
+    expect(!auto_resolve_clears_space_structures(land, &loser), "land auto-resolve keeps its own cleanup path");
+    gc::ControlPlanet none;
+    expect(!auto_resolve_clears_space_structures(a, &none) && !auto_resolve_clears_space_structures(a, nullptr),
+        "a planet without a base has no base to destroy");
+}
 void planning_and_encoding() {
     auto f = fixture(); auto a = take(plan_auto_resolve_outcome(f.conflict, f.roster, f.outcome, f.inputs));
     expect(a.destroyed == std::vector<eawr::sim::EntityId>{f.outcome.allocations.front().id}
@@ -349,7 +366,7 @@ int case_galactic_auto_resolve_outcome_tests(int argc, char** argv) {
             return 0;
         }
         if (argc != 2) throw std::runtime_error("expected outcome corpus path");
-        planning_and_encoding(); container_record_and_land(); bounty_service_order(); session_replay_checkpoint(argv[1]); ring_and_failed_callback(); surface_retreat_before_cleanup();
+        space_structure_clear_rule(); planning_and_encoding(); container_record_and_land(); bounty_service_order(); session_replay_checkpoint(argv[1]); ring_and_failed_callback(); surface_retreat_before_cleanup();
     }
     catch (const std::exception& error) { expect(false, error.what()); }
     return galactic_test::failures ? 1 : 0;

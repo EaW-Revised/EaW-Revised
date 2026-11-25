@@ -124,6 +124,9 @@ bool LiveSessionView::prepare_head(const vfs::Vfs& filesystem, const std::string
         neutral_fog_colour_ = std::array<float, 3>{neutral->r / 255.0F, neutral->g / 255.0F, neutral->b / 255.0F};
     }
     faction_colours_ = minimap_settings;
+    for (const auto& diagnostic : minimap_settings.diagnostics) // PROVISIONAL (#8359): a rejected Coop_Player_Colours list
+        if (diagnostic.code == ui::diagnostic_codes::coop_player_colours)
+            godot::UtilityFunctions::printerr(godot::String(core::format_diagnostic(diagnostic).c_str()));
     gc_palette_.clear();
     gc_seat_colours_.clear();
     gc_seat_colours_ready_ = false;
@@ -629,6 +632,8 @@ bool LiveSessionView::start(std::string& failure) {
     session_options.scripts = ai_scripts_;
     for (const auto& call : options_.debug_letterbox) session_options.debug_letterbox.push_back({call.tick, call.in, call.seconds});
     for (const auto& call : options_.debug_story) session_options.debug_story.push_back({call.tick, call.verb, call.arguments});
+    for (const auto& call : options_.debug_story_lock)
+        session_options.debug_story_lock.push_back({platform::LiveStoryPresentationRequest::Kind::lock_controls, call.tick, call.locked});
     if (options_.save_tick) {
         session_options.save_at = *options_.save_tick;
         // The simulation thread writes the file between two ticks; finish() reads the outcome after stop().

@@ -786,7 +786,13 @@ std::optional<SpacePopulation::LiveShipBox> SpacePopulation::live_ship_box(const
         || !live_ship_drawn(ship)) {
         return std::nullopt;
     }
-    return LiveShipBox{*live_transforms_[ship], live_bounds_[ship]->first, live_bounds_[ship]->second};
+    LiveShipBox box{*live_transforms_[ship], live_bounds_[ship]->first, live_bounds_[ship]->second};
+    if (ship < live_hull_bounds_.size() && live_hull_bounds_[ship]) {
+        box.hull_low = live_hull_bounds_[ship]->first;
+        box.hull_high = live_hull_bounds_[ship]->second;
+        box.has_hull = true;
+    }
+    return box;
 }
 
 std::optional<SpacePopulation::LiveShipEmitterView> SpacePopulation::live_ship_emitter_assets(const std::size_t ship) const {

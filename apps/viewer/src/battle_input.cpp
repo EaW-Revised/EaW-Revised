@@ -312,6 +312,9 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
         }
         unit.box.low = box->low;
         unit.box.high = box->high;
+        unit.box.hull_low = box->hull_low;
+        unit.box.hull_high = box->hull_high;
+        unit.box.has_hull = box->has_hull;
         unit.position = {static_cast<float>(visible.position[0]), static_cast<float>(visible.position[1]),
                          static_cast<float>(visible.position[2])};
         // WSU-15: box/type selection queries the model origin, not the bounds centre.
@@ -419,7 +422,7 @@ void BattleInput::observe_pointer(const Ref<InputEvent>& event) {
     }
 }
 
-void BattleInput::frame(LiveSessionView& live, const BattleScene& population, BattleCamera& space) {
+void BattleInput::frame(LiveSessionView& live, const BattleScene& population, BattleCamera& space, const bool controls_locked) {
     refresh(live, population, space);
     refresh_cards(live);
     // #848: the frame after a wheel or overview key gesture is sampled once it has drawn (below).
@@ -434,7 +437,7 @@ void BattleInput::frame(LiveSessionView& live, const BattleScene& population, Ba
         camera_samples_.push_back({*camera_sample_pending_ + " after", *frame_});
         camera_sample_pending_.reset();
     }
-    follow(live, space);
+    if (!controls_locked) follow(live, space);
     // Acceptance input is injected through the same engine event queue as the
     // ordinary scripted UI tests, using currently visible units on each seat.
     if (live.options().lan_acceptance && frame_ && live.presented_tick() >= static_cast<double>(acceptance_next_tick_)) {

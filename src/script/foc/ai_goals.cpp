@@ -4,6 +4,7 @@
 #include "ai_learning.hpp"
 #include "galactic_ai_funding.hpp"
 #include "galactic_ai_actions.hpp"
+#include "galactic_ai_world.hpp"
 #include "eawr/script/numeric/decimal.hpp"
 
 #include <algorithm>
@@ -138,6 +139,21 @@ bool Engine::like(const PlayerAi& player, const Goal& a, const Goal& b) const {
     const auto& b_like = right.goal->is_like;
     return std::find(a_like.begin(), a_like.end(), right.goal_name) != a_like.end() ||
         std::find(b_like.begin(), b_like.end(), left.goal_name) != b_like.end();
+}
+
+// GS-04 / WGA-18, the galactic goal cull: the pair is culled when an ACTIVE goal of the player is alike it (same
+// target, same goal or Is_Like), or when its planet target has no stage location for the player under the goal's
+// Reachability (no production site reaches it). The proposed set is not consulted. An absent reachability relation
+// (not a planet target, or no published row) does not cull.
+bool Engine::galactic_culled(const PlayerAi& player, std::size_t function_index, const Target* target) const {
+    Goal candidate; candidate.function = function_index; candidate.target = target ? target->id : 0;
+    for (const Goal& active : player.active)
+        if (!active.finished && like(player, active, candidate)) return true;
+    if (!target || !target->object) return false;
+    const auto* world = dynamic_cast<const GalacticWorld*>(host_->ai_world.get());
+    if (!world) return false;
+    const auto staged = world->goal_target_staged(player.player, target->object, player.functions[function_index].goal->reachability);
+    return staged.has_value() && !*staged;
 }
 
 std::int64_t Engine::recent_failures(const History* history) const {
@@ -276,6 +292,12 @@ void Engine::propose(PlayerAi& player) {
                 --step;
                 continue;
             }
+        }
+        if (player.galactic && galactic_culled(player, player.next_function, target)) {
+            // GS-04 / WGA-18: a culled pair is free: it neither counts as non-trivial nor spends this frame's budget.
+            if (global) { ++player.next_function; player.next_target = 0; } else ++player.next_target;
+            --step;
+            continue;
         }
         if (player.galactic) {
             ++player.nontrivial;

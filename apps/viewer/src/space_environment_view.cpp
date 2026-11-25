@@ -734,7 +734,7 @@ bool EnvironmentView::write_report() const {
 // Defined after the evidence harness: the view submits only after its own
 // uploads made every environment surface non-casting.
 void EnvironmentView::camera_event(const viewer::camera_input::RawEvent& event) {
-    if (movie_) return;
+    if (movie_ || camera_user_locked_) return;
     if (bridge_ && overview_ && event.kind == camera_input::RawKind::mouse_wheel && event.pressed) {
         // FoC: a wheel click up zooms in; clicks out at Distance_Max count toward the overview,
         // whose levels take the wheel from the tactical camera.
@@ -883,7 +883,7 @@ std::optional<int> EnvironmentView::process(const double delta) {
         if (first_pass && overview_ && bridge_->active()) {
             bridge_->set_overview_view_yaw(overview_->view_yaw(bridge_->controller().yaw_degrees()));
         }
-        if (first_pass && !movie_) {
+        if (first_pass && !movie_ && !camera_user_locked_) {
             if (auto stepped = bridge_->step(static_cast<float>(delta)); !stepped) {
                 static_cast<void>(fail(core::format_diagnostic(stepped.error())));
                 completed_ = true;
@@ -894,7 +894,7 @@ std::optional<int> EnvironmentView::process(const double delta) {
         // pose is changed on a copy, so exiting exposes the unchanged tactical frame.
         tactical::TacticalFrame frame = bridge_->frame();
         if (overview_ && !movie_) {
-            if (first_pass) overview_->advance(delta);
+            if (first_pass && !camera_user_locked_) overview_->advance(delta);
             const auto& bounds = bridge_->controller().render_bounds();
             // The map overview fits the larger half extent of the camera's target bounds, the
             // project's stand-in for the retail map box.

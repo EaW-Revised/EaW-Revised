@@ -19,6 +19,9 @@ using authoritative::BindingContext;
 using authoritative::ValueList;
 using numeric::LuaNumber;
 using authoritative::Value;
+using authoritative::BindingContext;
+using authoritative::ValueList;
+using numeric::LuaNumber;
 
 using namespace detail;
 
@@ -86,6 +89,18 @@ void register_tactical_presentation(authoritative::ScriptScheduler& scripts, con
     add("Fade_Off", authoritative::story_fade_binding("Fade_Off", authoritative::StoryRequestKind::fade_off));
     add("Set_New_Environment", authoritative::story_environment_binding("Set_New_Environment", authoritative::StoryRequestKind::environment_index));
     add("Set_Cinematic_Environment", authoritative::story_environment_binding("Set_Cinematic_Environment", authoritative::StoryRequestKind::environment_cinematic));
+    // The Lua camera-effects lock is distinct from the tutorial reward lock.
+    add("Lock_Controls", [](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 1) return fail("Lock_Controls expects one flag");
+        if (const auto* value = std::get_if<LuaNumber>(&arguments[0].data)) {
+            context.issue_command(std::string(verb_lock_controls), {boolean(*value > LuaNumber(0))});
+            return none();
+        }
+        context.issue_command(std::string(verb_lock_controls), {boolean(false)});
+        context.report(authoritative::codes::invalid_request, "Lock_Controls expects a number; controls unlocked");
+        return none();
+    });
+
 }
 
 } // namespace tactical_ai_detail

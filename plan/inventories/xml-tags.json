@@ -157168,6 +157168,23 @@
     },
     {
       "example": {
+        "column": 1,
+        "line": 1,
+        "logical_path": "data/xml/factions.xml",
+        "source_id": "synthetic:docs/behaviour/gc-coop-colours.md"
+      },
+      "file_count": 1,
+      "node_kind": "element",
+      "object_type": "Faction",
+      "profile": "foc",
+      "schema_ref": null,
+      "status": "unknown",
+      "tag_name": "Coop_Player_Colour",
+      "tag_path": "Faction/Coop_Player_Colours/Coop_Player_Colour",
+      "usage_count": 1
+    },
+    {
+      "example": {
         "column": 3,
         "line": 40,
         "logical_path": "data/xml/expansion_factions.xml",

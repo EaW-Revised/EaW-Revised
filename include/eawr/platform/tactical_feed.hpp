@@ -64,6 +64,7 @@ public:
     [[nodiscard]] virtual std::vector<LiveLetterboxRequest> take_letterbox_requests() { return {}; }
     [[nodiscard]] virtual std::vector<LiveSubObjectHideRequest> take_sub_object_hide_requests() { return {}; }
     [[nodiscard]] virtual std::vector<LiveStoryRequest> take_story_requests() { return {}; }
+    [[nodiscard]] virtual std::vector<LiveStoryPresentationRequest> take_story_presentation_requests() { return {}; }
     virtual void stop() = 0;
     [[nodiscard]] virtual std::vector<std::string> tick_hashes() const = 0;
     [[nodiscard]] virtual sim::tactical::TacticalReplay record() const = 0;
@@ -115,6 +116,7 @@ public:
     std::vector<LiveLetterboxRequest> take_letterbox_requests() override { return session_->take_letterbox_requests(); }
     std::vector<LiveSubObjectHideRequest> take_sub_object_hide_requests() override { return session_->take_sub_object_hide_requests(); }
     std::vector<LiveStoryRequest> take_story_requests() override { return session_->take_story_requests(); }
+    std::vector<LiveStoryPresentationRequest> take_story_presentation_requests() override { return session_->take_story_presentation_requests(); }
     void stop() override { session_->stop(); }
     bool request_save(LiveSession::SaveSink sink) override { session_->request_save(std::move(sink)); return true; }
     std::vector<std::string> tick_hashes() const override { return session_->tick_hashes(); }

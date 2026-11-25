@@ -130,6 +130,9 @@ std::optional<std::string> probe_texture(const vfs::Vfs& filesystem, const std::
 SpaceEnvironment::SpaceEnvironment(Options options) : state_(std::make_unique<State>(std::move(options))) {}
 SpaceEnvironment::~SpaceEnvironment() = default;
 
+void SpaceEnvironment::camera_user_lock(bool locked) {
+    if (state_->view) state_->view->camera_user_lock(locked);
+}
 
 
 void SpaceEnvironment::camera_event(const viewer::camera_input::RawEvent& event) {

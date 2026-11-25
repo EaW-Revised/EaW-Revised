@@ -5,6 +5,7 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <span>
 
 int main() {
     using namespace eawr;
@@ -91,6 +92,32 @@ int main() {
         for (const auto& colour : seen) ok = ok && colour != ui::BattleRgb{100, 0, 0};
     }
     ok = ok && !ui::gc_participant_colour({9}, many_seats, many_teams, many_colours, true, {3}, ui::BattleRgb{100, 0, 0});
+    // PROVISIONAL (legacy #8359): the faction's Coop_Player_Colours list. Entry n is the n-th mate (humans first, then
+    // allied AI); a shorter list falls back to shades past its end; no list is the default; the local seat and enemies
+    // stay untinted.
+    const std::array<ui::BattleRgb, 2> listed{{{0, 128, 128}, {200, 10, 10}}};
+    const auto with_list = [&](unsigned seat, std::span<const ui::BattleRgb> list, bool shades = true) {
+        return ui::gc_participant_colour(sim::SeatId{seat}, seats, teams, palette, shades, sim::SeatId{1}, faction, ai_mates, list);
+    };
+    ok = ok && with_list(2, listed) == listed[0] && with_list(4, listed) == listed[1] // human mate 1st, allied AI 2nd
+        && with_list(2, listed, false) == listed[0]                                   // beats the workshop palette switch
+        && !with_list(1, listed) && !with_list(3, listed) && !with_list(5, listed);
+    const std::span<const ui::BattleRgb> one{listed.data(), 1};
+    ok = ok && with_list(2, one) == listed[0] && with_list(4, one) == ai_mate;        // shorter list: shade past its end
+    ok = ok && with_list(2, {}) == mate && with_list(4, {}) == ai_mate;               // absent list = today's default
+    // Seven mates and a list of seven: every mate gets its own entry (local seat 3 untinted).
+    std::array<ui::BattleRgb, 7> seven{};
+    for (std::size_t i = 0; i < 7; ++i)
+        seven[i] = {static_cast<std::uint8_t>(10 + 30 * i), 200, static_cast<std::uint8_t>(250 - 30 * i)};
+    std::set<ui::BattleRgb> listed_seen;
+    for (std::uint32_t i = 0; i < 8; ++i) {
+        if (i == 2) continue;
+        const auto colour = ui::gc_participant_colour({i + 1}, many_seats, many_teams, many_colours, true, {3},
+            ui::BattleRgb{100, 0, 0}, {}, seven);
+        ok = ok && colour.has_value() && *colour == seven[i < 2 ? i : i - 1];
+        if (colour) listed_seen.insert(*colour);
+    }
+    ok = ok && listed_seen.size() == 7;
     if (!ok) std::cerr << "GC participant colours failed\n";
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

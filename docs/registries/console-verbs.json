@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "about": "Console verb IDs are permanent and never reused. Blocks: 1-99 core and menu, 100-199 battle, 200-299 galactic, 300-399 launcher and multiplayer. Local commands need no verb.",
+  "blocks": {"core": [1, 99], "battle": [100, 199], "galactic": [200, 299], "multiplayer": [300, 399]},
+  "verbs": []
+}
