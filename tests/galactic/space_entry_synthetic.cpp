@@ -449,6 +449,10 @@ void reserve_order_contract() {
     auto input = entry_inputs(tables); input.structures.clear(); input.station_type.clear(); input.riders.clear();
     input.types.front().escorts.clear();
     for (auto& faction : input.map.factions) faction.space_unit_cap = 2;
+    // WR-90 (#8368): two attacker markers; the retreat heading follows the FIRST listed one (record 1, yaw 30 -> -150),
+    // not the one nearest the first defender (record 4, yaw 100) that the entry placement picks.
+    input.map.placements[0].orientation_degrees->z = whole(30);
+    input.map.placements[3].orientation_degrees->z = whole(100);
     campaign::ConflictRecord record; record.id = 90; record.invader = 1; record.defender = 2; record.map_identity = input.map.map;
     record.forces = {{20,1,1,10},{21,2,1,10},{22,1,1,10},{25,1,1,10},{26,2,1,10},{27,1,1,10},{30,1,2,12}};
     input.roster_order = {22,21,20,26,27,25,30};
@@ -461,6 +465,8 @@ void reserve_order_contract() {
     check(campaign::apply_space_rules(entry, input.map, rules));
     auto setup = entry.conflict.tactical;
     expect(setup.campaign->reserves.front().id == 20, "reserve manifest remains canonical for identity lookups");
+    expect(setup.campaign->retreat_heading && *setup.campaign->retreat_heading == whole(-150),
+        "WR-90: the retreat heading is the first listed attacker marker's yaw plus 180, not the nearest-to-defender marker's");
     auto unordered = setup; unordered.campaign->reserve_order.clear();
     auto default_session = take(tt::TacticalSession::create(unordered, entry.content));
     expect(default_session.ledgers().front().pool_tokens == std::vector<std::uint64_t>({20,21,22,26}), "omitted order preserves the default ascending-ID pool");

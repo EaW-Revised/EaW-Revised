@@ -1826,9 +1826,8 @@ void MapMode::State::update_speed_notice(const bool running, const LanView& lan,
     label->set_visible(!speed_notice_text.text().empty());
 }
 
-// FS-R07: the ATTACKER ENTRY POSITION marker the retreat cinematic is framed from. The simulation's entry preparation picks
-// the attacker marker nearest the first defender marker (the closest-defender branch) and the first one when there is no
-// defender marker; the same choice is made here from the map's own placements.
+// FS-R07, WR-90: the ATTACKER ENTRY POSITION marker the retreat cinematic is framed from. The original takes the first
+// listed attacker marker (no nearest-to-defender test, #8368); the countdown turn and the exit flight use the same one.
 void MapMode::State::read_retreat_entry(const assets::Map& map) {
     retreat_cinematic = {};
     const auto named = [](const assets::Placement& placement, const std::string_view name) {
@@ -1839,21 +1838,11 @@ void MapMode::State::read_retreat_entry(const assets::Map& map) {
             && (placement.orientation_status == assets::OrientationStatus::yaw_only
                 || placement.orientation_status == assets::OrientationStatus::three_axis);
     };
-    const assets::Placement* defender = nullptr;
-    for (const auto& placement : map.placements)
-        if (!defender && complete(placement) && named(placement, "Defending Forces Position")) defender = &placement;
     const assets::Placement* entry = nullptr;
-    float best = std::numeric_limits<float>::max();
     for (const auto& placement : map.placements) {
         if (!complete(placement) || !named(placement, "Attacker Entry Position")) continue;
-        float distance = 0.0F;
-        if (defender) {
-            const float dx = placement.position->x - defender->position->x;
-            const float dy = placement.position->y - defender->position->y;
-            const float dz = placement.position->z - defender->position->z;
-            distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-        }
-        if (!entry || distance < best) { entry = &placement; best = distance; }
+        entry = &placement;
+        break;
     }
     if (!entry) return;
     presentation::camera::RetreatCameraInput geometry;

@@ -622,10 +622,10 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
             self.assertFalse(trays[name]["compact"], (name, "the full size step fits the free height"))
             self.check_header_labels(name, trays[name])
         # The compact size step: the same space tray under a layer whose galaxy top limit leaves 90 percent of the full tray's
-        # height, so the full step no longer fits and the packer takes the compact one (the close icon is 16 reference
+        # height, so the full step no longer fits and the packer takes the compact one (the handle is 48 reference
         # units wide, which gives the reference scale).
         full = trays["labels-space"]
-        ui = full["close"]["rect"][2] / 16.0
+        ui = full["handle_rect"][2] / 48.0
         panel = full["panel_rect"]
         limit = (panel[1] + panel[3] - 0.9 * panel[3]) / ui
         layer = self.directory / "revised-compact"
@@ -663,10 +663,10 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
                     and rect[1] < other[1] + other[3] - slack and other[1] < rect[1] + rect[3] - slack
                 self.assertFalse(meets and other[2] > 0, f"{control} meets {what}")
 
-    def test_the_panel_wears_the_bars_art_its_entries_are_three_quarters_and_the_close_button_closes_it(self):
+    def test_the_panel_wears_the_bars_art_its_entries_are_three_quarters_and_the_handle_closes_and_opens_it(self):
         """GBT-06, GBT-07, GBT-10 (slice 6b): the shipped layout draws the panel from the bar's own shell art, sizes it
-        automatically from the bar's width, shows the entries at 75 percent and offers a small close icon in its top right
-        corner that covers no entry and closes the tray like the tray key; the handle opens it again."""
+        automatically from the bar's width and shows the entries at 75 percent. It has no close button of its own (#8277):
+        the handle closes it and opens it again, like the tray key, on the space and the ground tab."""
         data, _ = self.run_viewer("look", overflow=True, space=True, open_tray=True)
         tray = data["build_tray"]
         self.assertTrue(tray["open"], tray)
@@ -711,28 +711,22 @@ class GalacticBuildTrayRuntime(unittest.TestCase):
             self.assertAlmostEqual(entry["rect"][3], card[3] * scale, delta=0.5, msg=entry)
             self.assertTrue(panel[0] - 0.5 <= entry["rect"][0] and entry["rect"][0] + entry["rect"][2] <= panel[0] + panel[2] + 0.5,
                             entry)
-        close = tray["close"]
-        self.assertTrue(close["visible"], close)
-        self.assertEqual(close["art"], "bar_button", "no mod close icon is named: the bar's own button art")
-        self.assertTrue(close["tooltip"], "the close icon has the game's close tooltip")
-        rect = close["rect"]
-        self.assertLess(rect[2], card[2] * 0.5, "a small icon, well under half a bar card")
-        self.assertAlmostEqual(rect[2], rect[3], delta=0.5, msg="square")
-        self.assertTrue(panel[0] + panel[2] / 2 < rect[0] and rect[0] + rect[2] <= panel[0] + panel[2] + 0.5
-                        and panel[1] - 0.5 <= rect[1] and rect[1] + rect[3] < panel[1] + panel[3] / 2,
-                        "inside the panel's top right corner")
-        for entry in tray["shown_entries"]:
-            box = entry["rect"]
-            self.assertFalse(box[0] < rect[0] + rect[2] and rect[0] < box[0] + box[2]
-                             and box[1] < rect[1] + rect[3] and rect[1] < box[1] + box[3], f"the icon covers {entry}")
+        self.assertNotIn("close", tray, "the tray has no close button of its own (#8277)")
 
-        closed, _ = self.run_viewer("close", overflow=True, space=True, open_tray=True, clicks=[
-            centre(close["rect"]), centre(tray["handle_rect"])])
-        steps = json.loads((self.directory / "close-steps.json").read_text(encoding="utf-8"))
-        self.assertEqual(steps[0], {"handle": True, "panel": False}, "the close button closes the tray")
-        self.assertEqual(steps[1], {"handle": True, "panel": True}, "the handle opens it again")
-        self.assertEqual((closed["build_tray"]["close"]["presses"], closed["build_tray"]["handle_presses"]), (1, 2),
-                         closed["build_tray"])
+        # The handle (the bottom left control) closes and opens the tray with the mouse, and the tray key does the same, on
+        # the space tab and on the ground tab (each with its own overflowing list).
+        for name, space, mod in (("toggle-space", True, self.mod), ("toggle-ground", False, self.ground_mod)):
+            shown, _ = self.run_viewer(name + "-probe", overflow=True, space=space, open_tray=True, mod=mod)
+            point = centre(shown["build_tray"]["handle_rect"])
+            done, _ = self.run_viewer(name, overflow=True, space=space, open_tray=True, mod=mod,
+                                      clicks=[point, point, {"key": "Tab"}, {"key": "Tab"}])
+            steps = json.loads((self.directory / (name + "-steps.json")).read_text(encoding="utf-8"))
+            self.assertEqual(len(steps), 4, (name, steps))
+            self.assertEqual(steps[0], {"handle": True, "panel": False}, (name, "a click on the handle closes the tray"))
+            self.assertEqual(steps[1], {"handle": True, "panel": True}, (name, "and opens it again"))
+            self.assertEqual(steps[2], {"handle": True, "panel": False}, (name, "the tray key closes it"))
+            self.assertEqual(steps[3], {"handle": True, "panel": True}, (name, "and opens it again"))
+            self.assertEqual((done["build_tray"]["handle_presses"], done["build_tray"]["key_presses"]), (3, 2), done["build_tray"])
 
 
 if __name__ == "__main__":

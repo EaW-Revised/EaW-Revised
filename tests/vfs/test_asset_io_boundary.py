@@ -36,6 +36,9 @@ REVIEWED = {
     "src/campaign/game_session.cpp": "opt-in oracle trace output, no asset read",
     # Write-only per-tick JSONL of the galactic live session (EAWR_GC_TICK_TRACE, #6933); it reads no file.
     "include/eawr/core/gc_tick_trace.hpp": "opt-in write-only diagnostic trace, no asset read",
+    # The perf telemetry feed writer (#8058): writes its own JSONL and capture files; the only reads are the Linux /proc counters.
+    "include/eawr/core/perf_diag/feed_writer.hpp": "opt-in write-only telemetry feed, no asset read",
+    "src/core/perf_diag_feed_writer.cpp": "opt-in write-only telemetry feed, reads only OS counters, no asset read",
 }
 
 

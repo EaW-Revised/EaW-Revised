@@ -9,6 +9,7 @@
 #include "eawr/assets/map.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/admission.hpp"
+#include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "eawr/sim/galactic/control.hpp"
 #include "../../src/campaign/battle_return_internal.hpp"
@@ -710,6 +711,137 @@ void cinematic_authority() {
 }
 // RP-09 / FS-R06: the station's authored retreat explosion is a projectile created at the station boundary
 // (k181), once, by the station itself; a type without it creates none.
+// WR-90 (#8368): at the retreat click each roster ship stops and turns in place (speed 0, no translation) toward the
+// stored heading; the turn lasts angle / turn rate x the class slowdown, a ship at rest faces it exactly afterwards.
+void countdown_turn() {
+    std::vector<std::string> reference;
+    const auto yaw_of = [](const tactical::TacticalSession& session, const std::uint64_t id) {
+        for (const auto& unit : session.units())
+            if (unit.entity_id == id) return checked(tactical::yaw_degrees(unit.rotation));
+        expect(false, "unit exists");
+        return Fixed{};
+    };
+    const auto close_to = [](const Fixed value, const Fixed expected) {
+        const auto delta = value.raw() - expected.raw();
+        return (delta < 0 ? -delta : delta) < Fixed::scale / 10;
+    };
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        const auto c = conflict(galaxy()); auto setup = c.tactical; auto binding = content(c);
+        std::erase_if(setup.units, [&](const auto& unit) { return unit.entity_id != 20 && unit.entity_id != 40; });
+        tactical::UnitState corvette; corvette.entity_id = 26; corvette.type_id = 4; corvette.owner = 1;
+        corvette.position = {f(2000), {}, {}};
+        // A craft-class roster member (type 3 has no ship locomotor row): craft only turn when already at rest, and
+        // their flight stays with the squadron, so this one keeps its heading.
+        tactical::UnitState craft; craft.entity_id = 25; craft.type_id = 3; craft.owner = 1;
+        craft.position = {f(-2000), {}, {}};
+        setup.units.push_back(corvette); setup.units.push_back(craft);
+        std::sort(setup.units.begin(), setup.units.end(), [](const auto& a, const auto& b) { return a.entity_id < b.entity_id; });
+        for (auto& unit : setup.units) if (unit.entity_id == 40) unit.position = {f(-5000), {}, {}};
+        setup.campaign.emplace();
+        for (const tactical::PlayerId player : {1U, 2U}) {
+            tactical::EconomyPlayer account; account.player = player; account.population_cap = 10;
+            account.credit_cap = f(1000); account.ai = player == 2;
+            setup.campaign->players.push_back(account);
+        }
+        setup.campaign->retreat_heading = f(90);
+        binding.economy.campaign = true; binding.economy.players = setup.campaign->players;
+        // A capital: 1 degree per frame, slowdown 3 (270 frames for 90 degrees); a corvette: 3 per frame, slowdown 1 (30).
+        binding.motion.profiles = {{1, f(1), f(1), f(1), f(1), f(3)}, {4, f(1), f(1), f(1), f(3), f(1)}};
+        tactical::DurabilityProfile durable; durable.type_id = 4; durable.max_hull = f(100);
+        binding.durability.profiles.push_back(durable);
+        binding.retreat->prevention.clear();
+        binding.retreat->rules.players = {{1, 400, true}, {2, 400, true}};
+        binding.retreat->actors.push_back({26, 1, true, true, true, true});
+        binding.retreat->actors.back().persistent = true;
+        binding.retreat->actors.push_back({25, 1, true, true, true, true});
+        binding.retreat->actors.back().persistent = true;
+        auto session = checked(tactical::TacticalSession::create(setup, binding));
+        const auto before = session.units();
+        okay(session.submit({{0, 1, 1}, {}, tactical::RetreatPayload{tactical::RetreatAction::start}}));
+        const auto step = [&] { hashes.push_back(checked(session.step(executor)).state_hash.get()); };
+        while (session.completed_tick() < 40) step();
+        expect(session.retreat_state().phase == tactical::RetreatPhase::countdown, "the countdown is running");
+        expect(close_to(yaw_of(session, 26), f(90)), "the corvette has finished its 30 frame turn and faces the heading");
+        const auto capital_yaw = yaw_of(session, 20);
+        expect(capital_yaw.raw() > Fixed::scale && capital_yaw < f(40), "the capital is part way through its slow turn");
+        while (session.completed_tick() < 120) step();
+        expect(yaw_of(session, 20) > capital_yaw && yaw_of(session, 20) < f(60), "the capital keeps turning");
+        while (session.completed_tick() < 300) step();
+        expect(close_to(yaw_of(session, 20), f(90)), "the capital faces the heading after about 270 frames (angle / rate x slowdown)");
+        expect(session.retreat_state().phase == tactical::RetreatPhase::countdown, "the turn ended inside the countdown");
+        expect(close_to(yaw_of(session, 25), Fixed{}), "a craft-class roster member without a ship locomotor keeps its heading");
+        for (const auto& unit : session.units())
+            for (const auto& original : before)
+                if (unit.entity_id == original.entity_id && unit.owner == 1)
+                    expect(unit.position == original.position, "a turning roster ship does not translate");
+        // The turn plan and heading survive a checkpoint restore and a replay round trip.
+        const auto parsed = checked(tactical::parse_replay(checked(tactical::write_replay(session.record()))));
+        expect(parsed.setup.campaign && parsed.setup.campaign->retreat_heading == f(90), "the heading survives the replay encoding");
+        auto restored = checked(tactical::TacticalSession::from_replay(parsed, binding));
+        okay(restored.load_checkpoint_state(checked(session.save_checkpoint_state())));
+        expect(restored.state_sha256() == session.state_sha256(), "checkpoint restore keeps the turn state");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "the countdown turn is identical for every worker count");
+    }
+}
+// WR-90: craft of a rostered squadron turn only when at rest at the click; a craft still in flight ignores the heading.
+// Each craft ends either on the heading (it was at rest) or on its old facing (it was moving), never part way, and the
+// result is identical for every worker count.
+void countdown_turn_craft() {
+    std::vector<std::string> reference;
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        const auto c = conflict(galaxy()); auto setup = c.tactical; auto binding = content(c);
+        std::erase_if(setup.units, [&](const auto& unit) { return unit.entity_id != 20 && unit.entity_id != 40; });
+        for (const auto& [id, type] : {std::pair<std::uint64_t, std::uint64_t>{21, 3}, {50, 4}, {51, 4}}) {
+            tactical::UnitState unit; unit.entity_id = id; unit.type_id = type; unit.owner = 1;
+            unit.position = {f(-2000), f(static_cast<std::int64_t>(id) * 10), {}};
+            setup.units.push_back(unit);
+        }
+        std::sort(setup.units.begin(), setup.units.end(), [](const auto& a, const auto& b) { return a.entity_id < b.entity_id; });
+        for (auto& unit : setup.units) if (unit.entity_id == 40) unit.position = {f(-5000), {}, {}};
+        setup.squadrons = {{21, {50, 51}}};
+        setup.first_free_entity_id = 1000; // the craft IDs sit above the fixture's allocator start
+        setup.campaign.emplace();
+        for (const tactical::PlayerId player : {1U, 2U}) {
+            tactical::EconomyPlayer account; account.player = player; account.population_cap = 10;
+            account.credit_cap = f(1000); account.ai = player == 2;
+            setup.campaign->players.push_back(account);
+        }
+        setup.campaign->retreat_heading = f(90);
+        binding.economy.campaign = true; binding.economy.players = setup.campaign->players;
+        tactical::CraftProfile craft; craft.type_id = 4; craft.max_speed = f(10); craft.min_speed = f(1);
+        craft.rate_of_turn = craft.lift = craft.thrust = craft.roll_rate = f(1);
+        binding.motion.squadrons.craft = {craft};
+        tactical::SquadronProfile team; team.type_id = 3; team.members = {4, 4}; team.offsets = {{}, {}};
+        binding.motion.squadrons.squadrons = {team};
+        std::erase_if(binding.durability.profiles, [](const auto& p) { return p.type_id == 3; });
+        tactical::DurabilityProfile health; health.type_id = 4; health.max_hull = f(100);
+        binding.durability.profiles.push_back(health);
+        binding.retreat->prevention.clear();
+        binding.retreat->rules.players = {{1, 400, true}, {2, 400, true}};
+        binding.retreat->actors.push_back({21, 1, true, true, true, true});
+        binding.retreat->actors.back().persistent = true;
+        auto session = checked(tactical::TacticalSession::create(setup, binding));
+        okay(session.submit({{0, 1, 1}, {}, tactical::RetreatPayload{tactical::RetreatAction::start}}));
+        while (session.completed_tick() < 200) hashes.push_back(checked(session.step(executor)).state_hash.get());
+        expect(session.retreat_state().phase == tactical::RetreatPhase::countdown, "the countdown is running");
+        for (const auto& unit : session.units()) {
+            if (unit.type_id != 4) continue;
+            const auto yaw = checked(tactical::yaw_degrees(unit.rotation));
+            const auto at = [&](const std::int64_t degrees) {
+                const auto delta = yaw.raw() - f(degrees).raw();
+                return (delta < 0 ? -delta : delta) < Fixed::scale / 10;
+            };
+            expect(at(90) || at(0), "a squadron craft ends on the heading (at rest) or keeps its facing (moving), never part way");
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "the craft countdown turn is identical for every worker count");
+    }
+}
 void station_explosion() {
     std::vector<std::string> reference;
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
@@ -1556,7 +1688,7 @@ void installed() {
 }
 }
 int case_galactic_tactical_return_tests(int argc, char** argv) {
-    try { if (argc > 1 && std::string_view(argv[1]) == "--nonadjacent-retreat") parent_return(true); else if (argc > 1) installed(); else { retreat_destination_ties(); retreat_orbital_occupation(); gift_keeps_campaign_return(); pure_policy(); hero_fallback(); cinematic_authority(); station_explosion(); parent_return(); parent_return(true); selected_recording(); squadron_return(); deployed_reserve(); land_return_keeps_orbit(); stock_faction_retreat(); stock_interdiction(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--nonadjacent-retreat") parent_return(true); else if (argc > 1) installed(); else { retreat_destination_ties(); retreat_orbital_occupation(); gift_keeps_campaign_return(); pure_policy(); hero_fallback(); cinematic_authority(); countdown_turn(); countdown_turn_craft(); station_explosion(); parent_return(); parent_return(true); selected_recording(); squadron_return(); deployed_reserve(); land_return_keeps_orbit(); stock_faction_retreat(); stock_interdiction(); } }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

@@ -11,6 +11,12 @@
 #else
 #define EAWR_BENCH_HAS_FEED 0
 #endif
+#if __has_include("eawr/core/perf_diag/feed_writer.hpp")
+#include "eawr/core/perf_diag/feed_writer.hpp"
+#define EAWR_BENCH_HAS_WRITER 1
+#else
+#define EAWR_BENCH_HAS_WRITER 0
+#endif
 #include "eawr/sim/replay.hpp"
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/replay.hpp"
@@ -24,6 +30,9 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <memory>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -121,7 +130,7 @@ template <typename T>
             valid = seed.has_value();
             options.seed = seed.value_or(0);
         } else if (argument == "--live-feed") {
-            valid = value == "off" || value == "coarse" || value == "fine";
+            valid = value == "off" || value == "coarse" || value == "fine" || value == "writer" || value == "writer-fine";
             options.live_feed = value;
         } else if (argument == "--dispatch-cost") {
             valid = value == "0" || value == "1";
@@ -150,6 +159,22 @@ int live_bench(const Battle& battle, const Options& options) {
     if (options.live_feed != "off") { std::cerr << "feed unavailable on this revision\n"; return 2; }
 #endif
     using Live = eawr::platform::LiveSession;
+    // writer / writer-fine: the real telemetry feed writer (files in the temp folder) is started
+    // before the session, which attaches itself; the writer-off arms start nothing.
+#if EAWR_BENCH_HAS_WRITER
+    const bool with_writer = options.live_feed == "writer" || options.live_feed == "writer-fine";
+    std::unique_ptr<eawr::core::perf_diag::FeedWriter> writer;
+    if (with_writer) {
+        eawr::core::perf_diag::FeedOptions feed_options;
+        feed_options.directory = (std::filesystem::temp_directory_path() / "eawr-bench-feed").string();
+        feed_options.fine = options.live_feed == "writer-fine";
+        std::string error;
+        writer = std::make_unique<eawr::core::perf_diag::FeedWriter>(feed_options);
+        if (!writer->start(error)) { std::cerr << "feed writer: " << error << '\n'; return 1; }
+    }
+#else
+    if (options.live_feed == "writer" || options.live_feed == "writer-fine") { std::cerr << "feed writer unavailable on this revision\n"; return 2; }
+#endif
     const auto total = options.warmup + options.ticks;
     if (total >= 4096 || options.workers.size() != 1 || options.repeat != 1) {
         std::cerr << "live benchmark needs one worker count, repeat 1, and at most 4096 ticks\n"; return 2;
@@ -170,7 +195,7 @@ int live_bench(const Battle& battle, const Options& options) {
     if (!result) { std::cerr << eawr::core::format_diagnostic(result.error()) << '\n'; return 1; }
     auto live = std::move(result).value();
 #if EAWR_BENCH_HAS_FEED
-    if (options.live_feed != "off") live->perf_feed().set_enabled(true);
+    if (options.live_feed == "coarse" || options.live_feed == "fine") live->perf_feed().set_enabled(true);
     if (options.live_feed == "fine") live->perf_feed().set_fine(true);
 #endif
     live->advance_to(options.warmup);

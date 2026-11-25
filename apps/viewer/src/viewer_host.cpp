@@ -1,6 +1,7 @@
 #include "viewer_host_internal.hpp"
 #include "renderer_prewarm_arrays.hpp"
 #include <godot_cpp/core/class_db.hpp>
+#include "eawr/core/perf_diag/feed_writer.hpp"
 #include "eawr/core/text.hpp"
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
@@ -42,6 +43,7 @@ namespace {
 ViewerHost::ViewerHost() { describe_viewer_degradation_session(); }
 ViewerHost::~ViewerHost() {
     shutdown_mounted_mods();
+    core::perf_diag::FeedWriter::stop_process(); // #8058 P6: joins the writer thread, if telemetry was on
     // The session's degradation summary and its one log line; the host teardown is the viewer's single end point.
     publish_viewer_degradation_summary();
     shutdown_trace::mark("viewer host freed (members follow)");

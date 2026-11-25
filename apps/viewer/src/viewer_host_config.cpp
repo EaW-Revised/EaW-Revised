@@ -191,6 +191,8 @@ void ViewerHost::read_host_options(const PackedStringArray& arguments) {
             if (!take_path(options_->capture_path)) break;
         } else if (argument == "--eawr-report") {
             if (!take_path(options_->report_path)) break;
+        } else if (argument == "--eawr-telemetry") {
+            if (!take_path(options_->telemetry_dir)) break;
         } else if (argument == "--eawr-perf-trace") {
             options_->startup_metrics = true;
         } else if (argument == "--eawr-window-resize-test") {

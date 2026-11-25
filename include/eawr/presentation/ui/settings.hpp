@@ -245,6 +245,10 @@ struct SelectionConfig final {
 struct PlayerSettings final {
     bool revised_layer_enabled{true};
     std::optional<std::string> revised_layer_path;
+    // #8058 P6: the local perf telemetry feed's directory (settings key diagnostics.telemetry). Unset = off. A file key
+    // only: no options-screen entry (perf numbers stay out of the options screens); the options screen keeps the value
+    // when it saves. --eawr-telemetry <dir> on the command line wins.
+    std::optional<std::string> diagnostics_telemetry;
     AudioSettings audio;
     VideoSettings video;
     GameplaySettings gameplay;
@@ -264,6 +268,7 @@ struct PlayerSettings final {
 
     friend bool operator==(const PlayerSettings& a, const PlayerSettings& b) {
         return a.revised_layer_enabled == b.revised_layer_enabled && a.revised_layer_path == b.revised_layer_path
+            && a.diagnostics_telemetry == b.diagnostics_telemetry
             && a.audio == b.audio && a.video == b.video && a.gameplay == b.gameplay && a.network == b.network
             && a.camera_wasd == b.camera_wasd && a.selection_config == b.selection_config
             && a.selection_hotkeys_authored == b.selection_hotkeys_authored

@@ -551,7 +551,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
                 return false;
             }
         }
-        UtilityFunctions::print("EAWR campaign battle: loading conflict=", conflict);
+        UtilityFunctions::print("EAWR campaign battle: loading conflict=", conflict, " utc=", String(galactic_view::vote_trace_utc().c_str()));
         return true;
     }
     if (loading) loading->observe_preparation(preparation);
@@ -641,7 +641,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         game->battle_ready(conflict);
         tactical_host->set_name("CampaignSpaceBattleReady");
         if (audio) audio->tactical();
-        UtilityFunctions::print("EAWR campaign battle: ready conflict=", conflict);
+        UtilityFunctions::print("EAWR campaign battle: ready conflict=", conflict, " utc=", String(galactic_view::vote_trace_utc().c_str()));
         return true;
     }
     if (loading && loading->shown() && loading->ready_for_begin()) {

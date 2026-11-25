@@ -339,6 +339,26 @@ func _process(delta):
         self.assertEqual(begun["battle_dialog"]["phase"], "hidden")
         self.assertEqual(begun["battle_dialog"]["choices"], 1)
 
+    def test_passive_pending_prompt_has_no_buttons(self):
+        # #8353: the multiplayer prompt of a fight the player is not in: the same shell and strip, no buttons, no answer.
+        passive, capture = self.capture("battle-passive")
+        dialog = passive["battle_dialog"]
+        self.assertEqual(dialog["phase"], "choice")
+        self.assertEqual(dialog["pending_shell"], "pending_battle_shell")
+        names = {row["name"] for row in dialog["controls"]}
+        self.assertIn("pending_title", names)
+        self.assertTrue(names.isdisjoint({"fight", "fight_caption", "auto", "auto_caption", "retreat", "IDC_WITHDRAW_BUTTON"}),
+                        "the passive prompt builds no choice buttons or captions")
+        title = self.control(passive, "pending_title")
+        self.assertTrue(title["visible"])
+        self.assertTrue(title["text"].startswith("Coruscant: ") and title["text"].endswith(" 12"), title["text"])
+        self.assertTrue(any(row["name"].startswith("graph_") and row["visible"] for row in dialog["controls"]),
+                        "both sides' graphs are shown")
+        self.assertTrue(capture.is_file())
+        from tests.presentation.renderer.space_map_test_support import decode_png
+        decode_png(capture.read_bytes())
+        self.assertEqual(dialog["choices"], 0)
+
     def test_pending_strip_covers_fleet_overlay_and_uses_authored_text_anchor(self):
         prompt, _ = self.capture("battle-choice")
         title = self.control(prompt, "pending_title")

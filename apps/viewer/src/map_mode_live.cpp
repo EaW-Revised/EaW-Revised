@@ -1,3 +1,4 @@
+#include "eawr/core/perf_diag/feed_writer.hpp"
 #include "frame_timer.hpp"
 #include "startup_trace.hpp"
 #include "gpu_memory_trace.hpp"
@@ -1171,6 +1172,16 @@ void MapMode::input(const Ref<InputEvent>& event) {
         && (pressed->get_physical_keycode() != KEY_NONE ? pressed->get_physical_keycode() : pressed->get_keycode())
             == KEY_F3) {
         state.set_perf_overlay(state.perf == nullptr || !state.perf->shown());
+        return;
+    }
+    // #8058 P6: Shift+F3 writes a perf capture (the last seconds of the telemetry rings) when a telemetry feed is on;
+    // without one it does nothing. Never an options entry: a developer chord.
+    if (const auto* pressed = Object::cast_to<InputEventKey>(event.ptr());
+        pressed != nullptr && pressed->is_pressed() && !pressed->is_echo() && pressed->is_shift_pressed()
+        && !pressed->is_ctrl_pressed() && !pressed->is_alt_pressed() && !pressed->is_meta_pressed()
+        && (pressed->get_physical_keycode() != KEY_NONE ? pressed->get_physical_keycode() : pressed->get_keycode())
+            == KEY_F3) {
+        core::perf_diag::FeedWriter::request_capture_active();
         return;
     }
     // Land movement debug overlay (default off): F4 toggles it in a land battle; nothing else sees the key.

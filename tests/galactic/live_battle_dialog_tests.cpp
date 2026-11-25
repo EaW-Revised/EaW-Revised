@@ -5,6 +5,7 @@
 #include "galactic/galactic_save_hints.hpp"
 #include "galactic/auto_summary_hint.hpp"
 #include "galactic/live_battle_bounty.hpp"
+#include "galactic/gc_vote_trace.hpp"
 #include "galactic/galactic_mode_seats.hpp"
 #include "eawr/campaign/conflict_policy.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
@@ -582,6 +583,43 @@ void publication() {
         "a multiplayer player who is not in the fight gets no radar flash; a fighting side keeps it");
     expect(view::live_battle_dialog_view(frame, {1}, 1, {}, names).phase == view::BattleDialogPhase::choice,
         "the fighting side keeps its prompt");
+    // #8353: when the session publishes its alert for the player outside the fight (a human side is voting), that player
+    // sees the same panel, view only. Player 3 is not a side of conflict 70.
+    cp::PendingBattleAlertInputs bystander = countdown;
+    bystander.local = 3; bystander.untimed = false; bystander.authorized_issuer = false;
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, bystander, true);
+    const auto passive = view::live_battle_dialog_view(frame, {3}, 3, {}, names);
+    const auto fighter = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
+    expect(passive.phase == view::BattleDialogPhase::choice && passive.passive && !passive.involved
+        && passive.conflict == fighter.conflict && passive.planet == "Kamino" && passive.pending_multiplayer
+        && passive.pending_land == fighter.pending_land,
+        "a multiplayer player outside the fight sees the pending prompt of the same conflict and planet");
+    expect(passive.sides[0].name == "2" && passive.sides[1].name == "1" && passive.sides[0].units == 1
+        && passive.sides[1].units == 1 && passive.sides[0].combatants == fighter.sides[0].combatants
+        && passive.sides[1].combatants == fighter.sides[1].combatants,
+        "the passive prompt shows both sides and their forces like the fighting side's prompt");
+    expect(passive.pending_countdown && *passive.pending_countdown == 10 && !passive.waiting_for_opponent
+        && passive.pending_visible == fighter.pending_visible && passive.single_button == fighter.single_button,
+        "the passive prompt carries the same countdown and shell choice");
+    expect(!passive.choice_ready && !passive.fight_allowed && !passive.auto_allowed && !passive.retreat_allowed
+        && passive.refusal.empty() && passive.tactical_refusal.empty(),
+        "the passive prompt answers nothing: no fight, no auto-resolve, no retreat, no refusal text");
+    expect(!fighter.passive && fighter.involved, "the fighting side's prompt is not passive");
+    expect(view::pending_battle_radar_planet(frame, 3) == 0, "the passive prompt adds no radar flash");
+    // The alert alone is not enough: a solo game, a fighting side with someone else's alert, or no alert gives no prompt.
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, countdown, true);
+    expect(view::live_battle_dialog_view(frame, {3}, 3, {}, names).phase == view::BattleDialogPhase::hidden,
+        "an alert published for another player never opens a prompt for a bystander");
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, bystander, true);
+    frame.latest = solo_snapshot;
+    expect(view::live_battle_dialog_view(frame, {3}, 3, {}, names).phase == view::BattleDialogPhase::hidden,
+        "a solo game gives a bystander no prompt");
+    frame.latest = multiplayer_session.snapshot();
+    pending->conflict.layer = cp::BattleLayer::land;
+    frame.auto_resolve_progress = saved_progress;
+    expect(!view::live_battle_dialog_view(frame, {3}, 3, {}, names).passive,
+        "once the fight auto-resolves the passive prompt is replaced by the observer progress dialog");
+    pending->conflict.layer = cp::BattleLayer::space; frame.auto_resolve_progress.reset();
     pending->alert = saved_alert; frame.auto_resolve_progress = saved_progress;
     pending->conflict.layer = cp::BattleLayer::space; frame.latest = solo_snapshot;
     frame.pending_conflict.reset(); frame.auto_resolve_progress.reset();
@@ -740,8 +778,48 @@ void uninvolved_conflict_lifecycle() {
     expect(sample(2) == view::BattleDialogPhase::summary && changes == 3, "a party seat still gets one summary");
 }
 }
+// #8353: the vote trace reports the prompt opening, each vote, the session's route and the close, once each.
+void vote_trace() {
+    eawr::platform::LiveGameFrame frame;
+    auto pending = std::make_shared<cp::PendingConflictView>();
+    pending->conflict.id = 70; pending->conflict.invader = 1; pending->conflict.defender = 3;
+    pending->arbitration.route = cp::ConflictRoute::vote;
+    pending->required = {1}; pending->vote_started = 12; pending->choice_ready = true;
+    cp::PendingBattleAlertInputs inputs; inputs.local = 1; inputs.active_mode = inputs.queue_tactical = inputs.multiplayer = true;
+    inputs.timeout_ms = 30000; inputs.elapsed_wall_ms = 1000;
+    pending->alert = cp::pending_battle_alert_view(pending->conflict, inputs, true);
+    frame.pending_conflict = pending; frame.session_tick = 100;
+    view::VoteTrace trace;
+    const eawr::sim::SeatId seat{1};
+    auto lines = trace.observe(frame, seat, 1, "12:00:00.000");
+    expect(lines.size() == 1 && lines[0].find("prompt-open") != std::string::npos
+            && lines[0].find("required=1") != std::string::npos && lines[0].find("votes=-") != std::string::npos
+            && lines[0].find("vote_started=12") != std::string::npos && lines[0].find("timeout_ms=30000") != std::string::npos
+            && lines[0].find("tick=100") != std::string::npos && lines[0].find("route=vote") != std::string::npos,
+        "the trace opens with the required voters, the vote start and the countdown");
+    expect(trace.observe(frame, seat, 1, "12:00:01.000").empty(), "an unchanged frame logs nothing");
+    auto voted = std::make_shared<cp::PendingConflictView>(*pending);
+    voted->votes = {{1, true}}; voted->arbitration.route = cp::ConflictRoute::tactical;
+    frame.pending_conflict = voted; frame.session_tick = 130;
+    frame.battle_choice_responses = {{70, 4, seat, {}}};
+    lines = trace.observe(frame, seat, 1, "12:00:02.000");
+    expect(lines.size() == 3 && lines[0].find("gc-vote: route") != std::string::npos && lines[0].find("route=tactical") != std::string::npos
+            && lines[1].find("votes=1:begin") != std::string::npos && lines[2].find("response") != std::string::npos
+            && lines[2].find("accepted") != std::string::npos,
+        "a vote, the route it selects and the session's answer are each logged once");
+    frame.battle_choice_responses = {{70, 5, seat, "refused"}};
+    lines = trace.observe(frame, seat, 1, "12:00:03.000");
+    expect(lines.size() == 1 && lines[0].find("refused=\"refused\"") != std::string::npos, "a refusal is logged");
+    frame.pending_conflict.reset(); frame.session_tick = 140;
+    lines = trace.observe(frame, seat, 1, "12:00:04.000");
+    expect(lines.size() == 1 && lines[0].find("prompt-closed") != std::string::npos && lines[0].find("next=none") != std::string::npos,
+        "the close is logged with what follows");
+    expect(trace.observe(frame, seat, 1, "12:00:05.000").empty(), "nothing after the close");
+    expect(view::VoteTrace::click(frame, seat, 1, 70, true, false, "t").find("choice=begin dispatched=0") != std::string::npos,
+        "a click is logged with whether it was dispatched");
+}
 int case_galactic_live_battle_dialog_tests() {
-    try { retained_results_drain(); saved_auto_summary_roundtrip(); live_retained_results_drain(); campaign_seats(); bounty_mapping(); publication(); uninvolved_conflict_lifecycle(); }
+    try { retained_results_drain(); saved_auto_summary_roundtrip(); live_retained_results_drain(); campaign_seats(); bounty_mapping(); publication(); vote_trace(); uninvolved_conflict_lifecycle(); }
     catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

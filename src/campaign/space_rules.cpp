@@ -2,8 +2,11 @@
 #include "eawr/battle/start.hpp"
 #include "eawr/campaign/space_briefing.hpp"
 #include "eawr/campaign/space_entry.hpp"
+#include "eawr/sim/tactical/motion.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <string_view>
 #include <tuple>
 
 namespace eawr::campaign {
@@ -151,6 +154,19 @@ core::Result<void> apply_space_rules(ConflictEntry& entry, const skirmish::Start
     binding.upgrades = inputs.upgrades;
     binding.victory_leaders = inputs.leaders;
     binding.reserve_order = inputs.reserve_order;
+    // WR-90 (#8368): the retreat countdown turns the roster toward the FIRST listed attacker entry marker's yaw + 180
+    // (map order, no nearest-to-defender test: that choice belongs to the entry placement only).
+    for (const auto& placement : content.placements) {
+        constexpr std::string_view name = "Attacker Entry Position";
+        if (!placement.marker || !placement.position || !placement.orientation_degrees
+            || !std::equal(placement.type.begin(), placement.type.end(), name.begin(), name.end(),
+                [](const char a, const char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }))
+            continue;
+        Fixed turned;
+        if (sim::math::try_add(placement.orientation_degrees->z, Fixed::from_raw(180 * Fixed::scale), turned))
+            binding.retreat_heading = tactical::wrap_degrees(turned);
+        break;
+    }
     for (const auto& constant : tables.constants.scalars) if (constant.tag == "Space_Station_Destruction_Forces_Retreat") {
         auto text = constant.text;
         std::transform(text.begin(), text.end(), text.begin(), [](const auto c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c; });

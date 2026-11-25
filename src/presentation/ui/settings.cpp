@@ -525,6 +525,8 @@ std::string serialize_settings(const PlayerSettings& settings) {
         return std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }) ? value : std::string{};
     };
     if (settings.revised_layer_path) text += "revised_layer_path=" + line_value(*settings.revised_layer_path) + "\n";
+    if (settings.diagnostics_telemetry && !line_value(*settings.diagnostics_telemetry).empty())
+        text += "diagnostics.telemetry=" + line_value(*settings.diagnostics_telemetry) + "\n";
     text += "network.online_host=" + line_value(settings.network.online_host) + "\n";
     // Clearing the host in Options is an explicit opt-out, unlike older empty defaults.
     if (settings.network.online_host.empty()) text += "network.online_unconfigured=1\n";
@@ -588,6 +590,11 @@ SettingsLoad parse_settings(const std::string_view text) {
         if (key == "revised_layer_path") {
             if (!value.empty()) load.settings.revised_layer_path = std::string(value);
             else load.settings.revised_layer_path.reset();
+            continue;
+        }
+        if (key == "diagnostics.telemetry") {
+            if (!value.empty()) load.settings.diagnostics_telemetry = std::string(value);
+            else load.settings.diagnostics_telemetry.reset();
             continue;
         }
         if (key.rfind("network.online_", 0) == 0) {

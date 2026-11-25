@@ -61,7 +61,7 @@ func visible_entries():
     var area = panel.get_global_rect()
     for node in root.find_children("*", "EawrHudButton", true, false):
         var label = str(node.name)
-        if not node.is_visible_in_tree() or label == "GalacticBuildTrayClose" or label.begins_with("b_") or label.begins_with("queue") or label.begins_with("ground_presence"):
+        if not node.is_visible_in_tree() or label.begins_with("b_") or label.begins_with("queue") or label.begins_with("ground_presence"):
             continue
         if area.has_point(node.get_global_rect().get_center()): found.append(node)
     # Other hud buttons can sit under the panel (one did in the single-player run: the first "entry" was not a card), so

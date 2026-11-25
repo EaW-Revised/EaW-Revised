@@ -243,9 +243,9 @@ core::Result<void> parse_extension_campaign(
     // pre-1.0 save compatibility); its own code lets a loader say exactly this and nothing else.
     if (version == 5 || version == 6)
         return fail<Parsed>(diagnostic_codes::older_campaign_setup,
-            "campaign setup version " + std::to_string(version) + " was written by an older build (this build reads 7 and 8)",
+            "campaign setup version " + std::to_string(version) + " was written by an older build (this build reads 7 to 10)",
             logical_path);
-    if (version != 7 && version != 8)
+    if (version < 7 || version > 10)
         return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign setup header", logical_path);
     if (!body.read_u32(corrupted) || corrupted > 1
         || !body.read_i64(price_multiplier) || !body.read_u32(count_players)
@@ -309,7 +309,7 @@ core::Result<void> parse_extension_campaign(
         return fail<Parsed>(diagnostic_codes::malformed, "truncated campaign leader", logical_path);
     if (!body.read_u64(binding.victory_station))
         return fail<Parsed>(diagnostic_codes::malformed, "truncated campaign station condition", logical_path);
-    if (version == 8) {
+    if (version == 8 || version == 10) {
         std::uint32_t count_ordered_reserves{};
         if (!body.read_u32(count_ordered_reserves) || count_ordered_reserves == 0
             || count_ordered_reserves != count_reserves || count_ordered_reserves > body.remaining() / 8U)
@@ -317,6 +317,12 @@ core::Result<void> parse_extension_campaign(
         binding.reserve_order.resize(count_ordered_reserves);
         for (auto& id : binding.reserve_order) if (!body.read_u64(id))
             return fail<Parsed>(diagnostic_codes::malformed, "truncated campaign reserve order", logical_path);
+    }
+    if (version >= 9) {
+        std::int64_t heading{};
+        if (!body.read_i64(heading) || heading < -360 * math::Fixed::scale || heading > 360 * math::Fixed::scale)
+            return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign retreat heading", logical_path);
+        binding.retreat_heading = math::Fixed::from_raw(heading);
     }
     if (body.remaining() != 0)
         return fail<Parsed>(diagnostic_codes::malformed, "invalid campaign setup length", logical_path);

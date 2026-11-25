@@ -740,6 +740,7 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
                 && options.hud_fixture != "battle-choice" && options.hud_fixture != "battle-land" && options.hud_fixture != "battle-progress"
                 && options.hud_fixture != "battle-single" && options.hud_fixture != "battle-begin"
                 && options.hud_fixture != "battle-refusal" && options.hud_fixture != "battle-observer"
+                && options.hud_fixture != "battle-passive"
                 && !options.hud_fixture.starts_with("battle-summary")
                 && options.hud_fixture != "battle-invasion" && options.hud_fixture != "battle-invasion-candidate"
                 && !options.hud_fixture.starts_with("score-") && !options.hud_fixture.starts_with("orbit-"))) {
@@ -885,14 +886,15 @@ bool CaptureHudFixture::battle_dialog(GalacticMode::State& state) {
     // Explicit synthetic presentation qualification, never live campaign facts.
     if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture.starts_with("battle-")) {
         auto& view = battle_dialog_fixture;
-        view.conflict = 9001; view.planet = "Coruscant"; view.involved = options.hud_fixture != "battle-observer";
+        view.conflict = 9001; view.planet = "Coruscant"; view.involved = options.hud_fixture != "battle-observer" && options.hud_fixture != "battle-passive";
+        view.passive = options.hud_fixture == "battle-passive"; // #8353: the multiplayer prompt of a fight the player is not in
         view.pending_land = options.hud_fixture == "battle-land";
         view.phase = (options.hud_fixture == "battle-choice" || options.hud_fixture == "battle-refusal" || view.pending_land
-            || options.hud_fixture == "battle-single" || options.hud_fixture == "battle-begin") ? galactic_view::BattleDialogPhase::choice
+            || options.hud_fixture == "battle-single" || options.hud_fixture == "battle-begin" || view.passive) ? galactic_view::BattleDialogPhase::choice
             : (options.hud_fixture.starts_with("battle-summary") || options.hud_fixture.starts_with("battle-invasion")) ? galactic_view::BattleDialogPhase::summary
             : galactic_view::BattleDialogPhase::progress;
-        view.fight_allowed = true; view.auto_allowed = options.hud_fixture != "battle-single";
-        view.single_button = !view.auto_allowed;
+        view.fight_allowed = !view.passive; view.auto_allowed = options.hud_fixture != "battle-single" && !view.passive;
+        view.single_button = options.hud_fixture == "battle-single";
         view.tactical_available = options.hud_fixture == "battle-single" || options.hud_fixture == "battle-begin";
         view.retreat_allowed = view.phase == galactic_view::BattleDialogPhase::progress; view.won = true;
         if (options.hud_fixture == "battle-summary-audio-auto-win"
@@ -903,8 +905,10 @@ bool CaptureHudFixture::battle_dialog(GalacticMode::State& state) {
         }
         if (options.hud_fixture == "battle-invasion") { view.invasion_fleet = 80; view.invasion_planet = 101; }
         view.display_seconds = 10; view.elapsed_seconds = 2;
+        if (view.passive) { view.pending_multiplayer = true; view.pending_countdown = 12; view.choice_ready = false; }
         view.sides[0] = {"Empire", "", {0.9F, 0.2F, 0.2F}, {"Imperial Star Destroyer", "TIE Fighter", "TIE Fighter", "TIE Bomber", "TIE Scout"}, {}, {}};
         view.sides[1] = {"Rebel Alliance", "", {0.2F, 0.9F, 0.2F}, {"Mon Calamari Cruiser", "X-wing"}, {}, {}};
+        if (view.passive) { view.sides[0].units = 5; view.sides[1].units = 2; }
         view.results.losses[0] = {{"TIE_Fighter", "TIE Fighter", 2}};
         view.results.losses[1] = {{"X_Wing", "X-wing", 3}};
         view.results.totals = {2, 3}; view.results.combat_power = {20, 60};

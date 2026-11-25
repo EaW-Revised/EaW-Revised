@@ -85,6 +85,9 @@ struct BattleDialogView {
     std::array<BattleDialogSide, 2> sides; // defender, invader (WAR-67)
     bool pending_visible{true}, single_button{}, waiting_for_opponent{}, roster_complete{};
     bool involved{}, choice_ready{true}, fight_allowed{}, tactical_available{}, auto_allowed{}, retreat_allowed{}, won{};
+    // #8353: a multiplayer prompt for a fight the local player is not in. Same panel and content as the pending prompt,
+    // view only: no buttons, no answer, nothing reaches the simulation.
+    bool passive{};
     bool local_invader{}; // the local player attacks: sides[1] is local (WGUI-176 left graph)
     std::string refusal;
     double elapsed_seconds{}, display_seconds{}; // validated AutoResolveDisplayTime

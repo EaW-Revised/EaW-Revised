@@ -140,7 +140,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     }
     if (replay.setup.campaign) {
         const auto& binding = *replay.setup.campaign;
-        sim::detail::append_u32(campaign, binding.reserve_order.empty() ? 7U : 8U);
+        // 7 = base, 8 = + reserve order, 9/10 = the same + the retreat heading (WR-90).
+        sim::detail::append_u32(campaign, (binding.reserve_order.empty() ? 7U : 8U) + (binding.retreat_heading ? 2U : 0U));
         sim::detail::append_u32(campaign, binding.corrupted ? 1U : 0U);
         sim::detail::append_i64(campaign, binding.corruption_price_multiplier.raw());
         sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.players.size()));
@@ -182,6 +183,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             sim::detail::append_u32(campaign, static_cast<std::uint32_t>(binding.reserve_order.size()));
             for (const auto id : binding.reserve_order) sim::detail::append_u64(campaign, id);
         }
+        if (binding.retreat_heading) sim::detail::append_i64(campaign, binding.retreat_heading->raw());
         if (binding.market_abilities) {
             sim::detail::append_u32(market_purchases, 1);
             sim::detail::append_u32(market_purchases, static_cast<std::uint32_t>(binding.market_abilities->items.size()));

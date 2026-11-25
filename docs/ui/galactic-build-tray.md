@@ -210,8 +210,7 @@ The tray never repurposes a bar slot.
   space above it, so the gap over the label is more than twice the gap under it. All amounts are relative to the
   header's height (no per-skin or per-mod offset; no layout tag). The extra space is taken whole: the tray grows by it
   once per headed row after the first, and the height fit below answers when that no longer fits. The first row's
-  label rides up into the strip the close mark reserved above it, never further than the row gap under the close
-  icon's band (GBT-07).
+  label rides up into the panel's padding above it, never past the panel's top edge.
 - Groups are placed in the order of their category name in the mod's enum file, then any extra
   groups at the position their definition names (GBT-12). A group goes on the current row when it fits there,
   otherwise it starts a new row. Earlier rows are never backfilled, so the layout does not
@@ -290,19 +289,13 @@ The tray never repurposes a bar slot.
   viewer's only Tab handling is that cinematic hold, and no project hotkey uses it.
 - Esc, purchases, pointer movement and planet selection never close the tray (owner decision).
   Esc keeps its existing meanings.
-- **Close icon** (owner request of 2026-11-19): the open tray shows a small close icon in its top right
-  corner that does exactly what the tray key does while the tray is open. No checked mod (stock-derived shells,
-  RaW, Remake 4.0) has a small close icon in its command bar or GUIDialogs art: every galactic close component is
-  a labelled pad, and the "x" on RaW's minimap bar is its fast-forward button. So the icon is the bar's own button
-  art (the handle's art family) carrying the `Caption` text, the built-in `TEXT_EAWR_BUILD_TRAY_CLOSE` (an x) in the
-  headers' text look; a language database can override it. A mod with its own small close icon names its command bar
-  component in `Art_Component` (repeatable, the first the mod has wins) and the icon takes that component's normal,
-  hover and pressed art and sounds instead. The tooltip is the `Tooltip` text key, the game's Close label by default.
-  Its place is moddable like the handle's: ordered `Candidate` entries, with the open panel as the extra anchor
-  `build_tray`. When the first candidate sits inside the panel's top, the panel keeps a strip of the icon's height free
-  above its first row, so the icon never covers a header or an entry. Only the first candidate decides the strip: a
-  layer whose first candidate cannot dock (off screen) and whose later one lands inside the panel may overlap an entry,
-  so such a layer should list its inside-the-panel candidate first.
+- **No close button** (owner decision of 2026-11-24) (legacy EAWR-8277); it replaces the close icon of 2026-11-19: the open tray
+  has no button of its own to close it, and no strip above its first row. The handle (bottom left, above the production
+  bar) and the tray key (Tab by default) open and close it on every tray, and are the only two controls that do. The
+  strip the icon kept free cost the tray about a fifth of a row, which in the planet view tipped the height fit over its
+  cap and dropped a unit row, so the tray showed one row fewer than the row budget above allows; with the strip gone the
+  budget's full six unit rows plus the buildings row fit wherever the height does. A layout layer that still carries a
+  `Close_Button` element is read as if it were absent.
 
 ## GBT-08 Zoomed-in planet view
 
@@ -401,7 +394,6 @@ stock bar, which replace these starting values; the file below names every eleme
 |---|---|---|---|
 | `Enabled_By_Default` | The default of the Tweaks switch (GBT-13). | Yes or No | Yes |
 | `Handle` | The handle control, replaced whole like the project HUD layer's Gift (GBT-02). Children: `Enabled`, `Size`, `Caption`, `Tooltip`, `Normal_Texture`, `Hover_Texture`, `Pressed_Texture`, `Disabled_Texture`, and ordered `Candidate` entries with `Anchor`, `Side`, `Offset`. | as in the [project HUD layer](project-hud-layer.md) | stock art, 48 by 20, one candidate above `production_bar`. An enabled `Handle` needs a `Size` and at least one `Candidate`; nothing else is inherited. `<Handle><Enabled>false</Enabled></Handle>` disables it |
-| `Close_Button` | The close icon on the open tray (GBT-07), replaced whole like `Handle`. Children: `Enabled`, `Size`, repeatable `Art_Component` (command bar components whose art it takes; the first the mod has wins; none: the bar's own button art), `Caption`, `Tooltip`, and ordered `Candidate` entries with `Anchor`, `Side`, `Offset`; `build_tray` (the open panel) is a valid anchor. | as for `Handle`; an enabled one needs a `Size` and a `Candidate` | enabled, 16 by 16, the bar's button art, `TEXT_EAWR_BUILD_TRAY_CLOSE` (x) as caption and `TEXT_BUTTON_CLOSE` as tooltip, inside the panel's top right corner moved 3 left and 3 down |
 | `Tray` | Container for the elements below. | | |
 | `Dialog_Name` | Dialog name for GUIDialogs overrides, default `IDD_EAWR_BUILD_TRAY`. The control names are `IDC_EAWR_BUILD_TRAY_ENTRY`, `_HEADER`, `_DIVIDER` and `_HANDLE`. | text | `IDD_EAWR_BUILD_TRAY` |
 | `Entry_Template` | Name of the bar production component an entry copies. Default `b_Create_00`, the bar's first slot (GBT-10). | component name | `b_Create_00` |
@@ -444,13 +436,6 @@ the selection hotkeys (GBT-07).
     <Tooltip>TEXT_EAWR_BUILD_TRAY_TOOLTIP</Tooltip>
     <Candidate><Anchor>production_bar</Anchor><Side>above</Side><Offset>0 0</Offset></Candidate>
   </Handle>
-  <Close_Button>
-    <Enabled>true</Enabled>
-    <Size>16 16</Size>
-    <Caption>TEXT_EAWR_BUILD_TRAY_CLOSE</Caption>
-    <Tooltip>TEXT_BUTTON_CLOSE</Tooltip>
-    <Candidate><Anchor>build_tray</Anchor><Side>inside_top_right</Side><Offset>-3 3</Offset></Candidate>
-  </Close_Button>
   <Tray>
     <Entry_Template>b_Create_00</Entry_Template>
     <Entry_Scale>0.75</Entry_Scale>

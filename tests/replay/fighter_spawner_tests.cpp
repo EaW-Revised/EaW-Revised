@@ -1274,7 +1274,8 @@ void test_garrison_provenance() {
             expect(transferred && transferred->owner == 3 && transferred->garrison_unit == parent
                 && transferred_mind && transferred_mind->garrison_unit == parent,
                 "WU-37: team ownership transfer preserves the independent container mark after commit");
-            for (const auto member : world.squadrons().front().members) {
+            const auto transferred_squadrons = world.squadrons();
+            for (const auto member : transferred_squadrons.front().members) {
                 const auto* craft = instance(*world.snapshot(), member);
                 expect(craft && craft->owner == 3 && !craft->garrison_unit,
                     "WU-37: transferred replenished members stay unmarked beneath a marked team");

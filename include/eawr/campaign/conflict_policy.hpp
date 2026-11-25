@@ -4,6 +4,8 @@
 #include "eawr/sim/galactic/snapshot.hpp"
 #include "eawr/sim/galactic/native_invasion.hpp"
 #include <functional>
+#include <utility>
+#include <vector>
 
 namespace eawr::campaign {
 
@@ -136,6 +138,12 @@ struct PendingConflictView {
     Arbitration arbitration;
     bool choice_ready{};
     std::optional<PendingBattleAlertView> alert;
+    // #8353 vote trace (read only, never hashed): the multiplayer vote as the session holds it. `required` lists the
+    // fighting players with an active human seat (the only voters), `votes` the choices counted so far (true = Begin),
+    // `vote_started` the session tick the prompt opened for voting.
+    std::vector<std::pair<sim::galactic::PlayerId, bool>> votes;
+    std::vector<sim::galactic::PlayerId> required;
+    std::optional<std::uint64_t> vote_started;
 };
 [[nodiscard]] core::Result<Arbitration> arbitrate_conflict(const ArbitrationInputs& inputs);
 

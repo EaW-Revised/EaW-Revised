@@ -1168,6 +1168,7 @@ core::Result<void> session_detail::Tick::PlanLanes::apply_retreat(const PlayerCo
     auto& events = phase.impacts_.value().events.value();
     auto& diagnostics = phase.commands_.value().diagnostics.value();
     auto refusal = RetreatRefusal::wrong_mode;
+    const bool was_idle = phase.pending_retreat_.phase == RetreatPhase::idle;
     if (phase.impl_->setup.domain == BattleDomain::space && phase.impl_->retreat) {
         auto gate = phase.impl_->retreat_gate(issuer); gate.battle_decided = phase.pending_outcome_.has_value();
         if (retreat->action == RetreatAction::auto_resolve) diagnostics.push_back(detail::diagnostic(
@@ -1175,6 +1176,53 @@ core::Result<void> session_detail::Tick::PlanLanes::apply_retreat(const PlayerCo
         else if (phase.impl_->retreat->flight_qualified || retreat->action == RetreatAction::cancel)
             refusal = request_retreat(phase.impl_->retreat->rules, phase.pending_retreat_, issuer, retreat->action,
             phase.tick, gate, phase.impl_->retreat_actors());
+    }
+    // WR-90 (#8368): at the retreat click every roster ship stops and turns in place toward the stored heading (speed 0,
+    // no translation; time = angle / turn rate x the class slowdown, MV-20). A craft or squadron only turns when it is
+    // already at rest. The movement hold then samples this plan each tick until the countdown ends.
+    if (refusal == RetreatRefusal::none && retreat->action == RetreatAction::start && was_idle
+        && phase.pending_retreat_.phase == RetreatPhase::countdown && phase.impl_->setup.campaign
+        && phase.impl_->setup.campaign->retreat_heading) {
+        auto& staged = phase.tracked_.value().staged.value();
+        const auto& membership = phase.craft_prep_->craft_squadron.value();
+        for (const auto id : phase.pending_retreat_.actors) {
+            const auto found = staged.find(id);
+            if (found == staged.end()) continue;
+            auto& live = found->second;
+            const auto* profile = phase.impl_->motion.find(live.state.type_id);
+            if (!live.motion || profile == nullptr) continue;
+            const bool fighter = membership.contains(id) || std::any_of(phase.impl_->squadrons.begin(), phase.impl_->squadrons.end(),
+                [&](const auto& row) { return row.container == id; });
+            const bool at_rest = live.speed.raw() == 0 && live.motion->kind == MotionKind::none;
+            live.state.order = {}; live.formation.reset(); live.approach.reset();
+            if (fighter && !at_rest) { live.motion = MotionState{}; live.speed = {}; continue; }
+            const auto yaw = yaw_degrees(live.state.rotation);
+            if (!yaw) return core::Result<void>::failure(yaw.error());
+            auto turn = plan_face_yaw(*profile, phase.tick + 1, live.state.position, yaw.value(),
+                *phase.impl_->setup.campaign->retreat_heading);
+            if (!turn) return core::Result<void>::failure(turn.error());
+            live.motion = std::move(turn).value();
+            live.speed = {};
+        }
+        // Craft of a rostered squadron turn only when they are at rest at the click (WR-90): same plan with the craft's
+        // own turn rate and no slowdown; the movement phase samples it. A moving craft ignores the heading.
+        const auto& views = phase.craft_prep_->craft_views.value();
+        for (const auto id : phase.pending_retreat_.actors) for (const auto& row : phase.impl_->squadrons) {
+            if (row.container != id) continue;
+            for (const auto member : row.members) {
+                const auto view = std::find_if(views.begin(), views.end(), [&](const auto& v) { return v.id == member; });
+                const auto craft = staged.find(member);
+                if (view == views.end() || view->profile == nullptr || craft == staged.end()) continue;
+                if (view->state.velocity != math::Vec3{}) continue;
+                const auto yaw = yaw_degrees(craft->second.state.rotation);
+                if (!yaw) return core::Result<void>::failure(yaw.error());
+                const auto craft_profile = craft_turn_profile(*view->profile);
+                auto turn = plan_face_yaw(craft_profile, phase.tick + 1, craft->second.state.position, yaw.value(),
+                    *phase.impl_->setup.campaign->retreat_heading);
+                if (!turn) return core::Result<void>::failure(turn.error());
+                craft->second.motion = std::move(turn).value();
+            }
+        }
     }
     events.push_back(Event{phase.tick, refusal == RetreatRefusal::none ? EventKind::order_accepted : EventKind::order_rejected,
         issuer, command.key.sequence, 0, OrderKind::retreat,

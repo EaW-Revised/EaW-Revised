@@ -204,7 +204,7 @@ struct BuiltinText final {
     std::string_view key;
     std::u16string_view value;
 };
-constexpr std::array<BuiltinText, 74> builtin_texts{{
+constexpr std::array<BuiltinText, 76> builtin_texts{{
     {"TEXT_EAWR_HIDDEN_PLANET", u"Hidden planet"},
     // ADR-020 project caption; an authored language database overrides this default.
     {"TEXT_EAWR_GIFT_UNITS", u"Gift"},
@@ -226,7 +226,6 @@ constexpr std::array<BuiltinText, 74> builtin_texts{{
     {"TEXT_EAWR_GALACTIC_BUILD_TRAY", u"Galactic build tray"},
     {"TEXT_EAWR_BUILD_TRAY_MORE", u"+"},
     {"TEXT_EAWR_BUILD_TRAY_TOOLTIP", u"Show every build choice"},
-    {"TEXT_EAWR_BUILD_TRAY_CLOSE", u"x"},
     {"TEXT_EAWR_BUILD_TRAY_GROUP_FIGHTER", u"Fighters"},
     {"TEXT_EAWR_BUILD_TRAY_GROUP_BOMBER", u"Bombers"},
     {"TEXT_EAWR_BUILD_TRAY_GROUP_TRANSPORT", u"Transports"},
@@ -279,6 +278,10 @@ constexpr std::array<BuiltinText, 74> builtin_texts{{
     {"TEXT_EAWR_ABILITY_MARKET_NOT_ESTABLISHED", u"This planet has no black market yet: corrupt it with the Black Market option first."},
     {"TEXT_EAWR_ABILITY_MARKET_NOTHING_OFFERED", u"The black market on this planet has nothing to offer you."},
     {"TEXT_EAWR_ABILITY_MARKET_CANNOT_PRICE", u"The black market cannot price anything on this planet right now."},
+    // #8396: the fleet encyclopedia names a faction that is not one of the three sides (or the Pirates) by its own display name;
+    // `%s` is that name. A mod text table may override either line; the original text table has neither.
+    {"TEXT_EAWR_FACTION_FLEET_FORMAT", u"%s Fleet"},
+    {"TEXT_EAWR_FACTION_GARRISON_FORMAT", u"%s Garrison"},
     {"TEXT_MODS_OPTIONS", u"Mods"},
     {"TEXT_SELECT_MOD_TITLE", u"Select Mod"},
 }};

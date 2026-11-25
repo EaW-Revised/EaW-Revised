@@ -1798,7 +1798,8 @@ void test_hero_wingmen() {
                 "WHE-63 replenishment is instantaneous with authored recharge");
             const auto damage_tick = refill_tick + 1;
             unsigned sequence = 0;
-            for (const auto id : world.squadrons()[0].members) if (id != 11)
+            const auto damage_squadrons = world.squadrons();
+            for (const auto id : damage_squadrons[0].members) if (id != 11)
                 expect(static_cast<bool>(world.submit(command(damage_tick, 1, sequence++, id,
                     tactical::AbilityPayload{K::invulnerability, tactical::AbilityAction::activate}))), "recipient take mode submits before script damage");
             expect(static_cast<bool>(world.submit(command(damage_tick, ordinary ? 2 : 1, sequence, ordinary ? 1 : 11,
@@ -1812,7 +1813,8 @@ void test_hero_wingmen() {
             expect(leader_health && leader_health->hull == Fixed::from_raw(units(1000).raw()
                 - (ordinary ? 0 : math::multiply(units(60), decimal("0.1")).value().raw())),
                 "WHE-64 ordinary hit leaves leader intact; LuaDebugDamage additionally applies leader's take mode");
-            for (const auto id : world.squadrons()[0].members) if (id != 11) {
+            const auto shared_squadrons = world.squadrons();
+            for (const auto id : shared_squadrons[0].members) if (id != 11) {
                 const auto recipient = world.durability_state(id);
                 expect(recipient && recipient->hull == Fixed::from_raw(units(1000).raw() - (guard ? 0
                     : math::multiply(Fixed::from_raw(units(60).raw() / (authored_count - 1)), decimal("0.5")).value().raw())), "WHE-64 raw shares use recipient take modes; recursion guard skips redirecting members");

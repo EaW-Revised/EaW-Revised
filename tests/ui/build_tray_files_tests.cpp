@@ -161,38 +161,12 @@ void test_defaults_and_the_handle() {
     expect(!layout_of("<Planet_Search/>").value, "another root element is not this file");
 }
 
-void test_the_close_button() {
-    const auto defaults = layout_of("<Revised_Build_Tray/>");
-    expect(defaults.value && defaults.value->close.enabled && defaults.value->close.candidates.size() == 1
-            && defaults.value->close.candidates[0].anchor == "build_tray" && defaults.value->close.candidates[0].side == "inside_top_right"
-            && defaults.value->close.width == 16 && defaults.value->close.height == 16 && defaults.value->close.art_components.empty()
-            && defaults.value->close.caption == "TEXT_EAWR_BUILD_TRAY_CLOSE" && defaults.value->close.tooltip == "TEXT_BUTTON_CLOSE",
-        "the built-in close icon is small, inside the panel's top right corner, in the bar's own button art");
-
-    const auto replaced = layout_of(R"(<Revised_Build_Tray><Close_Button><Size>20 20</Size>
-        <Art_Component>my_close</Art_Component><Art_Component>h_close</Art_Component>
-        <Tooltip>TEXT_MY_CLOSE</Tooltip>
-        <Candidate><Anchor>production_bar</Anchor><Side>Inside_Top_Left</Side><Offset>4 -4</Offset></Candidate>
-        </Close_Button></Revised_Build_Tray>)");
-    expect(replaced.value && replaced.value->close.width == 20 && replaced.value->close.height == 20
-            && replaced.value->close.art_components == std::vector<std::string>({"my_close", "h_close"})
-            && replaced.value->close.tooltip == "TEXT_MY_CLOSE" && replaced.value->close.caption == "TEXT_EAWR_BUILD_TRAY_CLOSE"
-            && replaced.value->close.candidates.size() == 1 && replaced.value->close.candidates[0].anchor == "production_bar"
-            && replaced.value->close.candidates[0].side == "inside_top_left" && replaced.value->close.candidates[0].x == 4,
-        "a Close_Button replaces the art list and candidates whole; a Side is read without regard to case");
-
-    const auto off = layout_of("<Revised_Build_Tray><Close_Button><Enabled>false</Enabled></Close_Button></Revised_Build_Tray>");
-    expect(off.value && !off.value->close.enabled, "a layer can disable the close button with Enabled alone");
-    const auto plain = layout_of("<Revised_Build_Tray><Close_Button><Size>20 20</Size><Candidate><Anchor>a</Anchor><Side>above</Side><Offset>0 0</Offset></Candidate></Close_Button></Revised_Build_Tray>");
-    expect(plain.value && plain.value->close.art_components.empty(), "an Art_Component is optional: none named is the bar's button art");
-    expect(!layout_of("<Revised_Build_Tray><Close_Button><Size>20 20</Size><Art_Component>h_close</Art_Component></Close_Button></Revised_Build_Tray>").value,
-        "an enabled Close_Button without a Candidate is rejected");
-    expect(!layout_of("<Revised_Build_Tray><Close_Button><Art_Component>h_close</Art_Component><Candidate><Anchor>a</Anchor><Side>above</Side><Offset>0 0</Offset></Candidate></Close_Button></Revised_Build_Tray>").value,
-        "an enabled Close_Button without a Size is rejected");
-    expect(!layout_of("<Revised_Build_Tray><Close_Button><Size>20 20</Size><Art_Component> </Art_Component><Candidate><Anchor>a</Anchor><Side>above</Side><Offset>0 0</Offset></Candidate></Close_Button></Revised_Build_Tray>").value,
-        "an empty Art_Component is rejected");
-    expect(!layout_of("<Revised_Build_Tray><Close_Button><Enabled>sometimes</Enabled></Close_Button></Revised_Build_Tray>").value,
-        "Close_Button/Enabled must be true or false");
+// #8277: the tray has no close button of its own (the handle opens and closes it); a layer that still carries the old
+// element loads as if it were absent, and the layout has nothing to read it into.
+void test_no_close_button() {
+    const auto old = layout_of("<Revised_Build_Tray><Close_Button><Size>20 20</Size><Candidate><Anchor>a</Anchor><Side>above</Side>"
+                               "<Offset>0 0</Offset></Candidate></Close_Button></Revised_Build_Tray>");
+    expect(old.value && old.error.empty() && *old.value == tray::TrayLayout{}, "a Close_Button element is ignored: the layout is the defaults");
 }
 
 void test_width_and_backdrop() {
@@ -403,15 +377,14 @@ void test_the_shipped_files() {
                 && layout.value->entry_template == "b_Create_00" && layout.value->fold_single_choice_groups,
             "the shipped layout is on by default with the 7 row budget and the bar's first slot as entry template");
         // Slice 6b: the shipped file spells out the built-in defaults (75 percent entries, automatic width, the
-        // bar's own art behind the panel, the small close icon), except the header text look it names.
+        // bar's own art behind the panel), except the header text look it names.
         auto defaults = tray::TrayLayout{};
         defaults.header_template = "Text_Tech_Level";
         expect(*layout.value == defaults, "the shipped layout is the built-in defaults plus its Header_Template");
         expect(layout.value->entry_scale == 0.75 && layout.value->compact_entry_scale == 0.6
                 && layout.value->width_mode == tray::WidthMode::automatic && layout.value->back_source == tray::BackSource::bar
-                && layout.value->back_component.empty() && layout.value->close.enabled
-                && layout.value->close.art_components.empty() && layout.value->close.width == 16,
-            "the shipped layout: 75 percent entries, automatic width, the bar's art, no named back art, the small close icon");
+                && layout.value->back_component.empty(),
+            "the shipped layout: 75 percent entries, automatic width, the bar's art, no named back art");
     }
     const auto groups = tray::load_tray_groups(files.value());
     expect(groups.value && !groups.invalid, "the shipped grouping is valid");
@@ -452,7 +425,7 @@ void test_the_category_enum() {
 int main() {
     test_a_full_layout();
     test_defaults_and_the_handle();
-    test_the_close_button();
+    test_no_close_button();
     test_width_and_backdrop();
     test_layout_ranges();
     test_a_full_grouping();

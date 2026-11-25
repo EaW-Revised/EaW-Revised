@@ -17,7 +17,7 @@ float span_width(const Metrics& metrics, const std::size_t count) noexcept {
 TrayGeometry place(const Packed& packed, const Metrics& metrics, const float left, const float bottom) {
     TrayGeometry geometry;
     geometry.panel = {left, bottom - packed.height, metrics.panel_width, packed.height};
-    float row_top = geometry.panel.y + metrics.padding + metrics.top_reserve;
+    float row_top = geometry.panel.y + metrics.padding;
     const float category_gap = category_gap_of(metrics, packed.rows);
     for (std::size_t row_index = 0; row_index < packed.rows.size(); ++row_index) {
         const auto& row = packed.rows[row_index];
