@@ -15,10 +15,11 @@ struct BuiltPendingBattleHud {
     std::string animation;
     bool animated_pose{};
 };
-// WGM-175: mounted command-bar models, never an extra centered modal.
+// WGM-175: mounted command-bar models, never an extra centered modal. passive (#8353) builds the same shell without
+// its choice buttons: no button art, no button controls, no captions.
 [[nodiscard]] BuiltPendingBattleHud build_pending_battle_hud(const vfs::Vfs&,
     const data::ui::CommandBarCatalog&, FontProvider&, presentation::ui::HudFaction faction,
-    godot::Vector2 size, bool single,
+    godot::Vector2 size, bool single, bool passive,
     const std::function<godot::Ref<godot::Texture2D>(std::string_view)>& texture,
     const std::function<godot::Ref<godot::Texture2D>(std::string_view)>& shell_texture,
     const std::function<std::string(std::string_view)>& text,

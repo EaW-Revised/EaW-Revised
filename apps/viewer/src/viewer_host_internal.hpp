@@ -110,6 +110,8 @@ struct ViewerHost::Options final {
     bool aa_flag_missing{};
     // --eawr-settings-file <path>: the player settings file (default: the user data folder's, #2927).
     std::filesystem::path settings_file;
+    // --eawr-telemetry <dir>: the local perf telemetry feed (#8058 P6); empty = off unless the settings file names one.
+    std::filesystem::path telemetry_dir;
     bool texture_mip_drop_explicit{};
     ViewerPath scene_path{std::string{"res://common/scene.json"}};
     ViewerPath replay_path{std::string{"res://common/original-v1.eawr-replay"}};

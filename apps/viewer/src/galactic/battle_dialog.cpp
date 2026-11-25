@@ -61,7 +61,8 @@ const std::vector<BuiltGadget>& BattleDialog::gadgets() const { return pending_ 
 void BattleDialog::present(viewer::galactic::BattleDialogView view) {
     if (view == view_ && size_ == root_->get_size()) return;
     summary_rows_dirty_ = true;
-    const bool changed = view.conflict != view_.conflict || view.phase != view_.phase || view.single_button != view_.single_button;
+    const bool changed = view.conflict != view_.conflict || view.phase != view_.phase || view.single_button != view_.single_button
+        || view.passive != view_.passive;
     if (changed) { submitted_ = false; scroll_ = {}; listed_at_ = -1; }
     if (view.choice_ready && (view.response_revision != view_.response_revision
         || (!view_.choice_ready && view.choice_ready) || view.refusal != view_.refusal)) submitted_ = false;
@@ -117,7 +118,8 @@ void BattleDialog::caption(BuiltGadget& gadget, std::string_view value) {
 }
 void BattleDialog::activate(viewer::galactic::BattleChoice choice, bool pointer_choice) {
     using namespace viewer::galactic;
-    const bool allowed = view_.involved && ((view_.phase == BattleDialogPhase::choice && view_.choice_ready &&
+    // A passive prompt (#8353) is view only and never involved: it answers nothing.
+    const bool allowed = view_.involved && !view_.passive && ((view_.phase == BattleDialogPhase::choice && view_.choice_ready &&
         ((choice == BattleChoice::fight && view_.fight_allowed && view_.tactical_available) ||
          (choice == BattleChoice::auto_resolve && view_.auto_allowed))) ||
         (view_.phase == BattleDialogPhase::progress && choice == BattleChoice::retreat && view_.retreat_allowed) ||
@@ -165,7 +167,7 @@ void BattleDialog::rebuild() {
 
     relays_.clear(); dialog_.reset(); pending_.reset(); hero_counts_ = {}; size_ = root_->get_size();
     if (view_.phase == BattleDialogPhase::choice) {
-        auto built = style_.pending ? style_.pending(size_, view_.single_button) : BuiltPendingBattleHud{};
+        auto built = style_.pending ? style_.pending(size_, view_.single_button, view_.passive) : BuiltPendingBattleHud{};
         if (!built.frame) return;
         pending_ = std::move(built); root_->add_child(pending_->frame);
     } else {
@@ -320,13 +322,13 @@ void BattleDialog::refresh() {
             const auto& side = view_.sides[id == "graph_left" ? local_side : 1U - local_side];
             // Only a changed graph state is applied again (no per-refresh string, texture and layout work).
             const auto graph_size = control->get_size();
-            const std::string graph_key = std::to_string(view_.involved) + '|' + std::to_string(side.units) + '|' + side.best_icon
+            const std::string graph_key = std::to_string(view_.involved || view_.passive) + '|' + std::to_string(side.units) + '|' + side.best_icon
                 + '|' + std::to_string(side.colour[0]) + ',' + std::to_string(side.colour[1]) + ',' + std::to_string(side.colour[2])
                 + '|' + std::to_string(graph_size.x) + 'x' + std::to_string(graph_size.y);
             if (auto& applied = graph_state_[id]; applied == graph_key) continue;
             else applied = graph_key;
             const PackedStringArray stacks = control->get_meta("graph_stacks", PackedStringArray());
-            const bool shown = view_.involved && side.units > 0 && !stacks.is_empty();
+            const bool shown = (view_.involved || view_.passive) && side.units > 0 && !stacks.is_empty();
             control->set_visible(shown);
             if (!shown) continue;
             const float scale = control->get_meta("graph_scale", 1.0F);

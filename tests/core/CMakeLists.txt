@@ -30,6 +30,12 @@ target_compile_features(core_perf_diag_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(core_perf_diag_tests)
 add_test(NAME core_perf_diag_contracts COMMAND core_perf_diag_tests)
 
+add_executable(core_perf_diag_feed_tests perf_diag_feed_tests.cpp)
+target_link_libraries(core_perf_diag_feed_tests PRIVATE eawr::core Threads::Threads)
+target_compile_features(core_perf_diag_feed_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(core_perf_diag_feed_tests)
+add_test(NAME core_perf_diag_feed_contracts COMMAND core_perf_diag_feed_tests)
+
 add_executable(tests main.cpp)
 target_link_libraries(tests PRIVATE eawr::core eawr::sim)
 target_compile_features(tests PRIVATE cxx_std_20)

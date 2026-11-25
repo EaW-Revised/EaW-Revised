@@ -946,16 +946,41 @@ void multiplayer_arbitration() {
             expect(view && view->alert && view->alert->visible && view->alert->begin_admitted && view->alert->resolve_admitted
                 && !view->alert->waiting_for_opponent && view->alert->timeout_ms == 15000,
                 "the lone human side sees the full Begin / Auto-Resolve prompt, not an opponent wait");
-            const auto uninvolved = pair.lives[1]->frame(pair.humans[1]).pending_conflict;
-            expect(!uninvolved || !uninvolved->alert, "a human outside the conflict gets no prompt");
+            // #8353: the human outside the conflict (player 3, the second live peer) sees the same prompt without buttons:
+            // an alert with the same timer that admits no answer, and a passive dialog view that answers nothing.
+            const auto bystander_frame = pair.lives[1]->frame(pair.humans[1]);
+            const auto uninvolved = bystander_frame.pending_conflict;
+            expect(uninvolved && uninvolved->alert && uninvolved->alert->local == 3 && uninvolved->alert->visible
+                && uninvolved->alert->timeout_ms == view->alert->timeout_ms && !uninvolved->alert->begin_admitted
+                && !uninvolved->alert->resolve_admitted && !uninvolved->alert->timeout_due,
+                "a human outside the conflict gets the passive alert: same timer, no answer admitted");
+            {
+                eawr::viewer::galactic::LiveBattleDialogNames bystander_names;
+                bystander_names.planet = [](auto) { return std::string("FixturePlanet"); };
+                bystander_names.side = [](auto) { return eawr::viewer::galactic::BattleDialogSide{}; };
+                bystander_names.force = [](auto) { return std::string("Fixture"); };
+                const auto prompt = eawr::viewer::galactic::live_battle_dialog_view(bystander_frame, pair.humans[1], 3, {}, bystander_names);
+                const auto fighter_prompt = eawr::viewer::galactic::live_battle_dialog_view(
+                    pair.lives[0]->frame(pair.humans[0]), pair.humans[0], 1, {}, bystander_names);
+                expect(prompt.phase == eawr::viewer::galactic::BattleDialogPhase::choice && prompt.passive && !prompt.involved
+                    && prompt.conflict == fighter_prompt.conflict && prompt.planet == fighter_prompt.planet
+                    && !prompt.choice_ready && !prompt.fight_allowed && !prompt.auto_allowed && !prompt.retreat_allowed
+                    && fighter_prompt.fight_allowed && !fighter_prompt.passive,
+                    "the third human's client shows the same pending prompt of the fight, view only; the fighting side keeps its buttons");
+                expect(eawr::viewer::galactic::pending_battle_radar_planet(bystander_frame, 3) == 0,
+                    "the passive prompt adds no radar flash");
+            }
             if (scenario == Case::ai_timeout) {
                 expect(pair.run_to(452), "session ticks continue through timeout equality");
                 expect(pair.lives[0]->frame().pending_conflict != nullptr, "450 elapsed ticks do not fire the strict timeout");
                 expect(pair.run_to(460), "agreed timeout defaults the human side to Begin");
                 expect(pair.lives[0]->record().commands.empty(), "the AI-fight timeout default needs no peer-local vote");
             } else {
+                // The third human tries to answer both ways: neither counts as a vote, the fight still waits for the fighting human.
+                pair.order(1, galactic::BattleChoice{conflict, true}); pair.order(1, galactic::BattleChoice{conflict, false});
                 expect(pair.run_to(20) && pair.lives[0]->frame().pending_conflict && pair.galaxy_frame(0) == frozen,
-                    "the vote holds the campaign clock until the human chooses");
+                    "the vote holds the campaign clock until the human chooses, whatever the third human sends");
+                expect(!pair.lives[1]->rejected_orders().empty(), "the third human's choices are refused");
                 pair.order(0, galactic::BattleChoice{conflict, scenario == Case::ai_begin});
                 expect(pair.run_to(30), "the single human side's choice settles without waiting for the AI");
             }

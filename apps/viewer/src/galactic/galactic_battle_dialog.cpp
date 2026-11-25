@@ -115,8 +115,8 @@ bool GalacticMode::State::build_battle_dialog() {
         }
         return built;
     };
-    style.pending = [this, texture = style.texture, text = style.text](Vector2 size, bool single) {
-        return build_pending_battle_hud(*filesystem, command_catalog, *hud_fonts, command_faction, size, single, texture,
+    style.pending = [this, texture = style.texture, text = style.text](Vector2 size, bool single, bool passive) {
+        return build_pending_battle_hud(*filesystem, command_catalog, *hud_fonts, command_faction, size, single, passive, texture,
             [this](std::string_view name) { return shell_texture(name); }, text,
             [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
     };

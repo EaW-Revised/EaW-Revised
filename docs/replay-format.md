@@ -1449,7 +1449,8 @@ seats use tags 10, 11 and 12 respectively. Writers emit every enabled tag in
 increasing order; the existing replay container versions 2/3/4/5 are unchanged.
 
 Campaign setup tag 10 uses payload version 7 without a reserve order and version 8
-with an explicit reserve order. A uint32 location flag immediately follows the payload
+with an explicit reserve order. Versions 9 and 10 are those two layouts followed by one
+int64 Q24 retreat heading in degrees (WR-90; absent = versions 7/8). A uint32 location flag immediately follows the payload
 version (0 uncorrupted, 1 corrupted); other values are rejected. This copied flag
 survives child replays and checkpoints independently of the retained parent. Each account stores its Q24 AI build-time multiplier
 immediately after its credit multiplier. Replay and checkpoint loading retain this

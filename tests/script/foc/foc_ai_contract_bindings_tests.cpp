@@ -1994,7 +1994,8 @@ end
             expect(saved && checkpoint && prepared && restored_world, "SSU-05: created attachment checkpoint captures");
             if (!saved || !checkpoint || !prepared || !restored_world) return;
             expect(prepared.value().scripts.load(saved.value().scheduler).has_value(), "SSU-05: unchanged save format restores a full 64-bit attachment handle");
-            const auto& held = session.value().world().ledgers()[1].completed;
+            const auto held_ledgers = session.value().world().ledgers();
+            const auto& held = held_ledgers[1].completed;
             expect(held.size() == 1, "SSU-05: creator produces exactly one upgrade"); if (held.size() != 1) return;
             const auto object = prepared.value().scripts.read_global(foc::first_object_instance + held.front().object, "Object");
             const auto child = prepared.value().scripts.read_global(foc::first_object_instance + 10, "child");

@@ -126,8 +126,7 @@ void GalacticBuildTray::note_world_event(const Ref<InputEvent>& event) {
 }
 
 bool GalacticBuildTray::holds(const Vector2 point) const {
-    for (const Control* control : {static_cast<const Control*>(panel_), static_cast<const Control*>(close_),
-             static_cast<const Control*>(handle_)})
+    for (const Control* control : {static_cast<const Control*>(panel_), static_cast<const Control*>(handle_)})
         if (control && control->is_visible_in_tree() && control->get_global_rect().has_point(point)) return true;
     return false;
 }
@@ -182,7 +181,6 @@ void GalacticBuildTray::load(GalacticMode::State& state) {
 void GalacticBuildTray::hide_all() {
     if (handle_) handle_->hide();
     if (panel_) panel_->hide();
-    if (close_) close_->hide();
     for (auto& entry : entries_) { entry.shown = false; if (entry.button) entry.button->hide(); }
     for (auto* header : headers_) header->hide();
     for (auto* divider : dividers_) divider->hide();
@@ -219,35 +217,6 @@ void GalacticBuildTray::ensure_controls(GalacticMode::State& state) {
     }
     tray_layer(state)->add_child(panel_);
     panel_->hide();
-    // GBT-07: the close icon, in the art of the first Art_Component the mod has (a mod's own small close icon); with
-    // none, place_close gives it the bar's own button art, as the handle's.
-    const auto& close = layout_->close;
-    close_ = memnew(EawrHudButton);
-    close_->set_force_pass_scroll_events(false);
-    close_->set_name("GalacticBuildTrayClose");
-    close_->hide();
-    close_->set_action([this] { open_ = false; ++close_presses_; });
-    close_text_ = memnew(EawrHudText);
-    close_text_->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-    close_->add_child(close_text_);
-    for (const auto& name : close.art_components) {
-        const auto* component = state.command_catalog.find(name);
-        if (!component) continue;
-        const auto first = [&](const data::ui::Field field) {
-            const auto list = component->list(field);
-            return list.empty() ? Ref<Texture2D>() : state.command_texture_optional(list.front());
-        };
-        HudButtonArt art{.normal = first(data::ui::Field::icon_texture_name),
-            .hover = first(data::ui::Field::mouse_over_texture_name),
-            .pressed = first(data::ui::Field::selected_texture_name),
-            .disabled = first(data::ui::Field::disabled_texture_name), .portrait = {}, .overlays = {}};
-        if (art.normal.is_null()) continue;
-        close_->setup_art(art);
-        close_->set_sounds(*component, [&state](const std::string& cue) { if (state.audio) state.audio->ui_sound(cue); });
-        close_art_ = name;
-        break;
-    }
-    tray_layer(state)->add_child(close_);
     handle_ = memnew(EawrHudButton);
     handle_->set_force_pass_scroll_events(false);
     handle_->set_name("GalacticBuildTrayHandle");
@@ -495,68 +464,6 @@ void GalacticBuildTray::draw_backdrop(GalacticMode::State& state, const Rect2& b
     backdrop_source_ = source;
 }
 
-void GalacticBuildTray::place_close(GalacticMode::State& state) {
-    const auto& definition = layout_->close;
-    if (!definition.enabled) { close_->hide(); return; }
-    const auto placement = state.command_bar->placement();
-    if (close_art_.empty()) {
-        // The bar's own button art, as the handle's stock art: the entry template's pad for the shown tab.
-        if (const auto* component = state.command_catalog.find(layout_->entry_template)) {
-            const auto first = [&](const data::ui::Field field) {
-                const auto list = component->list(field);
-                return list.empty() ? Ref<Texture2D>() : state.command_texture_optional(list.front());
-            };
-            const auto pad = viewer::galactic::build_card_pad(component->list(data::ui::Field::blank_texture_name),
-                state.selected_hud.space_tab);
-            close_->set_texture_normal(pad.empty() ? Ref<Texture2D>() : state.command_texture(pad));
-            close_->set_texture_hover(first(data::ui::Field::mouse_over_texture_name));
-            close_->set_texture_pressed(first(data::ui::Field::selected_texture_name));
-            close_->set_sounds(*component, [&state](const std::string& cue) { if (state.audio) state.audio->ui_sound(cue); });
-        }
-    }
-    presentation::ui::ProjectHudControl control;
-    control.enabled = true;
-    control.width = definition.width; control.height = definition.height;
-    for (const auto& candidate : definition.candidates) control.candidates.push_back({candidate.anchor, candidate.side, candidate.x, candidate.y});
-    std::map<std::string, presentation::ui::PixelRect> anchors;
-    anchors.emplace("build_tray", presentation::ui::PixelRect{panel_rect_.position.x, panel_rect_.position.y, panel_rect_.size.x, panel_rect_.size.y});
-    if (bar_) anchors.emplace("production_bar", presentation::ui::PixelRect{bar_->position.x, bar_->position.y, bar_->size.x, bar_->size.y});
-    for (const auto& [name, button] : state.command_buttons) {
-        if (!button || !button->is_visible()) continue;
-        anchors.emplace(name, presentation::ui::PixelRect{button->get_position().x, button->get_position().y,
-            button->get_size().x, button->get_size().y});
-    }
-    const auto view = state.hud->get_size();
-    const auto docked = presentation::ui::dock_project_hud(control, {0, 0, view.x, view.y}, placement.scale, anchors, {});
-    if (!docked) { close_->hide(); return; }
-    close_rect_ = Rect2(static_cast<float>(docked->x), static_cast<float>(docked->y),
-        static_cast<float>(docked->width), static_cast<float>(docked->height));
-    close_->set_position(close_rect_.position);
-    close_->set_size(close_rect_.size);
-    close_->set_hit_rect(Rect2(Vector2(), close_rect_.size));
-    // Its label and tooltip are text-database keys; one the database lacks shows nothing rather than the key.
-    const auto text = [&](const std::string& key) {
-        std::string value = state.battle_text && !key.empty() ? state.battle_text(key) : std::string{};
-        return value.empty() || value == key ? String{} : String::utf8(value.c_str());
-    };
-    // As the handle's "+": a caption key the text database lacks reads as the built-in x.
-    const String caption = text(definition.caption);
-    set_text_if_changed(*close_text_, caption.is_empty() && !definition.caption.empty() && close_art_.empty() ? String("x") : caption);
-    // The label takes the headers' text look (Header_Template, else the entry template).
-    const auto* component = state.command_catalog.find(layout_->header_template);
-    const auto* anchor = state.command_anchors.find(layout_->header_template);
-    if (!component || !anchor) {
-        component = state.command_catalog.find(layout_->entry_template);
-        anchor = state.command_anchors.find(layout_->entry_template);
-    }
-    if (component && anchor) state.configure_command_bar_text(placement, *close_text_, *component, *anchor);
-    close_text_->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
-    close_text_->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
-    close_->set_tooltip_text(text(definition.tooltip));
-    close_->show();
-    close_->move_to_front(); // over the entries when a candidate docks it inside the panel
-}
-
 void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar) {
     const auto& layout = *layout_;
     const auto& choices = state.selected_hud.choices;
@@ -663,14 +570,6 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
     options.misc_min_width = measure(caption_text(tray::Group{tray::GroupKind::misc, "Misc", {}, {}, 0.0F, {}})).x;
     if (const auto misc_key = caption_key(tray::Group{tray::GroupKind::misc, "Misc", {}, {}, 0.0F, {}}); !misc_key.empty())
         options.misc_caption_key = misc_key;
-    // GBT-07: a close icon whose first candidate sits inside the panel's top keeps a strip of its height (plus its
-    // offset from the edge) free above the first row, so it never covers a header or an entry.
-    if (const auto& close = layout.close; close.enabled && !close.candidates.empty()
-        && core::iequals(close.candidates.front().anchor, "build_tray") && close.candidates.front().side.starts_with("inside_top")) {
-        const float reserve = std::max(0.0F, static_cast<float>(close.height + close.candidates.front().y) * ui + full.row_gap - full.padding);
-        full.top_reserve = compact.top_reserve = reserve;
-    }
-
     // The tray's bottom edge sits on the top of the box around the bar's slots and the handle; its top limit is the
     // layout's (GBT-11): a component's bottom edge, a reference height, or the top of the view.
     float bottom = bar.position.y;
@@ -710,7 +609,6 @@ void GalacticBuildTray::layout_tray(GalacticMode::State& state, const Rect2& bar
     panel_frame_->set_size(panel_rect_.size);
     draw_backdrop(state, bar);
     panel_->show();
-    place_close(state);
 
     // Entries: one pooled copy of the bar's production button each.
     const float entry_scale = fit.compact ? static_cast<float>(layout.compact_entry_scale) : static_cast<float>(layout.entry_scale);
@@ -882,7 +780,6 @@ void GalacticBuildTray::update(GalacticMode::State& state) {
     if (!handle_docked_ || !open_) {
         if (shown_key_) {
             panel_->hide();
-            close_->hide();
             for (auto& entry : entries_) { entry.shown = false; entry.button->hide(); }
             for (auto* header : headers_) header->hide();
             for (auto* divider : dividers_) divider->hide();
@@ -954,18 +851,7 @@ std::string GalacticBuildTray::report_json() const {
         << (!layout_ ? 0.0 : compact_ ? layout_->compact_entry_scale : layout_->entry_scale)
         << ",\"backdrop\":{\"source\":\"" << (panel_shown ? backdrop_source_ : std::string{}) << "\",\"back_layers\":" << back_layers_
         << ",\"frame_layers\":" << frame_layers_ << ",\"back_sample\":[" << back_sample_.x << ',' << back_sample_.y << "]}"
-        << ",\"planet_info_left\":" << (state_ ? state_->planet_info_card_left().value_or(-1.0F) : -1.0F)
-        << ",\"close\":{\"art\":\"" << (close_art_.empty() ? std::string("bar_button") : close_art_) << "\",\"visible\":" << (close_ && close_->is_visible_in_tree() ? "true" : "false")
-        << ",\"presses\":" << close_presses_ << ",\"tooltip\":\"";
-    const std::string tip = close_ ? std::string(close_->get_tooltip_text().utf8().get_data()) : std::string{};
-    for (const char c : tip) {
-        if (c == '"' || c == '\\') out << '\\';
-        if (c == '\n') { out << "\\n"; continue; }
-        out << c;
-    }
-    out << "\",\"rect\":";
-    rect_json(close_ && close_->is_visible_in_tree() ? close_->get_global_rect() : Rect2());
-    out << '}';
+        << ",\"planet_info_left\":" << (state_ ? state_->planet_info_card_left().value_or(-1.0F) : -1.0F);
     // The shown entries with their choice, for the GPU cases that click one and compare with the bar.
     out << ",\"shown_entries\":[";
     std::size_t written{};

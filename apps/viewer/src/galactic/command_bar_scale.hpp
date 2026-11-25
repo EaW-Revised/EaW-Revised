@@ -16,6 +16,11 @@ namespace eawr::viewer::galactic {
 [[nodiscard]] inline float command_bar_component_scale(const data::ui::CommandBarComponent& style, float ui_scale) {
     return ui_scale * style.number(data::ui::Field::scale).value_or(1.0F);
 }
+// A face drawn under one pixel on either side is not drawn: a mod hides a button by authoring a Scale of 0.001, and its
+// caption, which is drawn from the same component, goes with it (legacy #8369).
+[[nodiscard]] inline bool button_face_collapsed(const data::ui::ReferenceRect& face_pixels) {
+    return face_pixels.width < 1.0F || face_pixels.height < 1.0F;
+}
 // A bone-only text button uses its authored face dimensions around the bone origin.
 [[nodiscard]] inline data::ui::ShellAnchor bone_button_anchor(const data::ui::ShellBone& bone,
     float width, float height, float scale) {

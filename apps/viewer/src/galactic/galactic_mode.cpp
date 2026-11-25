@@ -1,3 +1,4 @@
+#include "eawr/core/perf_diag/feed_writer.hpp"
 #include "../camera_input.hpp"
 #include "../edge_pointer.hpp"
 #include "../polled_pointer.hpp"
@@ -1319,9 +1320,13 @@ bool GalacticMode::ready(Node3D& host) {
             return order.has_value();
         }
         if (choice != galactic_view::BattleChoice::fight && choice != galactic_view::BattleChoice::auto_resolve) return false;
-        const auto order = platform::battle_choice_order(owner->game->frame(sim::SeatId{owner->galaxy->local.seat}), sim::SeatId{owner->galaxy->local.seat},
+        const auto choice_frame = owner->game->frame(sim::SeatId{owner->galaxy->local.seat});
+        const auto order = platform::battle_choice_order(choice_frame, sim::SeatId{owner->galaxy->local.seat},
             conflict, choice == galactic_view::BattleChoice::fight);
         if (order) { owner->game->submit(*order); ++owner->submitted_orders; }
+        UtilityFunctions::print(String(galactic_view::VoteTrace::click(choice_frame, sim::SeatId{owner->galaxy->local.seat},
+            owner->galaxy->local.player, conflict, choice == galactic_view::BattleChoice::fight, order.has_value(),
+            galactic_view::vote_trace_utc()).c_str())); // #8353
         return order.has_value();
     };
     state.save_controls = std::make_unique<GalacticSaveControls>(state);
@@ -1495,6 +1500,10 @@ std::optional<int> GalacticMode::process(const double delta) {
     }
     if (state.game && state.battle_dialog && state.galaxy && !state.fixture_enabled(GalacticHudFixture::Feature::battle_dialog)) {
         const auto frame = state.battle_dialog_frame();
+        for (const auto& line : state.vote_trace.observe(frame, sim::SeatId{state.galaxy->local.seat},
+                state.galaxy->local.player, frame.pending_conflict || state.vote_trace_open ? galactic_view::vote_trace_utc() : std::string{}))
+            UtilityFunctions::print(String(line.c_str())); // #8353
+        state.vote_trace_open = frame.pending_conflict != nullptr;
         if (!state.battle_pending_publication.reuse(frame, sim::SeatId{state.galaxy->local.seat},
             state.galaxy->local.player, state.battle_metadata_generation)
             && !state.battle_summary_publication.reuse(frame, sim::SeatId{state.galaxy->local.seat},
@@ -1905,6 +1914,16 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
         && (pressed->get_physical_keycode() != KEY_NONE ? pressed->get_physical_keycode() : pressed->get_keycode())
             == KEY_F3) {
         state.set_perf_overlay(state.perf == nullptr || !state.perf->shown());
+        return;
+    }
+    // #8058 P6: Shift+F3 writes a perf capture (the last seconds of the telemetry rings) when a telemetry feed is on;
+    // without one it does nothing. Never an options entry: a developer chord.
+    if (const auto* pressed = Object::cast_to<InputEventKey>(event.ptr());
+        pressed != nullptr && pressed->is_pressed() && !pressed->is_echo() && pressed->is_shift_pressed()
+        && !pressed->is_ctrl_pressed() && !pressed->is_alt_pressed() && !pressed->is_meta_pressed()
+        && (pressed->get_physical_keycode() != KEY_NONE ? pressed->get_physical_keycode() : pressed->get_keycode())
+            == KEY_F3) {
+        core::perf_diag::FeedWriter::request_capture_active();
         return;
     }
     if (state.campaign_score && state.campaign_score->visible()) {

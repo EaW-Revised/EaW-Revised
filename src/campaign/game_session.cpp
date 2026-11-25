@@ -1466,7 +1466,11 @@ std::optional<PendingConflictView> GameSession::pending_conflict_view(galactic::
     const auto route = impl_->admission->arbitration.route;
     const bool choice_ready = impl_->conflict_pause
         && (route == ConflictRoute::pending_tactical || route == ConflictRoute::vote);
-    PendingConflictView view{impl_->admission->conflict, impl_->admission->arbitration, choice_ready, {}};
+    PendingConflictView view{impl_->admission->conflict, impl_->admission->arbitration, choice_ready, {}, {}, {}, {}};
+    for (const auto& [player, choice] : impl_->votes) view.votes.emplace_back(player, choice);
+    for (const auto owner : {view.conflict.invader, view.conflict.defender})
+        if (impl_->human_side(owner)) view.required.push_back(owner);
+    view.vote_started = impl_->vote_started;
     if (impl_->pending_alert) if (const auto inputs = impl_->pending_alert(view.conflict)) {
         const auto vote = impl_->votes.find(inputs->local);
         view.alert = pending_battle_alert_view(view.conflict, *inputs, choice_ready,
@@ -1475,10 +1479,15 @@ std::optional<PendingConflictView> GameSession::pending_conflict_view(galactic::
     if (impl_->multiplayer_vote_timeout) {
         view.alert.reset();
         const auto* seat = impl_->seat(observer);
-        if (seat && seat->active && seat->kind == galactic::SeatKind::human
-            && (seat->player == view.conflict.invader || seat->player == view.conflict.defender)) {
+        const bool fighting_side = seat && (seat->player == view.conflict.invader || seat->player == view.conflict.defender);
+        // #8353: an active human outside the fight gets the same alert projection (same timer, same shell) to show
+        // its read-only prompt, but only while a human side is actually voting; it carries no authority to answer.
+        const bool passive_observer = seat && !fighting_side
+            && (impl_->human_side(view.conflict.invader) || impl_->human_side(view.conflict.defender));
+        if (seat && seat->active && seat->kind == galactic::SeatKind::human && (fighting_side || passive_observer)) {
             PendingBattleAlertInputs inputs;
-            inputs.local = seat->player; inputs.active_mode = inputs.queue_tactical = inputs.multiplayer = inputs.authorized_issuer = true;
+            inputs.local = seat->player; inputs.active_mode = inputs.queue_tactical = inputs.multiplayer = true;
+            inputs.authorized_issuer = fighting_side;
             inputs.always_bypass = view.arbitration.forced_tactical;
             inputs.untimed = impl_->untimed_votes();
             inputs.timeout_ms = *impl_->multiplayer_vote_timeout * 1000 / galactic::galactic_frames_per_second;

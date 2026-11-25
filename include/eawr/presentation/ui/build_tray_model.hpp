@@ -143,7 +143,6 @@ struct Metrics final {
     float row_gap{};
     float padding{};
     float panel_width{};
-    float top_reserve{};  // a strip kept free above the first row (the close icon's, GBT-07)
     float header_lift{};   // a header label is drawn this much above its row's icons (GBT-06); never onto a frame
     float category_gap{};  // extra space above a row that starts a new category, so the lifted label has its own gap
     [[nodiscard]] float row_height() const noexcept { return header_height + entry_height; }

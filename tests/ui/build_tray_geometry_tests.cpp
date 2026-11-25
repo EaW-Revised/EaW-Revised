@@ -129,19 +129,27 @@ void test_the_queue_strip_lift() {
     expect(near(tray::queue_strip_lift({}, panel, handle, gap), 0.0F), "an empty strip (nothing queued) does not move");
 }
 
-// GBT-07: the close icon's strip at the top of the panel is kept free: the panel grows by it and the rows move down.
-void test_the_close_icon_strip() {
-    auto size = metrics();
-    std::vector<tray::Group> groups{group(tray::GroupKind::category, "A", 0, 3)};
-    const auto plain = tray::place(tray::pack(groups, size, {}), size, 0.0F, 500.0F);
-    size.top_reserve = 14.0F;
-    const auto packed = tray::pack(groups, size, {});
-    const auto strip = tray::place(packed, size, 0.0F, 500.0F);
-    expect(near(strip.panel.height, plain.panel.height + 14.0F) && near(strip.panel.bottom(), 500.0F),
-        "the panel is taller by the strip and still sits on the bar");
-    expect(near(strip.headers.front().box.y, strip.panel.y + size.padding + 14.0F)
-            && near(strip.entries.front().box.y - strip.panel.y, plain.entries.front().box.y - plain.panel.y + 14.0F),
-        "the first header and entries start below the strip");
+// #8277, GBT-06: the tray has no strip above its first row (the close button is gone), so a tray of six unit rows and the
+// buildings row is exactly seven rows tall and fits a free height of exactly that; it neither drops to the compact step nor
+// loses its sixth unit row.
+void test_six_unit_rows_and_the_buildings_row_fit_without_a_close_strip() {
+    const auto size = metrics();
+    std::vector<tray::Group> groups;
+    for (std::size_t index = 0; index < 8; ++index)
+        groups.push_back(group(tray::GroupKind::category, std::string(1, static_cast<char>('A' + index)), index * 5, 5));
+    groups.push_back(group(tray::GroupKind::buildings, "Buildings", 40, 3));
+    tray::PackOptions seven;
+    seven.max_rows = 7;
+    const auto packed = tray::pack(groups, size, seven);
+    expect(packed.unit_rows == 6 && packed.building_rows == 1 && packed.rows.size() == 7,
+        "eight full groups overflow the budget: six unit rows (the last is misc) and the buildings row");
+    const float expected = 2.0F * size.padding + 7.0F * size.row_height() + 6.0F * size.row_gap;
+    expect(near(packed.height, expected), "the tray is seven rows plus the padding tall: no strip above the first row");
+    const auto fit = tray::fit_to_height(groups, size, size, seven, expected);
+    expect(!fit.compact && fit.packed.unit_rows == 6 && fit.packed.building_rows == 1,
+        "a free height of exactly seven rows keeps all six unit rows and the buildings row at the full step");
+    const auto lower = tray::fit_to_height(groups, size, size, seven, expected - 1.0F);
+    expect(lower.packed.unit_rows < 6, "one pixel less and the height fit drops a unit row, the buildings row stays");
 }
 
 // Width_Mode Auto (GBT-06): the rows fill to the budget and the free height at the bar's width first; the panel widens,
@@ -292,7 +300,6 @@ void expect_every_header_above_its_icons(const tray::Packed& packed, const tray:
 // shapes alike, and each row that starts a category sits category_gap further from the row above than a plain row.
 void test_header_labels_sit_above_their_row_and_off_the_frames() {
     auto size = metrics();
-    size.top_reserve = 14.0F;
     size.header_lift = 3.0F;
     size.category_gap = 9.0F;
     // The space tray: several categories over several rows, a wrapped group, buildings; the ground tray: groups with
@@ -324,18 +331,17 @@ void test_header_labels_sit_above_their_row_and_off_the_frames() {
         for (const auto& entry : geometry.entries) lowest = std::max(lowest, entry.box.bottom());
         expect(near(lowest + size.padding, geometry.panel.bottom()), "the panel still ends one padding under its last row");
     }
-    // The first row's label never reaches the close icon's band: the reserve puts the first row one row gap under it, so a
-    // lift larger than that (a large header font) is cut to the row gap and the label's top stays under the band.
+    // The first row's label never rises past the panel's padding above it: a lift larger than that (a large header font)
+    // is cut to the padding and the label's top stays inside the panel.
     auto tall = size;
-    tall.header_lift = 3.0F * size.row_gap;
+    tall.header_lift = 3.0F * size.padding;
     tall.category_gap = 3.0F * tall.header_lift;
     for (const auto& groups : trays) {
         const auto packed = tray::pack(groups, tall, {});
         const auto geometry = tray::place(packed, tall, 100.0F, 900.0F);
         expect_every_header_above_its_icons(packed, geometry, tall, tall.row_gap);
-        const float band_bottom = geometry.panel.y + tall.padding + tall.top_reserve - tall.row_gap;
         for (const auto& header : geometry.headers)
-            expect(header.box.y >= band_bottom - 0.001F, "no label reaches into the close icon's band above the first row");
+            expect(header.box.y >= geometry.panel.y - 0.001F, "no label rises above the panel's top edge");
     }
     // No lift and no gap asked for: nothing moves (a skin or test that sets neither is unchanged).
     auto none = metrics();
@@ -353,10 +359,10 @@ int main() {
     test_entries_sit_inside_the_panel_on_their_rows();
     test_a_wrapped_group_has_one_header();
     test_the_handle_count();
-    test_the_close_icon_strip();
     test_header_labels_sit_above_their_row_and_off_the_frames();
     test_the_queue_strip_lift();
     test_the_automatic_width();
+    test_six_unit_rows_and_the_buildings_row_fit_without_a_close_strip();
     test_the_bar_art_map();
     if (eawr::test::ui::failures() != 0) {
         std::cerr << eawr::test::ui::failures() << " build tray geometry check(s) failed\n";

@@ -31,6 +31,7 @@
 #include "eawr/campaign/live_conflict.hpp"
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/core/perf_diag/feed_writer.hpp"
 #include "eawr/core/perf_diag/sim_feed.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "save_repository.hpp"
@@ -2140,6 +2141,8 @@ public:
     std::deque<LiveTickCost> costs_;
     // #8058 diagnostics (write-only; the simulation thread is the only producer).
     core::perf_diag::SimFeed feed_;
+    // #8058 P6: with a telemetry feed running, the writer drains feed_ (declared after it: detached before it dies).
+    core::perf_diag::FeedAttachment feed_attachment_{feed_, "galactic"};
     core::perf_diag::ThreadCpuStamp cpu_start_{};
     double pace_lag_ms_{};
     bool clock_reset_{}, diag_in_battle_{}, gc_profile_owned_{}, gc_previous_valid_{};

@@ -14,7 +14,7 @@ using namespace godot;
 namespace eawr::presentation::godot_backend {
 BuiltPendingBattleHud build_pending_battle_hud(const vfs::Vfs& filesystem,
     const data::ui::CommandBarCatalog& catalog, FontProvider& fonts, presentation::ui::HudFaction faction,
-    Vector2 size, bool single, const std::function<Ref<Texture2D>(std::string_view)>& texture,
+    Vector2 size, bool single, bool passive, const std::function<Ref<Texture2D>(std::string_view)>& texture,
     const std::function<Ref<Texture2D>(std::string_view)>& shell_texture,
     const std::function<std::string(std::string_view)>& text,
     const std::function<void(const std::string&)>& sound) {
@@ -56,6 +56,7 @@ BuiltPendingBattleHud build_pending_battle_hud(const vfs::Vfs& filesystem,
     // The tactical helper excludes bound meshes because its separate button
     // builder supplies normal art. These pending buttons use their authored mesh.
     for (const auto* anchor : anchors.for_variant(presentation::ui::alt_variant(faction))) {
+        if (passive) break; // #8353: a view-only prompt draws no button art
         if (anchor->name != "choice_button_left" && anchor->name != "choice_button_right"
             && anchor->name != "attack_button_single") continue;
         const auto blend = presentation::ui::shell_blend(anchor->shader);
@@ -93,6 +94,7 @@ BuiltPendingBattleHud build_pending_battle_hud(const vfs::Vfs& filesystem,
         const bool resolve = anchor->name == "choice_button_right";
         const bool title = anchor->name == "text_attack_choice" || anchor->name == "text_attack_single";
         if (!begin && !resolve && !title) continue;
+        if (passive && !title) continue; // #8353: no choice buttons and no captions for them
         const std::string id = begin ? "fight" : resolve ? "auto" : "pending_title";
         if (begin || resolve) {
             auto* button = memnew(EawrHudButton);

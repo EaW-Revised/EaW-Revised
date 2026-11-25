@@ -16,19 +16,6 @@
             <Offset>0 0</Offset>
         </Candidate>
     </Handle>
-    <!-- A small close icon in the panel's top right corner: the bar's own button art with an x. A mod with its own
-         close icon names its command bar component in an Art_Component element (the first one the mod has wins). -->
-    <Close_Button>
-        <Enabled>true</Enabled>
-        <Size>16 16</Size>
-        <Caption>TEXT_EAWR_BUILD_TRAY_CLOSE</Caption>
-        <Tooltip>TEXT_BUTTON_CLOSE</Tooltip>
-        <Candidate>
-            <Anchor>build_tray</Anchor>
-            <Side>inside_top_right</Side>
-            <Offset>-3 3</Offset>
-        </Candidate>
-    </Close_Button>
     <Tray>
         <Entry_Template>b_Create_00</Entry_Template>
         <Entry_Scale>0.75</Entry_Scale>

@@ -988,8 +988,12 @@ format field carries it. Two or more human sides keep the strict timeout above.
 Owner rule of 2026-11-23: only the humans whose factions are the fighting sides take part in the vote. One human
 against pirates, a neutral side or an AI side decides alone, and a human who is not in that fight is never asked and
 can never block it (the tally already counts only the human invader and defender, and refuses a choice from any other
-seat). That player also gets no battle prompt and no radar flash for the fight, so there is no button to press that
-could not be answered; a passive progress dialog for a fight being auto-resolved is unchanged (WAR-66/67).
+seat). That player gets no radar flash for the fight. Owner rule of 2026-11-24: that player still sees the same pending
+battle prompt, in the same place with the same planet, both sides, forces and countdown, but view only: the choice
+buttons and their art are not built, nothing can be clicked, hovered or answered, and nothing enters the simulation.
+The session publishes its alert to such a player only while a human side is voting, and the alert admits no answer
+(neither Begin nor Auto-Resolve nor the timeout default). The prompt closes when the battle starts, the fight is
+auto-resolved or a side retreats; the passive progress dialog for a fight being auto-resolved is unchanged (WAR-66/67).
 
 For this deterministic session policy, any no choice selects auto-resolve and yes choices from every
 voting (human) side select Begin. A side can vote once; stale/conflicting/unauthorized choices are execution refusals

@@ -14,6 +14,7 @@
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/world.hpp"
 #include "eawr/core/tick_profile.hpp"
+#include "eawr/core/perf_diag/feed_writer.hpp"
 #include "eawr/core/perf_diag/sim_feed.hpp"
 
 #include <algorithm>
@@ -1536,6 +1537,8 @@ private:
     double pacing_lag_ms_{}, dropped_wall_ms_{}; // simulation-thread diagnostics only
     // #8058: diagnostics feed and the simulation thread's scratch for it. Write-only; never read by the simulation.
     core::perf_diag::SimFeed feed_;
+    // #8058 P6: with a telemetry feed running, the writer drains feed_ (declared after it: detached before it dies).
+    core::perf_diag::FeedAttachment feed_attachment_{feed_, "tactical"};
     MeasureScratch scratch_;
     struct DiagIds final {
         core::perf_diag::PhaseId step{}, fog{}, ai{}, lua{}, land_motion{}, publish_tail{}, worker_total{}, serial_remainder{};

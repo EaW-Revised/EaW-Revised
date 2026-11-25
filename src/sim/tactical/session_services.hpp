@@ -28,6 +28,17 @@ void apply_squadron_order(SquadronState& state, const CommandPayload& payload, c
 
 [[nodiscard]] core::Result<void> advance(LiveUnit& unit, const MotionProfile* profile, const std::uint64_t tick);
 
+// WR-90: the turn-in-place profile of a craft that is at rest at the retreat click (its own rate of turn, no slowdown).
+[[nodiscard]] inline MotionProfile craft_turn_profile(const CraftProfile& craft) noexcept {
+    MotionProfile profile;
+    profile.type_id = craft.type_id;
+    profile.rate_of_turn = craft.rate_of_turn;
+    profile.turn_in_place_slowdown = math::Fixed::from_raw(math::Fixed::scale);
+    profile.roll_rate = craft.roll_rate;
+    profile.bank_angle = craft.bank_angle;
+    return profile;
+}
+
 [[nodiscard]] core::Result<math::Mat3x4> level_transform(LiveUnit& unit);
 
 [[nodiscard]] core::Result<math::Mat3x4> unit_transform(LiveUnit& unit);

@@ -121,13 +121,15 @@ private:
         view.tactical_refusal = frame.tactical_refusal;
         view.tactical_refusal_code = frame.tactical_refusal_code;
     }
-    const auto describe = [&](std::uint64_t planet, sim::galactic::PlayerId defender, sim::galactic::PlayerId invader) {
+    const auto describe = [&](std::uint64_t planet, sim::galactic::PlayerId defender, sim::galactic::PlayerId invader,
+                               bool passive = false) {
         view.involved = local == defender || local == invader;
         view.local_invader = local == invader;
+        view.passive = passive && !view.involved;
         const bool progress_observer = !view.involved && frame.auto_resolve_progress
             && admission && frame.auto_resolve_progress->conflict == admission->id;
         if (!progress_observer) view.planet = names.planet(planet);
-        if (view.involved) view.sides = {names.side(defender), names.side(invader)};
+        if (view.involved || view.passive) view.sides = {names.side(defender), names.side(invader)};
     };
     if (frame.pending_conflict) {
         const auto& pending = *frame.pending_conflict;
@@ -139,17 +141,21 @@ private:
             && frame.auto_resolve_progress->conflict == entry.id && multiplayer) return {};
         // WAR-02/WGM-173: a solo conflict the local player is not part of resolves instantly and bypasses the
         // pending alert and the progress dialog; nothing opens for it. In multiplayer a player who is not in the fight
-        // (not a fighting side) gets no pending prompt either (owner rule 2026-11-23, #8300): the prompt's buttons could
-        // never be used by that player, and the fighting humans alone decide the vote. A multiplayer observer still
-        // sees the passive progress dialog of a fight that is being auto-resolved (WAR-66/67).
+        // gets no answerable prompt (owner rule 2026-11-23, #8300): the fighting humans alone decide the vote. It sees
+        // the same panel without buttons instead (owner rule 2026-11-24, #8353), while a human side is voting (the
+        // session publishes its alert for that player only then), and the passive progress dialog of a fight that is
+        // being auto-resolved (WAR-66/67).
         const bool progress_for_conflict = frame.auto_resolve_progress && frame.auto_resolve_progress->conflict == entry.id;
-        if (local != entry.defender && local != entry.invader && !(multiplayer && progress_for_conflict)) return {};
+        const bool passive_prompt = multiplayer && !progress_for_conflict && pending.alert && pending.alert->local == local
+            && local != entry.defender && local != entry.invader;
+        if (local != entry.defender && local != entry.invader && !passive_prompt && !(multiplayer && progress_for_conflict))
+            return {};
         view.conflict = entry.id;
         view.pending_land = entry.layer == campaign::BattleLayer::land;
         view.pending_multiplayer = multiplayer;
-        describe(entry.planet, entry.defender, entry.invader);
+        describe(entry.planet, entry.defender, entry.invader, passive_prompt);
         view.phase = BattleDialogPhase::choice;
-        view.choice_ready = pending.choice_ready;
+        view.choice_ready = pending.choice_ready && !view.passive;
         if (view.involved) view.refusal = frame.tactical_refusal;
         for (const auto& response : frame.battle_choice_responses)
             if (response.conflict == entry.id && response.seat == seat) {
@@ -157,8 +163,8 @@ private:
                 view.refusal = response.refusal;
             }
         view.tactical_available = tactical_available;
-        view.fight_allowed = platform::battle_choice_order(frame, seat, entry.id, true).has_value();
-        view.auto_allowed = platform::battle_choice_order(frame, seat, entry.id, false).has_value();
+        view.fight_allowed = !view.passive && platform::battle_choice_order(frame, seat, entry.id, true).has_value();
+        view.auto_allowed = !view.passive && platform::battle_choice_order(frame, seat, entry.id, false).has_value();
         view.single_button = pending.arbitration.forced_tactical;
         if (pending.alert && pending.alert->local == local) {
             view.pending_visible = pending.alert->visible;
@@ -173,7 +179,7 @@ private:
         // H073/H074 remain WGM-BP-U01 seams; no extra modal or pending retreat.
         if (pending.arbitration.forced_tactical && !tactical_available && view.refusal.empty())
             view.refusal = "This conflict requires a tactical battle.";
-        if (view.involved && !frame.auto_resolve_progress) {
+        if ((view.involved || view.passive) && !frame.auto_resolve_progress) {
             // WGUI-176: per side, the unit count and the best ship (greatest Tactical_Health, first on a tie).
             std::array<std::optional<float>, 2> best_health;
             for (const auto& force : entry.forces) {

@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -14,9 +15,10 @@ except ImportError:
 
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
 class GalacticFleetStackPopupRuntime(unittest.TestCase):
-    def hover(self, fixture, badge, campaign=None, paused="yes"):
+    def hover(self, fixture, badge, campaign=None, paused="yes", chain=None):
         """Hovers the named overview stack icon past the encyclopedia delay; returns the report. A campaign name runs
-        that real campaign as it starts (its overview already shows the planet) instead of a synthetic fixture."""
+        that real campaign as it starts (its overview already shows the planet) instead of a synthetic fixture. A mod
+        chain runs it on that stack; an empty badge name only looks (no hover) and captures after the start settles."""
         navigate = "true" if campaign is None else "false"
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-stack-popup-"))
         report = directory / "report.json"
@@ -46,16 +48,17 @@ func _process(delta):
     # previous/next navigation centres it before the icon is pointed at.
     if frame == 10 and ''' + navigate + ''': key(KEY_PAGEUP)
     if frame == 12 and ''' + navigate + ''': key(KEY_PAGEDOWN)
-    if frame >= 70 and frame <= 230 and frame % 20 == 10:
-        var target = root.find_child(''' + json.dumps(badge) + ''', true, false)
+    if frame >= 70 and frame <= 230 and frame % 20 == 10 and ''' + json.dumps(badge or "") + ''' != "":
+        var target = root.find_child(''' + json.dumps(badge or "") + ''', true, false)
         assert(target != null and target.is_visible_in_tree())
         var motion = InputEventMouseMotion.new()
         motion.position = target.get_global_rect().get_center()
         motion.global_position = motion.position
         Input.parse_input_event(motion)
     if frame >= 70 and hover_start < 0.0: hover_start = elapsed
+    var looking = ''' + json.dumps(not badge) + '''
     # The encyclopedia delay is wall-clock time, so the capture waits for it rather than for a frame count.
-    if frame >= 330 and hover_start >= 0.0 and elapsed - hover_start > 3.0:
+    if frame >= 330 and hover_start >= 0.0 and (looking or elapsed - hover_start > 3.0):
         root.get_texture().get_image().save_png(capture_path)
         current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
         quit()
@@ -65,12 +68,14 @@ func _process(delta):
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
             *(("--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture) if campaign is None
               else ("--eawr-galactic", campaign, "--eawr-galactic-dismiss-story", "yes")),
+            *(("--eawr-mod-root", chain) if chain else ()),
             "--eawr-game-root", support.GAME_ROOT, "--eawr-galactic-paused", paused,
             "--eawr-report", str(report)], cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         data = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
+        self.last_native = directory / "native.png"
         return data
 
     @staticmethod
@@ -181,6 +186,40 @@ func _process(delta):
                 self.assertIsNotNone(shown, {"key": popup["key"], "admitted": popup.get("admitted"),
                                              "pointer": popup.get("pointer")})
                 self.assertTrue(shown["cells"], shown)
+
+    def remake_chain(self):
+        # The Remake stack under test (leaf first): French Fried Taters > Clone Wars Holdouts > Remake 4.0.
+        remake = os.environ.get("EAWR_REMAKE_MOD_ROOT")
+        if not remake:
+            self.skipTest("requires the Remake mod root")
+        chain = [pathlib.Path(remake).parent / "3229239424", pathlib.Path(remake).parent / "2794270450", pathlib.Path(remake)]
+        if not all(path.is_dir() for path in chain):
+            self.skipTest("requires Remake 4.0, Holdouts and French Fried Taters")
+        return ";".join(str(path) for path in chain)
+
+    def test_remake_extra_faction_fleet_is_named_by_its_faction_never_as_the_enemy(self):
+        # #8396: the Republic seat of the Remake stack owns a fleet of a faction that is none of the three sides. Its popup
+        # header names the faction (a project format over the faction's display name); no stack icon of any faction reads
+        # "enemy". The still is kept as remake-republic-own-fleet-popup.png beside the run.
+        chain = self.remake_chain()
+        campaign = "GC_Final_Destination_Republic"
+        looking = self.hover(None, None, campaign=campaign, chain=chain)
+        local = looking["local"]["player"]
+        # The overview draws every planet's icons; only those inside the 1280x720 view can be pointed at.
+        rows = [row for row in looking["fleet_hud"]["presence"] if row["visible"] and not row["ground"] and row["contents"]
+                and 0 <= row["rect"][0] and row["rect"][0] + row["rect"][2] <= 1280
+                and 0 <= row["rect"][1] and row["rect"][1] + row["rect"][3] <= 720]
+        own = [row for row in rows if row["owner"] == local]
+        self.assertTrue(own, {"local": local, "presence": [(row["planet"], row["owner"], row["icon"]) for row in rows]})
+        data = self.hover(None, own[0]["name"], campaign=campaign, chain=chain)
+        shown = data["fleet_hud"]["stack_popup"]["popup"]["tooltip"]
+        self.assertIsNotNone(shown, self.hover_facts(data))
+        print("REMAKE OWN FLEET POPUP TITLE", repr(shown["text"]), flush=True)
+        shutil.copyfile(self.last_native, self.last_native.with_name("remake-republic-own-fleet-popup.png"))
+        self.assertTrue(shown["text"].endswith(" Fleet"), shown["text"])
+        self.assertNotIn("enemy", shown["text"].lower())
+        self.assertNotIn("TEXT_", shown["text"])
+        self.assertTrue(shown["text"].lower().startswith("republic"), shown["text"])
 
     def test_hero_status_icon_hover_lists_the_planets_heroes(self):
         # Legacy #7177 / WGSI-8/9: hovering the hero medal under a planet's name lists its named heroes as icons. The stock

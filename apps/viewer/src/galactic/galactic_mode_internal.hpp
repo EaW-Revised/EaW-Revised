@@ -73,6 +73,7 @@
 #include "battle_dialog.hpp"
 #include "campaign_score_dialog.hpp"
 #include "live_battle_dialog_view.hpp"
+#include "gc_vote_trace.hpp"
 #include "reference_pages_widget.hpp"
 #include "galactic_tour.hpp"
 #include "pause_banner_widget.hpp"
@@ -1230,6 +1231,8 @@ struct GalacticMode::State final {
     void capture_arrival_cinematic_frame(std::uint32_t frame);
     void request_retreat(sim::tactical::RetreatAction action);
     std::function<bool(std::uint64_t, galactic_view::BattleChoice)> battle_choice_sink;
+    galactic_view::VoteTrace vote_trace; // #8353
+    bool vote_trace_open{};
     std::function<std::string(std::string_view)> battle_text;
     std::map<std::string, galactic_view::CampaignResultType> battle_result_types;
     std::map<sim::tactical::TypeId, std::string> battle_tactical_types;

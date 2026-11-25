@@ -122,6 +122,9 @@ struct CampaignBattleSetup {
     EntityId victory_station{}; // optional authored station-destruction condition
     std::vector<EntityId> reserve_order{}; // WGT-07: complete source order; empty uses ascending reserve ID
     std::optional<MarketAbilityPolicy> market_abilities{}; // WGEP-145, absent bypasses the check
+    // WR-90 (#8368): the facing every roster ship turns to while a retreat countdown runs, in degrees: the first listed
+    // attacker entry marker's yaw plus 180. Absent = no marker on the map, so the roster simply holds still.
+    std::optional<math::Fixed> retreat_heading{};
     friend bool operator==(const CampaignBattleSetup&, const CampaignBattleSetup&) = default;
 };
 struct CinematicSeat {

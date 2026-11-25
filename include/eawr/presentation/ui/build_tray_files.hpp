@@ -42,19 +42,6 @@ struct HandleDefinition final {
     friend bool operator==(const HandleDefinition&, const HandleDefinition&) = default;
 };
 
-// GBT-07: the small close icon on the open tray. Its art is the first named command bar component the mod has (a
-// mod's own small close icon); none named or none present, it is the bar's own button art, as the handle's, with the
-// caption text (an x). It is placed like the handle, with `build_tray` (the open panel) as a further anchor; a first
-// candidate inside the panel's top keeps a strip of its height free above the rows.
-struct CloseDefinition final {
-    bool enabled{true};
-    std::vector<std::string> art_components;
-    double width{16}, height{16};
-    std::string caption{"TEXT_EAWR_BUILD_TRAY_CLOSE"}, tooltip{"TEXT_BUTTON_CLOSE"};
-    std::vector<HandleCandidate> candidates{{"build_tray", "inside_top_right", -3, 3}};
-    friend bool operator==(const CloseDefinition&, const CloseDefinition&) = default;
-};
-
 // Bar: the box around the bar's slots. Fixed: `Width`. Automatic: from the box's width up to `Max_Width_Share`
 // of the view, the narrowest width at which the groups fit the row budget and the free height without misc (GBT-06).
 enum class WidthMode : std::uint8_t { bar, fixed, automatic };
@@ -67,7 +54,6 @@ enum class BackSource : std::uint8_t { bar, component };
 struct TrayLayout final {
     bool enabled_by_default{true};
     HandleDefinition handle;
-    CloseDefinition close;
     std::string dialog_name{"IDD_EAWR_BUILD_TRAY"};
     std::string entry_template{"b_Create_00"};
     double entry_scale{0.75}, compact_entry_scale{0.6};

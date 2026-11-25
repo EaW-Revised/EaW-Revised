@@ -15,6 +15,8 @@
 #include "eawr/presentation/render_categories.hpp"
 #include "eawr/presentation/hull_batching.hpp"
 #include "eawr/presentation/diagnostic_switches.hpp"
+#include "eawr/core/build_identity.hpp"
+#include "eawr/core/perf_diag/feed_writer.hpp"
 #include "eawr/platform/saved_games.hpp"
 #include "ui/build_label.hpp"
 #include <chrono>
@@ -322,6 +324,29 @@ void ViewerHost::_ready() try {
         ActiveSettings::set(SettingsStore(options_->settings_file).load().settings);
     } else if (!evidence_run && ActiveSettings::get() == nullptr) {
         ActiveSettings::set(presentation::ui::PlayerSettings{});
+    }
+
+    // #8058 P6: the local perf telemetry feed, off unless --eawr-telemetry or the settings key names a directory. The
+    // writer thread and its file exist only then; the sessions attach their rings to it when they start.
+    {
+        std::filesystem::path telemetry = options_->telemetry_dir;
+        if (telemetry.empty()) {
+            const auto* active = ActiveSettings::get();
+            if (active != nullptr && active->diagnostics_telemetry && !active->diagnostics_telemetry->empty())
+                telemetry = ViewerPath{*active->diagnostics_telemetry}.native();
+        }
+        if (!telemetry.empty()) {
+            core::perf_diag::FeedOptions feed;
+            feed.directory = ViewerPath::utf8(telemetry);
+            feed.build = std::string(core::build_identity());
+            const godot::Dictionary version = godot::Engine::get_singleton()->get_version_info();
+            const String engine_text = version.get("string", String());
+            feed.engine = std::string(engine_text.utf8().get_data());
+            std::string error;
+            if (core::perf_diag::FeedWriter::start_process(std::move(feed), error))
+                UtilityFunctions::print(String("EAWR telemetry feed on: ") + String::utf8(ViewerPath::utf8(telemetry).c_str()));
+            else UtilityFunctions::print(String("EAWR telemetry feed off: ") + String::utf8(error.c_str()));
+        }
     }
 
     if (!configure_preview_render_overrides(arguments)) {

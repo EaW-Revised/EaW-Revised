@@ -410,7 +410,7 @@ float height_of(const Metrics& metrics, const std::vector<Row>& rows) noexcept {
     const float category_gap = category_gap_of(metrics, rows);
     std::size_t headed{};
     for (std::size_t index = 1; index < rows.size(); ++index) headed += has_header(rows[index]);
-    return 2.0F * metrics.padding + metrics.top_reserve + static_cast<float>(rows.size()) * metrics.row_height()
+    return 2.0F * metrics.padding + static_cast<float>(rows.size()) * metrics.row_height()
         + static_cast<float>(rows.size() - 1) * metrics.row_gap + static_cast<float>(headed) * category_gap;
 }
 
@@ -427,10 +427,8 @@ float category_gap_of(const Metrics& metrics, const std::vector<Row>& rows) noex
 }
 
 float header_lift_of(const Metrics& metrics, const float category_gap, const bool first_row) noexcept {
-    // The first row's label may rise into the strip kept for the close icon, but never past the row gap that separates that
-    // icon's band from the row (the reserve puts the first row one row gap under the icon): never onto the close icon (GBT-07).
-    const float room = first_row ? (metrics.top_reserve > 0.0F ? metrics.row_gap : metrics.padding)
-                                 : metrics.row_gap + category_gap;
+    // The first row's label may rise into the panel's padding above it; a later row's into the gap above it.
+    const float room = first_row ? metrics.padding : metrics.row_gap + category_gap;
     return std::max(0.0F, std::min(metrics.header_lift, room));
 }
 

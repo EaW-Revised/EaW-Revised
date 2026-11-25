@@ -16,7 +16,7 @@ class BattleDialog final {
 public:
     struct Style {
         std::function<BuiltDialog(std::string_view, godot::Vector2)> dialog;
-        std::function<BuiltPendingBattleHud(godot::Vector2, bool)> pending;
+        std::function<BuiltPendingBattleHud(godot::Vector2, bool, bool)> pending; // size, single button, passive (#8353)
         std::function<std::string(std::string_view)> text;
         std::function<godot::Ref<godot::Texture2D>(std::string_view)> texture;
         std::function<void(bool, bool)> pending_click_sound;

@@ -166,38 +166,6 @@ Parsed<TrayLayout> parse_tray_layout(const data::XmlDocument& document) {
         layout.handle = std::move(definition);
     }
 
-    if (const auto* close = child(root, "Close_Button")) {
-        // GBT-07: replaced whole, like the handle.
-        CloseDefinition definition;
-        definition.candidates.clear();
-        definition.art_components.clear();
-        if (const auto* node = child(*close, "Enabled")) {
-            const auto flag = parse_flag(text_of(*node));
-            if (!flag) return fail("Close_Button/Enabled is not true or false");
-            definition.enabled = *flag;
-        }
-        if (definition.enabled) {
-            const auto* size = child(*close, "Size");
-            double width{}, height{};
-            if (!size || !parse_pair(text_of(*size), width, height) || width <= 0 || height <= 0)
-                return fail("Close_Button/Size is missing or not two positive numbers");
-            definition.width = width;
-            definition.height = height;
-            if (const auto* node = child(*close, "Caption")) definition.caption = text_of(*node);
-            if (const auto* node = child(*close, "Tooltip")) definition.tooltip = text_of(*node);
-            for (const auto& item : close->children) {
-                if (!core::iequals(item.name, "Art_Component")) continue;
-                auto value = text_of(item);
-                if (value.empty()) return fail("a Close_Button Art_Component is empty");
-                definition.art_components.push_back(std::move(value));
-            }
-            if (!parse_candidates(*close, definition.candidates))
-                return fail("a Close_Button Candidate needs an Anchor, a known Side and a two-number Offset");
-            if (definition.candidates.empty()) return fail("an enabled Close_Button needs at least one Candidate");
-        }
-        layout.close = std::move(definition);
-    }
-
     if (const auto* tray = child(root, "Tray")) {
         const auto number = [&](const std::string_view tag, double& out, const double low, const double high) {
             const auto* node = child(*tray, tag);

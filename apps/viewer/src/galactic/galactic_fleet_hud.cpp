@@ -16,6 +16,7 @@
 #include <godot_cpp/classes/v_box_container.hpp>
 #include "galactic_mode_internal.hpp"
 #include "ground_stack.hpp"
+#include "galactic/fleet_popup_title.hpp"
 #include "command_bar_scale.hpp"
 #include "eawr/sim/galactic/ground_intelligence.hpp"
 #include "ui/tactical_hud_internal.hpp"
@@ -241,6 +242,10 @@ void GalacticMode::State::update_planet_info(const presentation::ui::ShellPlacem
     const auto face = galactic_view::button_face_rect(*anchor, static_cast<float>(art->get_width()),
         static_cast<float>(art->get_height()), galactic_view::command_bar_component_scale(*component, 1.0F));
     const auto pixels = presentation::ui::shell_to_screen(face, placement);
+    // #8369: the authored Scale hides the button and its caption together (Scale 0.001 leaves no pixel of either).
+    const bool collapsed = galactic_view::button_face_collapsed(
+        {static_cast<float>(pixels.x), static_cast<float>(pixels.y), static_cast<float>(pixels.width), static_cast<float>(pixels.height)});
+    planet_info_button->set_visible(!collapsed);
     planet_info_button->set_position({static_cast<float>(pixels.x), static_cast<float>(pixels.y)});
     planet_info_button->set_size({static_cast<float>(pixels.width), static_cast<float>(pixels.height)});
     planet_info_button->set_hit_rect({{}, planet_info_button->get_size()});
@@ -249,7 +254,7 @@ void GalacticMode::State::update_planet_info(const presentation::ui::ShellPlacem
     planet_info_caption->set_size(planet_info_button->get_size());
     const auto caption = String::utf8(planet_info_texts[0].c_str()).to_upper();
     if (planet_info_caption->get_text() != caption) planet_info_caption->set_text(caption);
-    configure_command_bar_text(placement, *planet_info_caption, *component, *anchor);
+    configure_command_bar_text(placement, *planet_info_caption, *component, *anchor, false, true);
     const auto tint = component->color(data::ui::Field::text_color).value_or(data::ui::Rgba8{255, 255, 255, 255});
     planet_info_caption->set_colour(Color(tint.r / 255.0F, tint.g / 255.0F, tint.b / 255.0F, tint.a / 255.0F));
     planet_info_caption->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
@@ -507,19 +512,21 @@ presentation::ui::UnitCardLooks GalacticMode::State::fleet_stack_looks(const Fle
         const auto art = production_art.find(name->second);
         return art == production_art.end() ? nullptr : &art->second;
     };
-    std::string title_key = badge.ground_planet ? "TEXT_PIRATE_LAND_GARRISON" : "TEXT_PIRATE_SPACE_FLEET";
+    // WGUI-166 and the project rule of #8396: the owner side's fleet name. A faction outside the stock sides is named by its
+    // own display name, never as the enemy; an owner with no faction record keeps the stock pirate wording.
+    std::string_view faction, display_name;
+    std::string display;
     if (content) if (const auto owner = content->factions.find(badge.owner); owner != content->factions.end()) {
-        // Debug build fleet name: the GameConstants good/evil/corrupt side, else pirate.
-        constexpr std::array<std::string_view, 3> sides{"TEXT_GOOD_SPACE_FLEET", "TEXT_EVIL_SPACE_FLEET", "TEXT_CORRUPT_SPACE_FLEET"};
-        constexpr std::array<std::string_view, 3> ground_sides{"TEXT_GOOD_LAND_GARRISON", "TEXT_EVIL_LAND_GARRISON", "TEXT_CORRUPT_LAND_GARRISON"};
-        const auto side = presentation::ui::allegiance_emblem_index(owner->second.faction, content->side_names);
-        if (side < sides.size()) title_key = badge.ground_planet ? ground_sides[side] : sides[side];
+        faction = owner->second.faction;
+        display = faction_display_name(badge.owner);
+        display_name = display;
         if (owner->second.present) looks.icon_back_tint = data::ui::Rgba8{
             static_cast<std::uint8_t>(std::lround(std::clamp(owner->second.primary.r, 0.0F, 1.0F) * 255.0F)),
             static_cast<std::uint8_t>(std::lround(std::clamp(owner->second.primary.g, 0.0F, 1.0F) * 255.0F)),
             static_cast<std::uint8_t>(std::lround(std::clamp(owner->second.primary.b, 0.0F, 1.0F) * 255.0F)), 255};
     }
-    looks.name = battle_text(title_key);
+    looks.name = galactic_view::fleet_popup_title(faction, content ? content->side_names : presentation::ui::SideNames{},
+        display_name, badge.ground_planet, battle_text);
     // WGUI-92/166: an all-stealth fleet adds the first authored Tooltip_Text key of icon_fleet01.
     if (badge.stealth) if (const auto* tip = command_catalog.find("icon_fleet01")) {
         const auto keys = tip->list(data::ui::Field::tooltip_text);

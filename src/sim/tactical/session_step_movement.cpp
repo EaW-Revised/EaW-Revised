@@ -754,6 +754,20 @@ core::Result<void> session_detail::Tick::movement() {
             core::tick_profile::JobScope owner_job("job.movement", moving[index].state.entity_id, nullptr, moving[index].state.type_id);
             auto& unit = moving[index];
             if (impl_->retreat_holds(unit.state.entity_id)) {
+                // WR-90 (#8368): during the countdown a roster ship keeps only its turn in place (planned at the click,
+                // speed 0, no translation); everything else is cleared as before, and the escape phase clears it too.
+                if (impl_->retreat_state.phase == RetreatPhase::countdown && unit.motion
+                    && unit.motion->kind == MotionKind::turn) {
+                    unit.state.order = {}; unit.formation.reset(); unit.approach.reset();
+                    auto advanced = advance(unit, impl_->motion.find(unit.state.type_id), tick + 1);
+                    if (!advanced) {
+                        move_errors[index] = detail::diagnostic(diagnostic_codes::worker_failure,
+                            "tick " + std::to_string(tick) + " unit " + std::to_string(unit.state.entity_id)
+                                + ": " + advanced.error().message);
+                    }
+                    unit.speed = {};
+                    continue;
+                }
                 unit.state.order = {}; if (unit.motion) unit.motion->kind = MotionKind::none;
                 unit.speed = {}; unit.formation.reset(); unit.approach.reset();
                 continue;
@@ -776,6 +790,22 @@ core::Result<void> session_detail::Tick::movement() {
                 continue;
             }
             const auto squadron = craft_squadron.find(unit.state.entity_id);
+            // WR-90: hold craft throughout the countdown, preserving any turn planned at the click.
+            if (squadron != craft_squadron.end() && impl_->retreat_state.phase == RetreatPhase::countdown
+                && impl_->retreat_holds(squadron->second)) {
+                const auto* self = craft_view(unit.state.entity_id);
+                if (unit.motion && unit.motion->kind == MotionKind::turn && self != nullptr && self->profile != nullptr) {
+                    const auto craft_profile = craft_turn_profile(*self->profile);
+                    auto advanced = advance(unit, &craft_profile, tick + 1);
+                    if (!advanced) {
+                        move_errors[index] = detail::diagnostic(diagnostic_codes::worker_failure,
+                            "tick " + std::to_string(tick) + " unit " + std::to_string(unit.state.entity_id)
+                                + ": " + advanced.error().message);
+                    }
+                }
+                unit.speed = {};
+                continue;
+            }
             if (unit.suspended_locomotor) {
                 const auto group = std::lower_bound(impl_->squadrons.begin(), impl_->squadrons.end(), unit.state.entity_id,
                     [](const auto& row, const EntityId id) { return row.container < id; });

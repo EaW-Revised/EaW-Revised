@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include "../support/temp_dir.hpp"
+#include "eawr/presentation/ui/icon_fit.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "../support/check.hpp"
 #include "galactic/reference_catalog.hpp"
@@ -207,6 +208,11 @@ void mod_label_scale() {
     require(page::button_face_rect(mesh_anchor, 200, 40, page::command_bar_component_scale(*style, 1))
         == eawr::data::ui::ReferenceRect{20, -36, 160, 32},
         "mesh-backed button artwork uses its bone and texture, not the mesh rectangle");
+    // #8369: an authored Scale of 0.001 leaves no pixel of a button face, and its caption goes with it.
+    const auto hidden_face = page::button_face_rect(button_anchor, 200, 40, 0.0015F);
+    require(page::button_face_collapsed(hidden_face), "a 0.001 Scale collapses the button face");
+    require(!page::button_face_collapsed({0, 0, 200, 40}) && !page::button_face_collapsed({0, 0, 1, 1}),
+        "an authored face of at least one pixel stays drawn");
     const auto scaled = place(*style);
     require(near(scaled.scale, .8F) && near(scaled.x, 160) && near(scaled.y, 122)
         && near(scaled.bounds.x, 160) && near(scaled.bounds.y, 122)
@@ -236,6 +242,19 @@ void mod_label_scale() {
         const float after = texture_width * page::command_bar_component_scale(*component, 1.5F);
         require(after == before, "stock pip, fleet and status dimensions match main");
     }
+    // #8414: a ground pad or structure slot icon is the texture times viewport scale times the authored Scale.
+    for (const auto& [authored, expected] : {std::pair{1.5F, 2.25F}, std::pair{0.9F, 1.35F}}) {
+        eawr::data::ui::CommandBarComponent slot_style;
+        slot_style.fields.push_back({eawr::data::ui::Field::scale, authored, 0});
+        const auto drawn = eawr::presentation::ui::fit_icon_rect(100, 100, 40, 20,
+            page::command_bar_component_scale(slot_style, 1.5F), eawr::presentation::ui::IconFitMode::natural);
+        require(near(drawn.width, 40 * expected) && near(drawn.height, 20 * expected)
+            && near(drawn.x, (100 - drawn.width) * .5F) && near(drawn.y, (100 - drawn.height) * .5F),
+            "slot icon size follows the authored component scale and stays centred");
+    }
+    eawr::data::ui::CommandBarComponent stock_slot;
+    require(page::command_bar_component_scale(stock_slot, 1.5F) == 1.5F,
+        "a slot component with no Scale keeps the viewport-only icon size");
     auto default_scale = variant;
     std::erase_if(default_scale.fields, [](const auto& field) { return field.field == eawr::data::ui::Field::scale; });
     require(page::command_bar_component_scale(default_scale, 1.5F) == 1.5F,

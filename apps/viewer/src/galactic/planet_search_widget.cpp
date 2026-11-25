@@ -1,3 +1,4 @@
+#include "eawr/core/perf_diag/feed_writer.hpp"
 #include "planet_search_widget.hpp"
 #include "galactic_mode_internal.hpp"
 #include "ui/input_routing.hpp"
@@ -175,6 +176,7 @@ void PlanetSearchWidget::key(const Ref<InputEvent>& event) {
     const auto code = pressed->get_keycode();
     if (code == KEY_F3 && !pressed->is_echo()) {
         edit_->accept_event();
+        if (pressed->is_shift_pressed() && !pressed->is_ctrl_pressed() && !pressed->is_alt_pressed() && !pressed->is_meta_pressed()) { core::perf_diag::FeedWriter::request_capture_active(); return; } // #8058 P6
         state_->set_perf_overlay(state_->perf == nullptr || !state_->perf->shown());
         return;
     }

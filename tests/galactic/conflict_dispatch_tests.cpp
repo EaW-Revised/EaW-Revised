@@ -615,7 +615,11 @@ void uninvolved_human_never_blocks_vote() {
             "a human against an AI side gets the vote");
         // The player who is not in the fight has no alert of its own and cannot vote.
         const auto idle_view = game.pending_conflict_view(gc::SeatId{2});
-        expect(idle_view && !idle_view->alert, "a human who is not in the fight gets no battle alert");
+        // #8353: it gets a read-only alert (same timer and shell) so its client can show the passive prompt, and the alert
+        // admits no answer.
+        expect(idle_view && idle_view->alert && idle_view->alert->local == 2 && !idle_view->alert->begin_admitted
+                && !idle_view->alert->resolve_admitted && !idle_view->alert->timeout_due,
+            "a human who is not in the fight gets a passive battle alert that admits no answer");
         std::uint64_t idle_sequence{}, fighter_sequence{};
         if (idle_human_clicks) {
             check(game.submit({{game.completed_tick(), {2}, ++idle_sequence}, gc::BattleChoice{record.id, true}}));
@@ -631,9 +635,71 @@ void uninvolved_human_never_blocks_vote() {
             "the fighting human's Auto-resolve decides alone: the idle human never blocks and no battle starts");
     }
 }
+// #8353: three human sides, two of them fight. The third sees the same alert (so its client shows the passive prompt), cannot
+// vote, and the fight resolves from the two fighting votes alone, whichever way they go. Peers stay equal.
+void third_human_sees_passive_alert_and_cannot_vote() {
+    const sim::InlineExecutor executor;
+    for (const bool begin : {true, false}) {
+        std::array<std::string, 2> hashes;
+        for (unsigned peer = 0; peer < 2; ++peer) {
+            auto setup = gc::synthetic_galaxy({.seed = 7, .planets = 3, .players = 3, .fleets_per_player = 1,
+                .members_per_fleet = 1, .debug_commands = false, .human_sides = 3});
+            setup.networked_transport = true;
+            auto record = conflict(setup, Layer::space); // player 1 attacks player 2; player 3 is a human bystander
+            record.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+            std::erase_if(record.forces, [](const auto& force) { return force.owner == 3; });
+            std::erase_if(record.tactical.units, [](const auto& unit) { return unit.owner == 3; });
+            auto game = take(Game::create(setup));
+            check(game.configure_multiplayer_votes(30));
+            Calls calls;
+            check(game.install_conflict_layer(Layer::space, provider(Layer::space, calls)));
+            unsigned resolved{};
+            game.set_auto_resolver([&](const auto&, const auto&, const auto&) {
+                ++resolved; return core::Result<std::optional<campaign::AutoResolveOutcomeApplication>>::success({});
+            });
+            check(game.queue_conflict(record, {campaign::ConflictRoute::pending_tactical, false, false}));
+            for (unsigned i = 0; i < 6; ++i) {
+                const auto view = game.pending_conflict_view(gc::SeatId{1});
+                if (view && view->choice_ready) break;
+                take(game.step(executor));
+            }
+            const auto fighter = game.pending_conflict_view(gc::SeatId{1});
+            const auto bystander = game.pending_conflict_view(gc::SeatId{3});
+            expect(fighter && fighter->alert && bystander && bystander->alert && bystander->choice_ready,
+                "the fighting side and the third human both get the pending alert");
+            if (!fighter || !fighter->alert || !bystander || !bystander->alert) return;
+            expect(bystander->alert->local == 3 && bystander->conflict.id == fighter->conflict.id
+                    && bystander->alert->visible == fighter->alert->visible
+                    && bystander->alert->single_button == fighter->alert->single_button
+                    && bystander->alert->timeout_ms == fighter->alert->timeout_ms
+                    && bystander->alert->elapsed_wall_ms == fighter->alert->elapsed_wall_ms
+                    && bystander->alert->untimed == fighter->alert->untimed,
+                "the third human sees the same conflict, timer and shell as the fighting side");
+            expect(fighter->alert->begin_admitted && !bystander->alert->begin_admitted && !bystander->alert->resolve_admitted
+                    && !bystander->alert->timeout_due && !bystander->alert->waiting_for_opponent,
+                "only the fighting side may answer; the third human's alert admits nothing and never times out");
+            // The third human's own choice is refused, in either direction, and starts or resolves nothing.
+            std::uint64_t sequence[4]{};
+            for (const bool choice : {true, false}) {
+                check(game.submit({{game.completed_tick(), {3}, ++sequence[3]}, gc::BattleChoice{record.id, choice}}));
+                const auto refused = take(game.step(executor));
+                expect(!refused.diagnostics.empty() && !game.battle() && resolved == 0 && calls.entry == 0,
+                    "a choice from the third human is refused and counts as no vote");
+            }
+            // The two fighting humans decide: both Begin starts the battle, any Auto-resolve resolves it.
+            check(game.submit({{game.completed_tick(), {1}, ++sequence[1]}, gc::BattleChoice{record.id, true}}));
+            check(game.submit({{game.completed_tick(), {2}, ++sequence[2]}, gc::BattleChoice{record.id, begin}}));
+            for (unsigned i = 0; i < 6 && !game.battle() && resolved == 0; ++i) take(game.step(executor));
+            if (begin) expect(game.battle() != nullptr && resolved == 0, "two Begin votes start the battle with the third human idle");
+            else expect(resolved >= 1 && !game.battle() && calls.entry == 0, "one Auto-resolve of the two fighting humans resolves it");
+            hashes[peer] = game.state_sha256();
+        }
+        expect(hashes[0] == hashes[1], "both peers reach the same state");
+    }
+}
 }
 int case_galactic_conflict_dispatch_tests() {
-    try { layer_hooks(); land_fallback(); land_admission_refusal(); land_recording(); land_vote_route(); coop_vote_route(); uninvolved_human_never_blocks_vote(); entry_failure_falls_back(); entry_failure_checkpoint(false); entry_failure_checkpoint(true); automatic_persistence(); child_persistence(); }
+    try { layer_hooks(); land_fallback(); land_admission_refusal(); land_recording(); land_vote_route(); coop_vote_route(); uninvolved_human_never_blocks_vote(); third_human_sees_passive_alert_and_cannot_vote(); entry_failure_falls_back(); entry_failure_checkpoint(false); entry_failure_checkpoint(true); automatic_persistence(); child_persistence(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

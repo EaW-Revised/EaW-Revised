@@ -140,7 +140,11 @@ void GalacticMode::State::service_planet_hover() {
         }
     }
     const auto offset = back->vec2(ui::Field::default_offset).value_or(ui::Vec2{});
-    const Rect2 panel(key.anchor + Vector2(offset.x, -offset.y) * scale - Vector2(0, height), Vector2(width, height));
+    // #8369: a panel authored wider than the room right of its hint bone (a mod's 420-unit panel in a 3-panel shell) is
+    // moved back inside the screen, so its wrapped text is never cut off at the screen edge.
+    auto origin = key.anchor + Vector2(offset.x, -offset.y) * scale - Vector2(0, height);
+    origin.x = std::clamp(origin.x, 0.0F, std::max(0.0F, static_cast<float>(camera.width) - width));
+    const Rect2 panel(origin, Vector2(width, height));
     planet_hover_rect = panel;
     while (planet_hover_tooltip->get_child_count()) {
         auto* child = planet_hover_tooltip->get_child(0);

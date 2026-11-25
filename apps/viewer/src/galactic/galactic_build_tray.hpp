@@ -104,8 +104,6 @@ private:
     void layout_tray(GalacticMode::State& state, const godot::Rect2& bar);
     void style_entry(GalacticMode::State& state, Entry& entry, const viewer::galactic::BuildChoiceComponent& choice,
         const godot::Rect2& rect, float entry_scale);
-    // GBT-07: the close button's art, text and place on the open panel.
-    void place_close(GalacticMode::State& state);
     // GBT-10: the panel's back and frame, from the bar's shell art under and above `bar` (Back_Source Bar) or from
     // Back_Component.
     void draw_backdrop(GalacticMode::State& state, const godot::Rect2& bar);
@@ -131,11 +129,6 @@ private:
     godot::TextureRect* panel_frame_{};
     EawrHudButton* handle_{};
     EawrHudText* handle_text_{};
-    EawrHudButton* close_{};
-    EawrHudText* close_text_{};
-    std::string close_art_;              // the Art_Component the close button uses; empty: none of them in this mod
-    godot::Rect2 close_rect_;
-    std::uint64_t close_presses_{};
     // GBT-14: each queue button's place as the bar put it and as last lifted, so a lift never accumulates and a bar
     // that re-places a button (its cached key changed) is followed.
     // Built once from State::queue_buttons (they are made once with the bar); no per-frame allocation or lookup.
