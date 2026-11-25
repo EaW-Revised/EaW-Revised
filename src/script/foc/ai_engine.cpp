@@ -322,7 +322,7 @@ std::string Engine::goal_type_name(const std::uint64_t plan_id) const {
 // FH-13 with EX-02: the AI player's own moving objects, except squadron members, star bases and
 // the units a TaskForce holds.
 bool Engine::in_freestore(const ViewUnit& unit, tactical::PlayerId player) const {
-    if (unit.owner != player || unit.craft) return false;
+    if (unit.owner != player || unit.craft || unit.ai_excluded) return false; // TL-08: Prevent_AI_Usage(true) removes it
     // EX-13: arrival registers the ship with AI freestore, even after its plan times out.
     if (host_->ai_world->available() && host_->ai_world->arriving(unit.id)) return false;
     const AiType* type = host_->type(unit.type);

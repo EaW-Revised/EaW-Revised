@@ -1,3 +1,6 @@
+#include <optional>
+#include <vector>
+
 #include "eawr/core/load_profile.hpp"
 #include "renderer_upload_internal.hpp"
 #include "texture_budget.hpp"
@@ -247,11 +250,19 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
 
 [[nodiscard]] RID GodotRenderer::Impl::create_texture(RenderingServer& rendering, const assets::Texture& source,
     const std::uint32_t drop) {
+    // Bottom-left (TGA) rows are reversed while copying into the upload buffer; the authored chain is not copied (8308).
+    const bool flip = detail::texture_needs_row_flip(source);
     const Image::Format format = image_format(source.format);
     if (format == Image::FORMAT_MAX || source.mips.size() <= drop) return {};
     std::size_t byte_count{};
     for (std::size_t level = drop; level < source.mips.size(); ++level) byte_count += source.mips[level].bytes.size();
-    const auto tail = detail::texture_mip_tail(source);
+    std::vector<std::byte> tail;
+    if (flip) {
+        const assets::MipLevel last = detail::mip_rows_top_first(source.mips.back());
+        tail = detail::texture_mip_tail(source, &last);
+    } else {
+        tail = detail::texture_mip_tail(source);
+    }
     byte_count += tail.size();
     PackedByteArray bytes;
     bytes.resize(static_cast<int64_t>(byte_count));
@@ -259,7 +270,8 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
     for (std::size_t level = drop; level < source.mips.size(); ++level) {
         const assets::MipLevel& mip = source.mips[level];
         if (!mip.bytes.empty()) {
-            std::memcpy(bytes.ptrw() + offset, mip.bytes.data(), mip.bytes.size());
+            if (flip) detail::copy_mip_rows_top_first(mip, reinterpret_cast<std::byte*>(bytes.ptrw()) + offset);
+            else std::memcpy(bytes.ptrw() + offset, mip.bytes.data(), mip.bytes.size());
         }
         offset += mip.bytes.size();
     }
@@ -328,6 +340,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
     detail::ContentDigest mesh_digest;
     mesh_digest.scalar(authored_binormals);
     mesh_digest.scalar(bone_space_normals);
+    const bool custom0 = legacy::carries_custom0(authored_binormals, bone_space_normals);
     std::uint64_t mesh_bytes{};
     for (const auto& mesh : source.meshes) {
         if (!mesh.visible) continue;
@@ -382,7 +395,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
             uv.resize(static_cast<int64_t>(submesh.vertices.size()));
             colors.resize(static_cast<int64_t>(submesh.vertices.size()));
             tangents.resize(static_cast<int64_t>(submesh.vertices.size() * 4));
-            if (authored_binormals) binormals.resize(static_cast<int64_t>(submesh.vertices.size() * 3));
+            if (custom0) binormals.resize(static_cast<int64_t>(submesh.vertices.size() * 3));
             if (palette_skinned || rigid_skinned) {
                 bones.resize(static_cast<int64_t>(submesh.vertices.size() * 4));
                 weights.resize(static_cast<int64_t>(submesh.vertices.size() * 4));
@@ -393,8 +406,9 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
                     ? animation::Player::rigid_vertex_to_bind(*rigid_bind, submesh.vertices[index])
                     : submesh.vertices[index];
                 // A rigid mesh's stored normal is in its bone's space; a family that reads it there keeps it.
-                const Vector3 normal = axis_convert(bone_space_normals ? submesh.vertices[index].normal : vertex.normal)
-                                           .normalized();
+                const Vector3 authored_normal = axis_convert(submesh.vertices[index].normal);
+                const Vector3 normal = axis_convert(legacy::upload_normal(
+                    bone_space_normals, submesh.vertices[index].normal, vertex.normal)).normalized();
                 if (render_categories::ablation != "off") {
                     const auto point = axis_convert(vertex.position);
                     if (!target.diagnostic_bounds) target.diagnostic_bounds = AABB(point, Vector3());
@@ -419,7 +433,13 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
                 tangents.set(static_cast<int64_t>(index * 4 + 2), tangent.z);
                 tangents.set(static_cast<int64_t>(index * 4 + 3),
                     normal.cross(tangent).dot(binormal) < 0.0 ? -1.0F : 1.0F);
-                if (authored_binormals) {
+                if (bone_space_normals) {
+                    const auto channel = legacy::authored_normal_channel({static_cast<float>(authored_normal.x),
+                        static_cast<float>(authored_normal.y), static_cast<float>(authored_normal.z)});
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        binormals.set(static_cast<int64_t>(index * 3 + axis), channel[axis]);
+                    }
+                } else if (authored_binormals) {
                     const Vector3 authored = axis_convert(vertex.binormal);
                     const auto coefficients = legacy::binormal_coefficients(
                         {static_cast<float>(normal.x), static_cast<float>(normal.y), static_cast<float>(normal.z)},
@@ -467,7 +487,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
             arrays[RenderingServer::ARRAY_TANGENT] = tangents;
             arrays[RenderingServer::ARRAY_TEX_UV] = uv;
             arrays[RenderingServer::ARRAY_COLOR] = colors;
-            if (authored_binormals) arrays[RenderingServer::ARRAY_CUSTOM0] = binormals;
+            if (custom0) arrays[RenderingServer::ARRAY_CUSTOM0] = binormals;
             if (palette_skinned || rigid_skinned) {
                 arrays[RenderingServer::ARRAY_BONES] = bones;
                 arrays[RenderingServer::ARRAY_WEIGHTS] = weights;
@@ -477,7 +497,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
                 core::load_profile::DetailScope add(core::load_profile::Phase::mesh_add_surface);
                 rendering.mesh_add_surface_from_arrays(
                     target.mesh, RenderingServer::PRIMITIVE_TRIANGLES, arrays, Array(), Dictionary(),
-                    authored_binormals ? static_cast<BitField<RenderingServer::ArrayFormat>>(
+                    custom0 ? static_cast<BitField<RenderingServer::ArrayFormat>>(
                         static_cast<int64_t>(RenderingServer::ARRAY_CUSTOM_RGB_FLOAT)
                         << RenderingServer::ARRAY_FORMAT_CUSTOM0_SHIFT) : BitField<RenderingServer::ArrayFormat>(0));
             }
@@ -491,7 +511,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
             mesh_digest.bytes(submesh.vertices.data(), submesh.vertices.size() * sizeof(assets::Vertex));
             mesh_digest.bytes(submesh.indices.data(), submesh.indices.size() * sizeof(std::uint16_t));
             mesh_bytes += detail::surface_gpu_bytes(submesh.vertices.size(), submesh.indices.size(),
-                palette_skinned || rigid_skinned, authored_binormals);
+                palette_skinned || rigid_skinned, custom0);
         }
     }
     // One rigid bone for the whole model: every surface rigid, on the same bone.

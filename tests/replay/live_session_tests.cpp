@@ -5,6 +5,7 @@
 // arrive records the replay that reproduces it headless.
 
 #include "../support/check.hpp"
+#include "../../src/platform/live_script_hide_requests.hpp"
 #include "eawr/platform/live_session.hpp"
 #include "eawr/core/tick_profile.hpp"
 #include "eawr/platform/live_scripts.hpp"
@@ -1848,6 +1849,22 @@ void test_admission_driver_holds_and_publishes_once() {
         "admission publishes one snapshot and one hash");
 }
 
+void test_script_hide_request_coalescing() {
+    eawr::platform::LiveScriptHideRequests requests;
+    requests.add({7, true, "Hull", true});
+    requests.add({7, true, "Wing", true});
+    requests.add({7, false, "hULL", true});
+    requests.add({7, true, {}, false});
+    const auto rows = requests.take();
+    expect(rows.size() == 3, "hide requests coalesce case-insensitive mesh names and retain the sound update");
+    if (rows.size() == 3) {
+        expect(rows[0].sub_object && rows[0].name == "hULL" && !rows[0].hidden
+            && rows[1].sub_object && rows[1].name == "Wing" && rows[1].hidden
+            && !rows[2].sub_object && rows[2].hidden, "hide requests retain each mesh and the most recent sound flag");
+    }
+    expect(requests.take().empty(), "taking hide requests clears the pending state");
+}
+
 } // namespace
 
 // #8058 P2: the runtime diagnostics feed. Switching it (coarse, fine) never changes a tick hash on 1/2/4/8 workers;
@@ -1951,6 +1968,7 @@ int main(const int argc, const char* const argv[]) {
         std::cerr << "usage: tactical_live_session_tests <fixture directory>\n";
         return 2;
     }
+    test_script_hide_request_coalescing();
     test_start_rejects_worker_counts();
     test_driver_digest_reuses_completed_world();
     test_realtime_driver_services_between_ticks();

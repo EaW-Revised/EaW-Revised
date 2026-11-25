@@ -948,7 +948,8 @@ void test_peacebringer_blast_session() {
             if (!stepped) break;
             hashes.push_back(stepped.value().state_sha256);
             const auto& snapshot = *stepped.value().snapshot;
-            const auto& status = snapshot.instances().front().abilities.front();
+            const auto& instance = snapshot.instances().front();
+            const auto& status = instance.abilities.front();
             if (frame < 150) expect(status.blast_charge_remaining == 150 - frame && !status.blast_charged_presentation,
                 "FC-62: late-command activation completes after exactly 150 subsequent admitted polls");
             if (frame == 150) {

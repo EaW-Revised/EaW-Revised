@@ -63,14 +63,10 @@ inline constexpr std::size_t galactic_lobby_max_human_sides = sim::galactic::gal
 // A claim that would plan more rows is refused with a message, so no seat is ever on a row the dialog does not draw.
 [[nodiscard]] std::size_t galactic_lobby_human_row_limit(const sim::galactic::MpLobbyCampaign& campaign, std::size_t dialog_rows) noexcept;
 
-// The most humans a campaign room is offered for (the host's "Human players" dropdown): a multiplayer campaign's playable factions
+// The most humans a campaign room is opened for (its capacity, #8130): a multiplayer campaign's playable factions
 // (every player takes a faction row), a co-op campaign (one side, co-op seats) the seat ceiling; at least two, at most `seat_limit`
 // (the transport's seats) and the human seat ceiling (eight), so a room is never opened for a number the campaign cannot start with.
 [[nodiscard]] std::uint32_t galactic_lobby_max_humans(const sim::galactic::MpLobbyCampaign& campaign, std::uint32_t seat_limit) noexcept;
-
-// The number of humans a new campaign room opens for when the host has not chosen one: two. The host's "Human players" choice
-// raises it up to galactic_lobby_max_humans.
-[[nodiscard]] std::uint32_t galactic_lobby_default_humans(const sim::galactic::MpLobbyCampaign& campaign, std::uint32_t seat_limit) noexcept;
 
 enum class LobbyGameMode : std::uint8_t { skirmish, galactic };
 // Which text the room's options carry. An empty or unrecognised option blob is a skirmish room (its own codec refuses it).
@@ -193,11 +189,6 @@ struct GalacticLobbyReseat final {
 [[nodiscard]] std::optional<GalacticLobbyReseat> galactic_lobby_reseat(GalacticLobbyOptions fresh,
     const sim::galactic::MpLobbyCampaign& campaign, const LobbySnapshot& room, std::size_t dialog_rows);
 
-// Why the host may not switch a room with guests seated to `campaign` (D8): its connections are fixed when the room opens, so the room
-// waits for `room.capacity` players, and a multiplayer campaign with fewer playable factions than that could never start. Nothing for
-// a room with only the host in (it is opened again for the campaign), for a co-op campaign (one side, co-op seats) and for a campaign
-// with at least as many playable factions as the room has seats.
-[[nodiscard]] std::optional<std::string> galactic_lobby_switch_refusal(const sim::galactic::MpLobbyCampaign& campaign, const LobbySnapshot& room);
 
 // The room's departure hook (host side), after `peer`'s seat was removed (left, kicked, link lost): the row it held, when no
 // other seat holds it any more, goes back to an AI faction (unclaimed), every seat's side follows the rows and a seat whose

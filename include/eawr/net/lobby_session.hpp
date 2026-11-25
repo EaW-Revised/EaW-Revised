@@ -226,6 +226,10 @@ struct LobbyHooks {
     // Capacity-based TCP staging freezes admissions before publishing Start.
     // Legacy/online rooms retain their setup-agreement lock timing.
     bool lock_at_start{};
+    // With lock_at_start: a long campaign preparation does not freeze the roster; the freeze comes once the preparation is done and
+    // the offer is ready, just before the setup is published (the setup needs the staged mesh open between every pair). A cancel or
+    // a refusal while preparing returns to staging with the transport still open to joiners (#8130).
+    bool lock_after_preparation{};
 };
 struct LobbyRuntime;
 class LobbyResult final {

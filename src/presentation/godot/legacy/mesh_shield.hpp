@@ -35,8 +35,9 @@ void vertex() {
     eawr_base_uv = UV * eawr_base_uv_scale + vec2(0.0, eawr_effect_time * eawr_base_scroll);
     eawr_wave_uv = UV * eawr_wave_uv_scale + vec2(0.0, eawr_effect_time * eawr_wave_scroll);
     eawr_distort_uv = UV * eawr_distort_uv_scale + vec2(0.0, eawr_effect_time * eawr_distort_scroll);
-    // Source model +Z is render +Y. The colour output saturates per vertex.
-    eawr_vertex_color = clamp(COLOR.rgb * clamp(NORMAL.y + eawr_edge_brightness, 0.0, 1.0)
+    // CUSTOM0 holds the authored mesh-space normal (skinning leaves it alone); source model +Z is render +Y.
+    // The colour output saturates per vertex.
+    eawr_vertex_color = clamp(COLOR.rgb * clamp(CUSTOM0.y + eawr_edge_brightness, 0.0, 1.0)
         * eawr_color.rgb, 0.0, 1.0);
 }
 

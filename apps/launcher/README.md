@@ -100,10 +100,8 @@ The Performance **Render thread (restart)** setting persists in Godot's `user://
 For manager-selected profiles, render-thread precedence is explicit CLI mode > profile mode > saved Performance setting > project default. Both explicit Safe and explicit Separate override a profile. A plain EAWR start remains CLI > saved Performance setting > project default.
 
 With a bundled manager, `EAWR.exe --mods` starts EAWR Mods and passes
-`--eawr-launch-loop <user-data>/launcher/next-action.json`. Launch-profile requests may carry a numeric
-`screen` index sampled from the manager at Play time; both exit and stay-open handoffs forward it as
-`--eawr-launcher-screen <index>`. The viewer uses a valid index for startup placement, otherwise its current
-screen; this hint is never saved in a profile. A successful child exit
+`--eawr-launch-loop <user-data>/launcher/next-action.json`. The launcher never tells the game where to open:
+the game and the manager each keep only their own window place. A successful child exit
 may request `{"action":"launch-profile","profile":"<id>"}` or
 `{"action":"open-manager"}`. The launcher consumes the request before starting
 the next process and clears stale requests before every start. Missing or invalid

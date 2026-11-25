@@ -3,6 +3,7 @@
 #include "eawr/presentation/renderer.hpp"
 
 #include <array>
+#include <cmath>
 #include <optional>
 #include <span>
 #include <string>
@@ -61,6 +62,8 @@ struct Family final {
     bool authored_binormals{};
     // The vertex stage reads the normal as authored in the mesh's own space (the shield edge term reads its
     // third component there), not the bind-model-space normal a rigid bone-attached mesh is uploaded with.
+    // The upload carries it in CUSTOM0 (legacy::authored_normal_channel), like the binormal above, so that
+    // skinning does not rotate it. A family sets this or authored_binormals, never both.
     bool bone_space_normals{};
     // The adapter source for a render pass the family admits.
     std::string_view (*shader)(RenderPass pass) noexcept {};
@@ -92,6 +95,27 @@ struct Family final {
     }
     return {dot(binormal, normal_side) / determinant, dot(tangent, cross(binormal, side)) / determinant,
         dot(tangent, cross(normal, binormal)) / determinant};
+}
+
+// The CUSTOM0 value of a bone_space_normals family: the authored (mesh-space) unit normal, in render axes.
+// A zero normal stays zero.
+[[nodiscard]] inline std::array<float, 3> authored_normal_channel(const std::array<float, 3>& normal) noexcept {
+    const float length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+    if (!(length > 0.0F)) return {0.0F, 0.0F, 0.0F};
+    return {normal[0] / length, normal[1] / length, normal[2] / length};
+}
+
+// Whether a family's meshes carry a CUSTOM0 channel (and what it holds is decided by the two flags above).
+[[nodiscard]] constexpr bool carries_custom0(const bool authored_binormals, const bool bone_space_normals) noexcept {
+    return authored_binormals || bone_space_normals;
+}
+
+// The normal a rigid mesh vertex is uploaded with: the authored (mesh-space) one for a family that reads it there,
+// else the bind-model-space one every other family lights with.
+template <typename Normal>
+[[nodiscard]] constexpr const Normal& upload_normal(
+    const bool bone_space_normals, const Normal& authored, const Normal& bind_space) noexcept {
+    return bone_space_normals ? authored : bind_space;
 }
 
 } // namespace eawr::presentation::godot_backend::legacy

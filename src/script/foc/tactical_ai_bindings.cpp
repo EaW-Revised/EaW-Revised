@@ -738,6 +738,7 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         if (unit == nullptr) return none();
         if (arguments.size() < 2) return fail("Hide: Missing required boolean parameter.");
         if (!std::holds_alternative<bool>(arguments[1].data)) return fail("Hide: Expected bool parameter.");
+        context.issue_command(std::string(verb_hide_sound), {arguments[0], arguments[1]});
         context.issue_command(std::string(verb_hide), {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], arguments[1]});
         return none();
     });

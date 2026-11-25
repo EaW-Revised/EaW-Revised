@@ -374,13 +374,6 @@ void EawrLanLobby::on_box_result(const int64_t result) {
 void EawrLanLobby::on_item_selected(const int64_t index, String id) {
     if (state_ && state_->loading) return;
     const std::string gadget = utf8(id);
-    if (gadget == "IDC_INTERNET_HOST_CLAN_COMBO") {
-        if (auto* combo = EAWR_CONTROL(EawrUiCombo, gadget)) {
-            const auto count = static_cast<std::uint32_t>(combo->get_item_id(static_cast<int>(index)));
-            fill_host_seats(count);
-        }
-        return;
-    }
     if (gadget == "EAWR_LAN_DIRECT_SEATS") {
         if (auto* combo = EAWR_CONTROL(EawrUiCombo, gadget))
             impl_->direct_seats = static_cast<std::uint32_t>(combo->get_item_id(static_cast<int>(index)));

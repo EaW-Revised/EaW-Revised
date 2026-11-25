@@ -298,6 +298,18 @@ class RemakeBenchTests(unittest.TestCase):
             orders = [run["args"][i + 1] for i, value in enumerate(run["args"]) if value == "--eawr-live-order"]
             self.assertEqual(orders, ["1:attack_move:2+3+4+5+6+7+8+9@103.177246,-720.166992,0",
                                       "1:attack_move:11+12+13+14+15+16+17@103.177246,-720.166992,0"])
+            # Same-host A/B arms: every scene runs once per arm and repeat, the arm order rotating, each run with its own files.
+            arms = bench.parse_arms(["off=", "on=--eawr-frame-diag --eawr-frame-diag-csv {out}/x.csv"])
+            bench.write_spec(path, ["remake-dev4"], "free", mod_root="fixture",
+                             preparations={"remake-dev4": native}, arms=arms, arm_repeats=3)
+            runs = json.loads(path.read_text())["runs"]
+            self.assertEqual([r["name"] for r in runs], [f"remake-dev4--{a}--{n}" for n, order in
+                             ((1, "off on"), (2, "on off"), (3, "off on")) for a in order.split()])
+            self.assertEqual(runs[1]["args"][-3:], ["--eawr-frame-diag", "--eawr-frame-diag-csv", "{out}/x.csv"])
+            self.assertIn("{out}/remake-dev4--off--1.csv", runs[0]["args"])
+            self.assertNotIn("--eawr-frame-diag", runs[0]["args"])
+            with self.assertRaises(SystemExit):
+                bench.parse_arms(["only="])
             camera = bench.ET.parse(Path(tmp) / "engagement/remake-dev4.xml").getroot()
             self.assertAlmostEqual(float(camera.find("initial").attrib["target_x"]), 103.177246)
             self.assertAlmostEqual(float(camera.find("initial").attrib["target_y"]), -720.166992)

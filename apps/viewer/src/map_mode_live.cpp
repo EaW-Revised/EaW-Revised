@@ -4,6 +4,7 @@
 #include "battle_content.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
+#include "frame_diag.hpp"
 #include "perf_movers.hpp"
 #include "eawr/presentation/camera/overview.hpp"
 #include "eawr/presentation/live/projectiles.hpp"
@@ -978,8 +979,21 @@ std::optional<int> MapMode::process(const double delta) {
     }
     core::tick_profile::Recording ui_recording;
     std::optional<core::tick_profile::Capture> ui_capture;
-    if (state.perf_trace) ui_capture.emplace(ui_recording);
+    FrameDiag& frame_diag = FrameDiag::instance();
+    if (state.perf_trace || frame_diag.enabled()) ui_capture.emplace(ui_recording);
     if (state.perf_trace) state.perf_trace->begin_frame();
+    // #8058 P3: frame entry/exit timing and the render-thread sample, off by default (one bool test).
+    struct FrameDiagExit final {
+        FrameDiag& diag;
+        const State& state;
+        const core::tick_profile::Recording& recording;
+        ~FrameDiagExit() {
+            if (!diag.enabled()) return;
+            const bool live = state.live_session != nullptr;
+            diag.end_frame(live && state.live_session->frame_stale(), live && state.live_session->phase() == LiveSessionView::Phase::running, recording);
+        }
+    } frame_diag_exit{frame_diag, state, ui_recording};
+    frame_diag.begin_frame();
     state.write_perf_screenshot();
     state.hud_ms = 0.0;
     core::load_profile::Scope first_frame_scope(core::load_profile::Phase::session);

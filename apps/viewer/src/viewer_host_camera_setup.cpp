@@ -1,5 +1,7 @@
 #include "viewer_host_internal.hpp"
 
+#include "settings_store.hpp"
+
 #include "ui/input_routing.hpp"
 
 #include <godot_cpp/classes/canvas_layer.hpp>
@@ -292,6 +294,8 @@ void ViewerHost::_notification(const int what) {
         // Engine-driven quits (including --quit-after and the preview close driver) still
         // have a tree here. Persist before predelete, while a failed report can set exit 2.
         if (front_end_ && !front_end_->close() && get_tree()) get_tree()->quit(2);
+        // #8382: the game keeps its own window place (monitor and position) for the next start.
+        if (window_memory_settings_) save_window_memory(*window_memory_settings_);
         break;
     case NOTIFICATION_PREDELETE:
         // #961: Godot sends this to the extension before deleting the host's

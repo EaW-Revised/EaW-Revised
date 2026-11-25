@@ -66,10 +66,28 @@ std::optional<ui::PlayerSettings>& active_storage() {
 
 VideoApplyCounts display_applies;
 
-// Puts the whole windowed frame on the launcher's requested screen at startup, else on the current screen, only
-// moved as far as needed. The size shrinks to the usable area. Returns the report line, empty when nothing moved.
-// The pure rule is ui::place_window; this only reads the window system's rectangles and applies the result.
-std::string fit_window_to_screen(godot::DisplayServer& display, const bool centre) {
+// The whole monitor rectangles (what a saved window place names), in the window system's desktop pixels.
+std::vector<ui::ScreenArea> monitor_rects(godot::DisplayServer& display) {
+    std::vector<ui::ScreenArea> monitors;
+    for (int index = 0; index < display.get_screen_count(); ++index) {
+        const godot::Vector2i origin = display.screen_get_position(index);
+        const godot::Vector2i size = display.screen_get_size(index);
+        monitors.push_back({origin.x, origin.y, size.x, size.y});
+    }
+    return monitors;
+}
+
+// The game's own saved window place, or nothing (first run, a damaged file).
+std::optional<ui::SavedWindow> load_saved_window(const std::filesystem::path& settings_file) {
+    const std::optional<std::string> text = ui::read_text_file(window_memory_file(settings_file));
+    return text ? ui::parse_saved_window(*text) : std::nullopt;
+}
+
+// Puts the whole windowed frame on the monitor the game last used (its own saved place, else the current monitor),
+// at its saved position when that still fits, else centred; only moved as far as needed. The size shrinks to the
+// usable area. Returns the report line, empty when nothing moved. The pure rules are ui::startup_window_place and
+// ui::place_window; this only reads the window system's rectangles and applies the result.
+std::string fit_window_to_screen(godot::DisplayServer& display, const bool start, const std::optional<ui::SavedWindow>& saved) {
     const int count = display.get_screen_count();
     if (count <= 0) return {};
     std::vector<ui::ScreenArea> screens;
@@ -86,12 +104,9 @@ std::string fit_window_to_screen(godot::DisplayServer& display, const bool centr
                                 inset(outer.x + outer_size.x - position.x - size.x),
                                 inset(outer.y + outer_size.y - position.y - size.y)};
     const int current = display.window_get_current_screen();
-    const std::size_t screen = centre
-        ? ui::startup_window_screen(viewer_profile_options().arguments, current, count)
-        : static_cast<std::size_t>(std::max(current, 0));
-    const ui::WindowPlacement place = ui::place_window(
-        {size.x, size.y}, frame, screens, screen,
-        centre ? std::nullopt : std::optional<std::pair<int, int>>(std::make_pair(position.x, position.y)));
+    const ui::StartupPlace place_at = start ? ui::startup_window_place(saved, monitor_rects(display), current)
+                                            : ui::StartupPlace{static_cast<std::size_t>(std::max(current, 0)), std::make_pair(position.x, position.y)};
+    const ui::WindowPlacement place = ui::place_window({size.x, size.y}, frame, screens, place_at.screen, place_at.keep);
     const bool resized = place.width != size.x || place.height != size.y;
     const bool moved = place.x != position.x || place.y != position.y;
     if (resized) display.window_set_size(godot::Vector2i(place.width, place.height));
@@ -163,31 +178,54 @@ void apply_audio(const ui::AudioSettings& audio, ApplyReport& report) {
 
 VideoApplyCounts video_apply_counts() noexcept { return display_applies; }
 
-void apply_startup_video(const ui::SettingsLoad& loaded, ApplyTargets targets, ApplyReport& report) {
-    // A run that applies the window (not a capture or test run) also places it: centred on the requested screen,
-    // whole frame visible, with or without saved settings. Without them the window keeps its launch size.
+std::filesystem::path window_memory_file(const std::filesystem::path& settings_file) {
+    return settings_file.parent_path() / "eawr-window.cfg";
+}
+
+void save_window_memory(const std::filesystem::path& settings_file) {
+    godot::DisplayServer* display = godot::DisplayServer::get_singleton();
+    if (display == nullptr || display->get_name() == godot::String("headless") || display->get_screen_count() <= 0) return;
+    const auto engine_mode = display->window_get_mode();
+    const ui::ExitWindowMode mode = engine_mode == godot::DisplayServer::WINDOW_MODE_MINIMIZED ? ui::ExitWindowMode::minimized
+        : engine_mode == godot::DisplayServer::WINDOW_MODE_WINDOWED                         ? ui::ExitWindowMode::windowed
+                                                                                            : ui::ExitWindowMode::other;
+    if (mode == ui::ExitWindowMode::minimized) return;
+    const int current = std::clamp(display->window_get_current_screen(), 0, display->get_screen_count() - 1);
+    const godot::Vector2i origin = display->screen_get_position(current);
+    const godot::Vector2i size = display->screen_get_size(current);
+    const godot::Vector2i position = display->window_get_position();
+    const auto place = ui::window_to_save(mode, {origin.x, origin.y, size.x, size.y}, std::make_pair(position.x, position.y),
+                                          mode == ui::ExitWindowMode::other ? load_saved_window(settings_file) : std::nullopt);
+    if (!place) return;
+    std::string error;
+    static_cast<void>(ui::write_text_file_atomic(window_memory_file(settings_file), ui::serialize_saved_window(*place), error));
+}
+
+void apply_startup_video(const ui::SettingsLoad& loaded, const SettingsStore& store, ApplyTargets targets, ApplyReport& report) {
+    // A run that applies the window (not a capture or test run) also places it: on the monitor the game last used (its
+    // own saved place only; never the launcher's) at its saved position, whole frame visible, with or without saved
+    // settings. Without them the window keeps its launch size.
     const bool place = targets.window;
     godot::DisplayServer* display = godot::DisplayServer::get_singleton();
-    // Move before applying the saved size: a smaller initial monitor must not shrink a size that fits the
-    // launcher's monitor. Reading frame insets afterwards also follows the destination monitor's DPI.
-    const bool windowed_start = loaded.defaulted
-        ? display && display->window_get_mode() == godot::DisplayServer::WINDOW_MODE_WINDOWED
-        : loaded.settings.video.windowed;
-    if (place && windowed_start && display && display->get_name() != godot::String("headless")
-        && display->get_screen_count() > 0) {
+    const bool real_display = display && display->get_name() != godot::String("headless") && display->get_screen_count() > 0;
+    const std::optional<ui::SavedWindow> saved = place && real_display ? load_saved_window(store.file()) : std::nullopt;
+    // Move before applying the saved size: a smaller initial monitor must not shrink a size that fits the saved
+    // monitor. Reading frame insets afterwards also follows the destination monitor's DPI. A full-screen start goes
+    // to the saved monitor too, since full screen takes the monitor the window is on.
+    if (place && real_display) {
         const int current = display->window_get_current_screen();
-        const auto screen = ui::startup_window_screen(viewer_profile_options().arguments, current, display->get_screen_count());
-        if (static_cast<int>(screen) != current) display->window_set_current_screen(static_cast<int>(screen));
+        const auto where = ui::startup_window_place(saved, monitor_rects(*display), current);
+        if (static_cast<int>(where.screen) != current) display->window_set_current_screen(static_cast<int>(where.screen));
     }
     if (loaded.defaulted) {
         targets.window = false;
         targets.texture_detail = false;
     }
     apply_video(loaded.settings.video, targets, report);
-    if (!place || display == nullptr || display->get_name() == godot::String("headless")) return;
+    if (!place || !real_display) return;
     const auto mode = display->window_get_mode();
     if (mode != godot::DisplayServer::WINDOW_MODE_WINDOWED) return;
-    if (const std::string line = fit_window_to_screen(*display, true); !line.empty()) report.applied.push_back(line);
+    if (const std::string line = fit_window_to_screen(*display, true, saved); !line.empty()) report.applied.push_back(line);
 }
 
 void apply_video(const ui::VideoSettings& video, const ApplyTargets& targets, ApplyReport& report) {
@@ -238,7 +276,7 @@ void apply_video(const ui::VideoSettings& video, const ApplyTargets& targets, Ap
                                        + std::to_string(video.window_height));
             // A bigger window grows from its top-left corner: pull it back onto the screen.
             if (display->get_name() != godot::String("headless")) {
-                if (const std::string line = fit_window_to_screen(*display, false); !line.empty())
+                if (const std::string line = fit_window_to_screen(*display, false, std::nullopt); !line.empty())
                     report.applied.push_back(line);
             }
         }

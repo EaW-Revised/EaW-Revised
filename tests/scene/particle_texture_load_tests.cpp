@@ -135,8 +135,50 @@ void particle_textures_reach_the_upload_with_a_full_chain() {
 
 } // namespace
 
+// 8308: a bottom-origin uncompressed TGA reaches the mesh upload top row first; a top-origin one and block-compressed data stay as authored.
+std::vector<std::byte> tga_2x2(const std::uint8_t descriptor) {
+    std::vector<std::byte> bytes(18, std::byte{0});
+    bytes[2] = std::byte{2};
+    bytes[12] = std::byte{2};
+    bytes[14] = std::byte{2};
+    bytes[16] = std::byte{32};
+    bytes[17] = std::byte{descriptor};
+    // Stored rows first to last: row A = blue, red; row B = green, white (BGRA).
+    const std::uint8_t pixels[16] = {255, 0, 0, 255, 0, 0, 255, 255, 0, 255, 0, 255, 255, 255, 255, 255};
+    for (const std::uint8_t value : pixels) bytes.push_back(std::byte{value});
+    return bytes;
+}
+
+void bottom_origin_tga_uploads_top_row_first() {
+    using namespace eawr::presentation::godot_backend::detail;
+    for (const std::uint8_t descriptor : {std::uint8_t{8}, std::uint8_t{0x28}}) {
+        auto loaded = eawr::assets::load_texture(tga_2x2(descriptor), eawr::assets::Source{});
+        expect(static_cast<bool>(loaded), "the 2x2 TGA decodes");
+        if (!loaded) return;
+        const eawr::assets::Texture& texture = loaded.value();
+        const bool bottom = descriptor == 8;
+        expect(texture_needs_row_flip(texture) == bottom, "only a bottom-origin TGA needs the row flip");
+        std::vector<std::byte> upload(texture.mips[0].bytes.size());
+        if (texture_needs_row_flip(texture)) copy_mip_rows_top_first(texture.mips[0], upload.data());
+        else upload = texture.mips[0].bytes;
+        // Row 0 of the upload buffer is the first stored row when top-origin (blue) and the last stored row when bottom-origin (green).
+        // Row 1 is the other one. The loader converts the input BGRA pixels to RGBA.
+        const auto at = [&](const std::size_t index) { return std::to_integer<int>(upload[index]); };
+        const std::size_t row1 = texture.mips[0].row_pitch;
+        expect(at(0) == 0 && at(1) == (bottom ? 255 : 0) && at(2) == (bottom ? 0 : 255),
+            bottom ? "bottom-origin: the last stored row (green) becomes the top row" : "top-origin: the first stored row (blue) stays on top");
+        expect(at(row1) == 0 && at(row1 + 1) == (bottom ? 0 : 255) && at(row1 + 2) == (bottom ? 255 : 0),
+            "row 1 is the other stored row");
+    }
+    eawr::assets::Texture block;
+    block.format = eawr::assets::PixelFormat::bc1;
+    block.source_origin = eawr::assets::ImageOrigin::bottom_left;
+    expect(!texture_needs_row_flip(block), "block-compressed data is never flipped");
+}
+
 int main() {
     particle_textures_reach_the_upload_with_a_full_chain();
+    bottom_origin_tga_uploads_top_row_first();
     if (failures != 0) {
         std::cerr << failures << " particle_texture_load check(s) failed\n";
         return 1;

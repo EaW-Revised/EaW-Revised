@@ -316,4 +316,10 @@ add_test(NAME headless_catalog_health
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_catalog_health.py"
             --program "$<TARGET_FILE:sim_headless>")
 
+add_executable(core_perf_diag_frame_tests perf_diag_frame_tests.cpp)
+target_link_libraries(core_perf_diag_frame_tests PRIVATE eawr::core Threads::Threads)
+target_compile_features(core_perf_diag_frame_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(core_perf_diag_frame_tests)
+add_test(NAME core_perf_diag_frame_contracts COMMAND core_perf_diag_frame_tests)
+
 eawr_label_tests()

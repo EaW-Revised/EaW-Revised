@@ -602,6 +602,11 @@ void Loader::load_body(Object& object, UnitType& unit) {
                     unit.collision_meshes);
             }
         }
+        if (model != nullptr) {
+            const auto& bones = model->model->bones;
+            for (std::size_t index = 0; index < bones.size() && index < model->frames.size(); ++index)
+                unit.bone_rests.emplace_back(bones[index].name, translation(model->frames[index]));
+        }
         for (const auto& bone : tokens(object.text("Target_Bones"))) {
             unit.target_bones.push_back(point(bone, model, unit.id, "Target_Bones"));
         }

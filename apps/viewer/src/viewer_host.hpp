@@ -75,6 +75,8 @@ private:
     void apply_preview_render_overrides();
     static void write_window_title(const std::string& title);
     eawr::presentation::ui::OwnedTitle window_title_;
+    // The settings file whose sibling keeps this player's window place (#8382); empty for evidence runs.
+    std::optional<std::filesystem::path> window_memory_settings_;
     void record_render_categories();
     std::optional<int> preview_vsync_;
     std::optional<int> preview_max_fps_;

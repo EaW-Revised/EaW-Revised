@@ -636,6 +636,7 @@ TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const
         if (unit.script_view) {
             instance.script_hidden = unit.script_view->hidden;
             instance.script_unselectable = unit.script_view->unselectable;
+            instance.script_ai_excluded = unit.script_view->ai_excluded;
         }
         if (land) {
             const auto found = std::lower_bound(sensors.begin(), sensors.end(), unit.state.type_id,

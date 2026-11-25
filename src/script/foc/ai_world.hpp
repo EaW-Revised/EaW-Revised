@@ -50,6 +50,7 @@ struct ViewUnit {
     bool formation_moving{};             // formation point travel for Lua order queries
     tactical::OrderKind order{tactical::OrderKind::none};
     sim::EntityId order_target{};
+    bool ai_excluded{};                  // TL-08: Prevent_AI_Usage(true); the AI's unit selection skips it
     bool container{};                    // a squadron's team container
     bool craft{};                        // a squadron member
     // #449 perception inputs.

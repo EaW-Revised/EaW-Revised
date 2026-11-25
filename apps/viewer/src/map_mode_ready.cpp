@@ -12,6 +12,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
+#include "frame_diag.hpp"
 #include "eawr/presentation/camera/overview.hpp"
 #include "render_profile_viewport.hpp"
 #include "settings_store.hpp"
@@ -543,6 +544,7 @@ bool MapMode::State::configure_ready_options(std::string& lighting_argument, std
         if (trace && state.live_options.fixture.empty()) return state.fail_ready("--eawr-perf-trace requires --eawr-live-session");
         if (trace && !state.perf_trace.emplace().open(*trace, trace_error)) return state.fail_ready(trace_error);
     }
+    FrameDiag::instance().parse(OS::get_singleton()->get_cmdline_user_args());
     if (const std::string hud_error = parse_hud_arguments(OS::get_singleton()->get_cmdline_user_args(),
                                                           !state.live_options.fixture.empty(), state.hud_options,
                                                           state.hud_faction_given);

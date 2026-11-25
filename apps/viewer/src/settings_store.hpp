@@ -68,7 +68,15 @@ void apply_audio(const presentation::ui::AudioSettings& audio, ApplyReport& repo
 // Also checks the current engine state: startup and menu commits never repeat a display setter.
 void apply_video(const presentation::ui::VideoSettings& video, const ApplyTargets& targets, ApplyReport& report);
 // A missing, damaged or foreign-version record uses fresh defaults without replacing launch geometry.
-void apply_startup_video(const presentation::ui::SettingsLoad& loaded, ApplyTargets targets, ApplyReport& report);
+// `store` names the settings file; the game's own window place (eawr-window.cfg) sits beside it.
+void apply_startup_video(const presentation::ui::SettingsLoad& loaded, const SettingsStore& store, ApplyTargets targets,
+                         ApplyReport& report);
+
+// #8382: the game keeps only its own window place. `window_memory_file` is the sibling of the settings file;
+// `save_window_memory` writes the monitor and (windowed) position the window has now, and is a no-op when headless
+// or minimized. The launcher never writes this file and the game never reads the launcher's.
+[[nodiscard]] std::filesystem::path window_memory_file(const std::filesystem::path& settings_file);
+void save_window_memory(const std::filesystem::path& settings_file);
 
 // Main-thread counters of our display calls that may request swapchain recreation.
 // Compare snapshots around menu gestures; the engine's internal recreations are not counted.

@@ -62,6 +62,13 @@ struct LiveLetterboxRequest {
     double seconds{};
 };
 
+struct LiveSubObjectHideRequest {
+    sim::EntityId entity{};
+    bool hidden{};
+    std::string name;
+    bool sub_object{true};
+    };
+
 // A tactical script's story cinematic camera, screen fade or environment call (docs/behaviour/tactical-story-cinematic.md). Local
 // presentation only, like the letterbox: not part of the world, the replay, a save or a hash, and a headless replay makes none.
 struct LiveStoryRequest {
@@ -491,6 +498,7 @@ public:
     [[nodiscard]] LiveScriptReport script_report() const;
     // The tactical scripts' letterbox requests made since the last call, in script order. Never blocks on a running step.
     [[nodiscard]] std::vector<LiveLetterboxRequest> take_letterbox_requests();
+    [[nodiscard]] std::vector<LiveSubObjectHideRequest> take_sub_object_hide_requests();
     // The story cinematic, fade and environment requests made since the last call, in script order. Never blocks on a running step.
     [[nodiscard]] std::vector<LiveStoryRequest> take_story_requests();
 

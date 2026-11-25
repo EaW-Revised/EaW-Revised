@@ -278,7 +278,8 @@ bool OptionsMode::State::run_action(const std::string& action) {
         ApplyTargets targets;
         targets.window = false; // the test's viewport stays pinned
         ApplyReport report;
-        apply_startup_video(SettingsStore{options.settings_file}.load(), targets, report);
+        const SettingsStore store{options.settings_file};
+        apply_startup_video(store.load(), store, targets, report);
         return true;
     }
     if (verb == "press") return screen->press(argument);

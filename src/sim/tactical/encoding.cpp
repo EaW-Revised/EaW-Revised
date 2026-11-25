@@ -21,6 +21,7 @@ std::string_view to_string(const OrderKind kind) noexcept {
     case OrderKind::script_hide: return "script_hide";
     case OrderKind::script_hyperspace_in: return "script_hyperspace_in";
     case OrderKind::script_selectable: return "script_selectable";
+    case OrderKind::script_prevent_ai: return "script_prevent_ai";
     case OrderKind::script_suspend_locomotor: return "script_suspend_locomotor";
     case OrderKind::script_cancel_hyperspace: return "script_cancel_hyperspace";
     case OrderKind::battle_control: return "battle_control";
@@ -228,6 +229,7 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case opcode_script_hide: // flag and zero reserved word
     case opcode_script_hyperspace_in: // frames and zero reserved word
     case opcode_script_selectable: // flag and zero reserved word
+    case opcode_script_prevent_ai: // flag and zero reserved word
     case opcode_script_suspend_locomotor: // flag and zero reserved word
     case opcode_script_cancel_hyperspace: // two zero reserved words
     case opcode_script_teleport: // target unit
@@ -268,6 +270,7 @@ std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
     if (std::holds_alternative<ScriptHidePayload>(command.payload)) return opcode_script_hide;
     if (std::holds_alternative<ScriptHyperspaceInPayload>(command.payload)) return opcode_script_hyperspace_in;
     if (std::holds_alternative<ScriptSelectablePayload>(command.payload)) return opcode_script_selectable;
+    if (std::holds_alternative<ScriptPreventAiPayload>(command.payload)) return opcode_script_prevent_ai;
     if (std::holds_alternative<ScriptSuspendLocomotorPayload>(command.payload)) return opcode_script_suspend_locomotor;
     if (std::holds_alternative<ScriptCancelHyperspacePayload>(command.payload)) return opcode_script_cancel_hyperspace;
     if (std::holds_alternative<ScriptChangeOwnerPayload>(command.payload)) return opcode_script_change_owner;
@@ -433,6 +436,9 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         sim::detail::append_u32(bytes, 0);
     } else if (const auto* selectable = std::get_if<ScriptSelectablePayload>(&command.payload)) {
         sim::detail::append_u32(bytes, selectable->selectable ? 1U : 0U);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* prevent = std::get_if<ScriptPreventAiPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, prevent->excluded ? 1U : 0U);
         sim::detail::append_u32(bytes, 0);
     } else if (std::holds_alternative<ScriptCancelHyperspacePayload>(command.payload)) {
         sim::detail::append_u32(bytes, 0);

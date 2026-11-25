@@ -1,3 +1,4 @@
+#include "eawr/core/text.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
@@ -398,7 +399,9 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
             clock_trace_ = {newest, presented_tick_, 0.0, advance, delta, rate, static_cast<double>(time_.target_rate()), true, time_.running(),
                 clock_trace_.frame_us, std::chrono::duration<double, std::micro>(frame.latest_published.time_since_epoch()).count()};
         }
-        presented_tick_ = std::clamp(presented_tick_ + advance, std::max(0.0, newest - 1.0), newest);
+        const double wanted_tick = presented_tick_ + advance;
+        frame_stale_ = rate > 0.0 && wanted_tick > newest;
+        presented_tick_ = std::clamp(wanted_tick, std::max(0.0, newest - 1.0), newest);
         alpha = presented_tick_ - (newest - 1.0);
         if (phase_ == Phase::results || phase_ == Phase::returning) {
             // WBF-42/49: a driven pause/quit does not restart its old pacing segment
@@ -411,6 +414,7 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
             last_shown_ = frames_ > options_.warmup_frames ? frames_ - 1U - options_.warmup_frames : 0U;
         }
     } else {
+        frame_stale_ = false;
         const std::uint64_t shown = frames_ > options_.warmup_frames ? frames_ - 1U - options_.warmup_frames : 0U;
         // TP-06: the presented tick advances --eawr-live-step x target / 30 per frame, not at all
         // while paused; a change starts a new segment at the tick the last frame showed.
@@ -510,6 +514,19 @@ core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population
     population.trace_frames(trace_frames_);
     FrameTimer pose_timer(trace_frames_ ? &pose_ms_ : nullptr);
     compose_frame_beacons(latest, live);
+    for (auto& request : take_sub_object_hide_requests()) {
+        script_sound_silent_.insert_or_assign(request.entity, request.hidden);
+        if (request.sub_object) {
+            auto key = std::make_pair(request.entity, core::to_lower(request.name));
+            pending_sub_object_hides_.insert_or_assign(std::move(key), std::move(request));
+        }
+    }
+    std::erase_if(pending_sub_object_hides_, [&](const auto& entry) {
+        const auto& request = entry.second;
+        return population.hide_sub_object(request.entity, request.name, request.hidden)
+            || snapshot_index_.instance(request.entity) == nullptr;
+    });
+    std::erase_if(script_sound_silent_, [&](const auto& entry) { return snapshot_index_.instance(entry.first) == nullptr; });
     // Growth can follow the normal idle pass. Refresh its new palettes once before live posing.
     population.pose_pending_units(renderer, pose_workers_);
     record_draw_digest(live, clip_poses, latest->completed_tick());

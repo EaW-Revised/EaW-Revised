@@ -575,7 +575,7 @@ private:
         // source the ordinary moving-unit service callback.
         if (unit.planetary_weapon) return false;
         if (goals_) return goals_->unit_service(unit, player);
-        if (unit.owner != player || unit.craft) return false;
+        if (unit.owner != player || unit.craft || unit.ai_excluded) return false; // TL-08
         const AiType* type = host_->type(unit.type);
         return type != nullptr && type->locomotor && !type->star_base;
     }
@@ -828,10 +828,12 @@ core::Result<PreparedAiSession> prepare_session(
             std::sort(omitted_types.begin(), omitted_types.end());
             if (auto admitted = session.omit_object_script_decisions(omitted_types); !admitted) return admitted;
         }
-        for (const std::string_view verb : {verb_move, verb_face, verb_suspend_locomotor, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_tactical_superweapon, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable, verb_take_damage, verb_teleport_and_face, verb_prevent_all_fire, verb_change_owner, verb_create_object, verb_despawn, verb_teleport_position, verb_hide, verb_hyperspace_in, verb_selectable, verb_cancel_hyperspace}) {
+        for (const std::string_view verb : {verb_move, verb_face, verb_suspend_locomotor, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_tactical_superweapon, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all, verb_make_invulnerable, verb_take_damage, verb_teleport_and_face, verb_prevent_ai_usage, verb_prevent_all_fire, verb_change_owner, verb_create_object, verb_despawn, verb_teleport_position, verb_hide, verb_hyperspace_in, verb_selectable, verb_cancel_hyperspace}) {
             if (auto added = session.register_verb(verb, translate_order); !added) return added;
         }
         if (auto added = session.register_presentation_verb(verb_letter_box); !added) return added;
+        if (auto added = session.register_presentation_verb(verb_hide_sub_object); !added) return added;
+        if (auto added = session.register_presentation_verb(verb_hide_sound); !added) return added;
         for (const std::string_view verb : {authoritative::verb_story_camera, authoritative::verb_story_fade, authoritative::verb_story_environment})
             if (auto added = session.register_presentation_verb(verb); !added) return added;
         if (host->setup.perception.campaign_game && host->setup.campaign_can_retreat && host->setup.campaign_retreat_order) {

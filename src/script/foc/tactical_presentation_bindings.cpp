@@ -15,6 +15,9 @@ namespace tactical_ai_detail {
 
 namespace math = sim::math;
 using authoritative::Binding;
+using authoritative::BindingContext;
+using authoritative::ValueList;
+using numeric::LuaNumber;
 using authoritative::Value;
 
 using namespace detail;
@@ -25,6 +28,37 @@ void register_tactical_presentation(authoritative::ScriptScheduler& scripts, con
     const auto add = [&](std::string_view name, Binding binding) {
         if (auto added = scripts.register_binding(name, std::move(binding)); !added) errors.push_back(added.error());
     };
+    // The global shares the member's root hide flag. Lua booleans are accepted as a documented superset of numbers.
+    add("Hide_Object", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (host->ai_world && host->ai_world->goal_mode() == "GALACTIC") return fail("Hide_Object: Command only valid in a tactical game.");
+        if (arguments.size() < 2) return fail("Hide_Object expects an object and a float.");
+        if (as_handle(arguments[0], handle_game_object) == nullptr)
+            return fail("Hide_Object: Expected game object parameter.");
+        const ViewUnit* unit = live_object(*host, arguments[0]);
+        if (unit == nullptr) return none();
+        bool hidden = true;
+        if (const auto* value = std::get_if<LuaNumber>(&arguments[1].data)) hidden = *value > LuaNumber(0);
+        else if (const auto* flag = std::get_if<bool>(&arguments[1].data)) hidden = *flag;
+        else context.report(authoritative::codes::script_error, "Hide_Object: invalid parameter 2, expected a float.");
+        context.issue_command(std::string(verb_hide_sound), {arguments[0], boolean(hidden)});
+        context.issue_command(std::string(verb_hide), {number(LuaNumber(static_cast<std::int64_t>(unit->owner))), arguments[0], boolean(hidden)});
+        return none();
+    });
+    // Sub-object hides are transient presentation commands; they are not part of a checkpoint or canonical state.
+    add("Hide_Sub_Object", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (host->ai_world && host->ai_world->goal_mode() == "GALACTIC") return fail("Hide_Sub_Object: Command only valid in a tactical game.");
+        if (arguments.size() < 3) return fail("Hide_Sub_Object expects an object, a float and a name.");
+        if (as_handle(arguments[0], handle_game_object) == nullptr) return fail("Hide_Sub_Object: Expected game object parameter.");
+        const auto* name = as_text(arguments[2]);
+        if (!name) return fail("Hide_Sub_Object: Expected string parameter 3.");
+        bool hidden = true;
+        if (const auto* value = std::get_if<LuaNumber>(&arguments[1].data)) hidden = *value > LuaNumber(0);
+        else if (const auto* flag = std::get_if<bool>(&arguments[1].data)) hidden = *flag;
+        else context.report(authoritative::codes::script_error, "Hide_Sub_Object: invalid parameter 2, expected a float.");
+        if (live_object(*host, arguments[0]) != nullptr)
+            context.issue_command(std::string(verb_hide_sub_object), {arguments[0], boolean(hidden), Value::text(*name)});
+        return none();
+    });
     // TSC-01..TSC-14: presentation requests of three verbs (authoritative/story_presentation.hpp); they never reach the world, the
     // replay, a save or a hash.
     struct PositionReader final : authoritative::StoryPositionReader {

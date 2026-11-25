@@ -92,12 +92,15 @@ var previous = 0
 var frame = 0
 var rows = PackedStringArray(["frame,wall_frame_ms,process_ms,render_cpu_ms,render_gpu_ms,draw_calls,engine_max_fps,vsync_mode,primitives"])
 var written = false
+var timing = true
 var started = Time.get_ticks_usec()
 func _initialize():
     root.tree_exiting.connect(write_trace)
     for arg in OS.get_cmdline_user_args():
         if arg.begins_with("--bench-output="):
             output = arg.substr(15)
+        if arg == "--bench-no-render-timing":
+            timing = false
         if arg.begins_with("--bench-label="):
             label = arg.substr(14)
     call_deferred("observe")
@@ -105,7 +108,8 @@ func observe():
     var scene = load("res://main.tscn").instantiate()
     root.add_child(scene)
     current_scene = scene
-    RenderingServer.viewport_set_measure_render_time(root.get_viewport_rid(), true)
+    if timing:
+        RenderingServer.viewport_set_measure_render_time(root.get_viewport_rid(), true)
     while true:
         await RenderingServer.frame_post_draw
         var now = Time.get_ticks_usec()
@@ -113,7 +117,7 @@ func observe():
             var first = FileAccess.open(output.path_join(label + ".observer-startup.json"), FileAccess.WRITE)
             first.store_string(JSON.stringify({"first_presented_s": (now - started) / 1000000.0, "backend": {"adapter_name": RenderingServer.get_video_adapter_name()}}))
             first.close()
-        rows.append("%d,%f,%f,%f,%f,%d,%d,%d,%d" % [frame, (now - previous) / 1000.0 if previous else 0, Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, RenderingServer.viewport_get_measured_render_time_cpu(root.get_viewport_rid()), RenderingServer.viewport_get_measured_render_time_gpu(root.get_viewport_rid()), Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME), Engine.max_fps, DisplayServer.window_get_vsync_mode(), Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)])
+        rows.append("%d,%f,%f,%f,%f,%d,%d,%d,%d" % [frame, (now - previous) / 1000.0 if previous else 0, Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, (RenderingServer.viewport_get_measured_render_time_cpu(root.get_viewport_rid()) if timing else 0.0), (RenderingServer.viewport_get_measured_render_time_gpu(root.get_viewport_rid()) if timing else 0.0), Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME), Engine.max_fps, DisplayServer.window_get_vsync_mode(), Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)])
         previous = now
         frame += 1
 func write_trace():
@@ -337,7 +341,8 @@ def select(names: str) -> list[str]:
 
 def write_spec(path: pathlib.Path, scenes: list[str], pacing: str, mod_root: str | None = None,
                raw_mod_root: str | None = None, preparations: dict | None = None, prepare: bool = False,
-               drawtype_ablate: str | None = None, drawtype_repeats: int = 3) -> None:
+               drawtype_ablate: str | None = None, drawtype_repeats: int = 3,
+               arms: dict[str, list[str]] | None = None, arm_repeats: int = 1) -> None:
     if any(REMAKE_CHAIN in SCENES[n]["args"] for n in scenes) and not mod_root:
         raise SystemExit("Remake scenes require --mod-root with the explicit leaf-first chain")
     if any(RAW_CHAIN in SCENES[n]["args"] for n in scenes) and not raw_mod_root:
@@ -408,6 +413,25 @@ def write_spec(path: pathlib.Path, scenes: list[str], pacing: str, mod_root: str
                                         camera="fixed native-spawn midpoint" if recipe else "native initial view"))
         entry.update(driver="perf-sample.ps1", driverArgs=dict(intervalMs=2000, freeFloorGiB=4))
         runs.append(entry)
+    if arms and not prepare:
+        # Same-host A/B arms (#8058): each scene runs once per arm and repeat, the arm order rotating per repeat so no arm
+        # always runs first. An arm is a label and extra viewer arguments (an empty list is the control).
+        labels = list(arms)
+        expanded = []
+        for repeat in range(arm_repeats):
+            ordered = labels[repeat % len(labels):] + labels[:repeat % len(labels)]
+            for entry in runs:
+                for label in ordered:
+                    run = copy.deepcopy(entry)
+                    original = run["name"]
+                    name = f"{original}--{label}--{repeat + 1}"
+                    run["name"] = name
+                    run["args"] = [arg.replace("{out}/" + original, "{out}/" + name)
+                                   .replace("--bench-label=" + original, "--bench-label=" + name) for arg in run["args"]]
+                    run["args"] += [arg.replace("{run}", name) for arg in arms[label]]  # {run}: this run's own name for per-run files
+                    run["benchmark"].update(source_scene=original, arm=label, repeat=repeat + 1)
+                    expanded.append(run)
+        runs = expanded
     if drawtype_ablate and not prepare:
         if drawtype_repeats < 2:
             raise ValueError("draw-type diagnostics require at least two repeats")
@@ -439,6 +463,20 @@ def write_spec(path: pathlib.Path, scenes: list[str], pacing: str, mod_root: str
     observer.mkdir(exist_ok=True)
     (observer / "menu-observer.gd").write_text(MENU_OBSERVER, encoding="utf-8")
     path.write_text(json.dumps(dict(runs=runs, inputs=inputs), indent=2), encoding="utf-8")
+
+
+def parse_arms(specs: list[str]) -> dict[str, list[str]] | None:
+    """--arm LABEL=ARGS (repeatable) -> {label: [args]}; None without any arm."""
+    import shlex
+    arms: dict[str, list[str]] = {}
+    for spec in specs:
+        label, separator, rest = spec.partition("=")
+        if not separator or not label or label in arms or "--" in label:
+            raise SystemExit(f"--arm expects a unique LABEL=ARGS without '--' in the label, got {spec!r}")
+        arms[label] = shlex.split(rest)
+    if len(arms) == 1:
+        raise SystemExit("--arm needs at least two arms to compare")
+    return arms or None
 
 
 def pct(sorted_values: list[float], q: float) -> float | None:
@@ -1257,7 +1295,8 @@ def run(args: argparse.Namespace) -> int:
                 return code or 1
             preparations = load_preparations(directory, live)
     write_spec(spec, scenes, args.pacing, args.mod_root, args.raw_mod_root, preparations=preparations,
-               drawtype_ablate=args.drawtype_ablate, drawtype_repeats=args.drawtype_repeats)
+               drawtype_ablate=args.drawtype_ablate, drawtype_repeats=args.drawtype_repeats,
+               arms=parse_arms(args.arm), arm_repeats=args.arm_repeats)
     if args.from_save is not False:
         if args.save_at is not None:
             raise SystemExit("--from-save and --save-at are separate measurements")
@@ -1301,6 +1340,9 @@ def main() -> int:
                        *(f"{role}-band-{cutoff}" for role in ("hardpoint", "particle", "shadows") for cutoff in ("005", "010", "020"))),
                        help="matched diagnostic controls and category ablations (same timing instrumentation)")
     p_run.add_argument("--drawtype-repeats", type=int, default=3)
+    p_run.add_argument("--arm", action="append", default=[], metavar="LABEL=ARGS",
+                       help="same-host A/B arm: label and extra viewer arguments (LABEL= is the control); repeatable")
+    p_run.add_argument("--arm-repeats", type=int, default=3, help="runs per arm, arm order rotating (default 3)")
     p_run.add_argument("--save-at", type=int, help="measure from a battle save written after this tick (1 and 8 workers)")
     p_run.add_argument("--save-load-ticks", type=int, default=600, help="ticks both runs play after --save-at")
     p_run.add_argument("--from-save", nargs="?", type=int, const=None, default=False,

@@ -161,6 +161,7 @@ enum class OrderKind : std::uint8_t {
     script_hide = 38, // Lua Hide(flag): replay opcode 45, no unit order.
     script_hyperspace_in = 40, // Lua Cinematic_Hyperspace_In(frames): replay opcode 47, no unit order.
     script_selectable = 41, // Lua Set_Selectable(flag): replay opcode 48, no unit order.
+    script_prevent_ai = 39, // Lua Prevent_AI_Usage(flag): replay opcode 50, no unit order.
     script_cancel_hyperspace = 42, // Lua Cancel_Hyperspace(): replay opcode 46, no unit order.
     script_suspend_locomotor = 43, // Lua Suspend_Locomotor(flag): replay opcode 49, no unit order.
 };
@@ -630,6 +631,12 @@ struct ScriptSelectablePayload {
     friend constexpr bool operator==(const ScriptSelectablePayload&, const ScriptSelectablePayload&) noexcept = default;
 };
 
+// Lua `Prevent_AI_Usage(flag)` (TL-08): true takes each listed unit out of its owner's AI free store, false puts it back.
+struct ScriptPreventAiPayload {
+    bool excluded{};
+    friend constexpr bool operator==(const ScriptPreventAiPayload&, const ScriptPreventAiPayload&) noexcept = default;
+};
+
 // Lua `Cancel_Hyperspace()`: each listed unit that is still in its hyperspace arrival sequence leaves it at once, standing
 // at the arrival's exit point (TL-17). Any other unit is left alone.
 struct ScriptCancelHyperspacePayload {
@@ -639,7 +646,7 @@ struct ScriptCancelHyperspacePayload {
 using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
     AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload, PadBuildPayload,
     CreditGrantPayload, QuitPayload, PadSellPayload, AreaAbilityPayload, ManualTargetPayload, RevealAllPayload,
-    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload, TacticalSuperweaponPayload, ScriptCreateObjectPayload, ScriptTeleportPayload, ScriptHoldFirePayload, ScriptChangeOwnerPayload, ScriptDespawnPayload, ScriptTeleportPositionPayload, ScriptHidePayload, ScriptHyperspaceInPayload, ScriptSelectablePayload, ScriptCancelHyperspacePayload, ScriptSuspendLocomotorPayload>;
+    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload, ScriptInvulnerablePayload, LandGarrisonPayload, LandUnloadPayload, TacticalSuperweaponPayload, ScriptCreateObjectPayload, ScriptTeleportPayload, ScriptHoldFirePayload, ScriptPreventAiPayload, ScriptChangeOwnerPayload, ScriptDespawnPayload, ScriptTeleportPositionPayload, ScriptHidePayload, ScriptHyperspaceInPayload, ScriptSelectablePayload, ScriptCancelHyperspacePayload, ScriptSuspendLocomotorPayload>;
 
 // Whether a command acts on the issuer's economy (#530) rather than on units.
 [[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
@@ -672,6 +679,7 @@ struct PlayerCommand {
     if (std::holds_alternative<ScriptCreateObjectPayload>(payload)) return OrderKind::script_create_object;
     if (std::holds_alternative<ScriptTeleportPayload>(payload)) return OrderKind::script_teleport;
     if (std::holds_alternative<ScriptHoldFirePayload>(payload)) return OrderKind::script_hold_fire;
+    if (std::holds_alternative<ScriptPreventAiPayload>(payload)) return OrderKind::script_prevent_ai;
     if (std::holds_alternative<ScriptSuspendLocomotorPayload>(payload)) return OrderKind::script_suspend_locomotor;
     if (std::holds_alternative<ScriptChangeOwnerPayload>(payload)) return OrderKind::script_change_owner;
     if (std::holds_alternative<ScriptTeleportPositionPayload>(payload)) return OrderKind::script_teleport_position;

@@ -794,6 +794,7 @@ core::Result<void> GameSession::step_child(StepContext& tick_context, const sim:
     out.battle = stepped.value().world.snapshot;
     out.asteroid_impacts = stepped.value().world.asteroid_impacts;
     out.damage_changes = std::move(stepped.value().world.damage_changes);
+    out.battle_presentation = std::move(stepped.value().presentation);
     world_hash = stepped.value().world.state_hash;
     impl.child->world_hash = world_hash;
     impl.child->script_hash = std::move(stepped.value().script_sha256);

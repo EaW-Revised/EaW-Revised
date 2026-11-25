@@ -181,6 +181,11 @@ core::Result<void> parse_commands(
             if (!reader.read_u32(selectable) || !reader.read_u32(selectable_reserved) || selectable > 1 || selectable_reserved != 0)
                 return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-selectable payload" + at, logical_path);
             command.payload = ScriptSelectablePayload{selectable != 0};
+        } else if (opcode == detail::opcode_script_prevent_ai) {
+            std::uint32_t excluded{}, excluded_reserved{};
+            if (!reader.read_u32(excluded) || !reader.read_u32(excluded_reserved) || excluded > 1 || excluded_reserved != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid script-prevent-ai payload" + at, logical_path);
+            command.payload = ScriptPreventAiPayload{excluded != 0};
         } else if (opcode == detail::opcode_script_cancel_hyperspace) {
             std::uint32_t first{}, second{};
             if (!reader.read_u32(first) || !reader.read_u32(second) || first != 0 || second != 0)

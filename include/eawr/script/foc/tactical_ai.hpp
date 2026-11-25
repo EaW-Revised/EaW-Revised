@@ -75,9 +75,12 @@ inline constexpr std::string_view verb_despawn = "foc.despawn"; // issuer, unit 
 inline constexpr std::string_view verb_teleport_and_face = "foc.teleport_and_face"; // issuer, unit, target unit
 inline constexpr std::string_view verb_teleport_position = "foc.teleport_position"; // issuer, unit, x, y, z (Lua Teleport)
 inline constexpr std::string_view verb_hide = "foc.hide"; // issuer, unit, hidden
+inline constexpr std::string_view verb_hide_sub_object = "foc.hide_sub_object"; // object, hidden, mesh name; presentation only
+inline constexpr std::string_view verb_hide_sound = "foc.hide_sound"; // object, hidden; presentation only
 inline constexpr std::string_view verb_hyperspace_in = "foc.hyperspace_in"; // issuer, unit, frames (Lua Cinematic_Hyperspace_In)
 inline constexpr std::string_view verb_cancel_hyperspace = "foc.cancel_hyperspace"; // issuer, unit, zero placeholder (Lua Cancel_Hyperspace)
 inline constexpr std::string_view verb_selectable = "foc.selectable"; // issuer, unit, selectable (Lua Set_Selectable)
+inline constexpr std::string_view verb_prevent_ai_usage = "foc.prevent_ai_usage"; // issuer, unit, excluded (Lua Prevent_AI_Usage)
 inline constexpr std::string_view verb_prevent_all_fire = "foc.prevent_all_fire"; // issuer, unit, enabled
 inline constexpr std::string_view verb_change_owner = "foc.change_owner"; // issuer, unit, new owner player
 inline constexpr std::string_view verb_take_damage = "foc.take_damage"; // issuer, unit, amount[, HardPoints index] (HD-30)
@@ -105,6 +108,8 @@ struct AiType {
     bool decoration{};
     std::string lua_script; // SOS-01: resolved object attachment; independent of type metadata
     // L-32: scaled collidable model bounds, for the wrapper's box query.
+    // Get_Bone_Position: the model's skeleton bones (rest pose) in the unit's frame (scaled and turned), skeleton order.
+    std::vector<std::pair<std::string, sim::math::Vec3>> bones;
     std::optional<std::array<sim::math::Vec3, 2>> proximity_bounds;
     std::uint64_t category_bits{};    // CategoryMask in GameObjectCategoryType bits
     std::uint64_t property_bits{};    // Property_Flags in GameObjectPropertiesType bits

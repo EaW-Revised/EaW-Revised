@@ -841,8 +841,20 @@ hashes (each is a faster way to the same result, or work moved off the critical 
 "causing RenderingServer synchronizations on every frame": a Separate trace taken with them records the stall, not the
 thread model (PF engine-2: frame_ms 133 ms against 4.5 ms in Safe on the same run). Add `--eawr-perf-no-render-timing` to
 `--eawr-perf-trace` to skip both queries and to never request the root viewport's measurement; the two columns stay in the header and
-are empty (not measured). This is the only place in the viewer that calls those two queries. Without the flag the trace is
-unchanged.
+are empty (not measured). This is the only place in the viewer that calls those two queries from the main thread. Without the
+flag the trace is unchanged.
+
+### Frame side diagnostics without the sync (`--eawr-frame-diag`) (legacy EAWR-8058)
+
+`--eawr-frame-diag` records the frame's own cost without the per-frame render-thread synchronization: two clock reads on the
+main thread, and one callback queued with `RenderingServer::call_on_render_thread` that reads the root viewport's measured
+render CPU and GPU time ON the render thread and pushes them into a ring. The CPU measurement is joined to the previous draw by engine frame number. The GPU getter does not identify the source frame, so GPU measurements remain unassociated with individual frames; the report records their mean, maximum, sample count and repeated-value count, and marks the join unverified. Equal consecutive values do not prove a repeated frame. The map report gains a `frame_diag` object (frames,
+matched, stale frames, session-lock wait of `frame()` / `tick_costs_after()` and the other accessors, pipeline compilations, own
+cost). `--eawr-frame-diag-csv <path>` also writes the joined frames at the end of the run (and `<path>.render.csv`, the raw
+render samples); `--eawr-frame-diag-calibrate` additionally reads the old main-thread getters per frame (this stalls the render
+thread: this compares getters but does not establish GPU lag). Off (the default) is one bool test per frame. A same-host A/B over `--arm` of
+`tools/performance/remake_bench.py` (`--arm off= --arm on=--eawr-frame-diag`, table by `tools/performance/frame_ab_table.py`)
+compares frame time with and without.
 
 ### Particle registry fine timings (legacy EAWR-3193)
 

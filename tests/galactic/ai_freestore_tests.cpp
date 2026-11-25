@@ -5,6 +5,7 @@
 #include "galactic_support.hpp"
 #include "galactic_ai_actions.hpp"
 #include "galactic_ai_freestore.hpp"
+#include "galactic_ai_reader.hpp"
 #include "galactic_ai_estimates.hpp"
 #include "host.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -544,6 +545,17 @@ void automatic_landing(eawr::platform::ThreadWorkerAdapter& executor, std::strin
         && refused.snapshot()->fleet_control()->detached_units.front().member.id == 20
         && refused.snapshot()->events().back().kind == gc::GalacticEventKind::formation_land,
         "WGA-413 refused surface link emits land and preserves prior removal without rollback");
+    {
+        // #8439: the unit left in orbit outside any fleet is a live object of its owner and the free store serves it, so the
+        // AI roster carries it; Get_Type, the stage estimate and free-store selection all read that roster.
+        std::vector<ai::ReaderPlanet> planets;
+        for (const auto& planet : refused.snapshot()->planets()) planets.push_back({planet.id, planet.owner, planet.position, 0, nullptr});
+        const auto roster = ai::build_structural_index(planets, *refused.snapshot());
+        const auto* detached = roster.find(20);
+        expect(detached && detached->type == 2 && detached->owner == 1 && detached->planet == 1
+            && detached->container == gc::IntelligenceContainer::orbit && !roster.arriving(20),
+            "an orbit-detached unit is in the AI roster with its type, owner and planet");
+    }
     done(refused.adjust_conflict_pause(true));
     expect(!take(refused.land_native_transport(1, 20, 1)).event.admitted, "direct land event independently refuses management pause");
     auto deletion = full; deletion.census->objects.back().delete_pending = true;

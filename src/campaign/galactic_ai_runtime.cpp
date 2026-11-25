@@ -2549,6 +2549,11 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
         for (const auto& [path, bytes] : input.modules) if (auto added = manifest.add(path, bytes); !added) return Result::failure(added.error());
         auth::SessionConfig config; config.seed = input.perception.seed; config.galactic_clock = true;
         config.tick_duration = {1, ga::gc::galactic_frames_per_second}; config.script_directories = {"Data/Scripts/Library/", "Data/Scripts/FreeStore/"};
+        // An uncaught Lua error ends only the failing call or thread and rolls back its output; the player's AI and its other
+        // scripts keep running. A plan left without a live thread ends at its next pump (PL-42), so a plan whose script fails
+        // ends as in the original, and a free-store callback that fails costs that one call. Budget and quota faults still
+        // retire the instance. Host policy, identical on every peer, not saved.
+        config.retire_on_lua_error = false;
         auto scripts = auth::ScriptScheduler::create(config, std::move(manifest)); if (!scripts) return Result::failure(scripts.error());
         std::vector<core::Diagnostic> diagnostics;
         foc::tactical_ai_detail::register_globals(scripts.value(), runtime->host, diagnostics, true, false);

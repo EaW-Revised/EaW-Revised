@@ -31,6 +31,7 @@ inline ViewUnit build_view_row(const tactical::UnitState& unit, const tactical::
         entry.visible_to = instance->visible_to;
         entry.abilities = instance->abilities;
         entry.planetary_weapon = instance->planetary_weapon;
+        entry.ai_excluded = instance->script_ai_excluded;
         if (const auto& durability = instance->durability) {
             entry.hull = durability->hull;
             entry.max_hull = durability->max_hull;

@@ -116,13 +116,14 @@ An explicit `--eawr-render-profile` still wins at start-up.
   and an explicit render profile apply before the first mode starts, and the file's volumes and
   tactical speed are kept for the battle. A capture, report or test run never reads the file, so
   evidence runs do not depend on the machine.
-- **Where the window opens.** A windowed player's view (also without a settings file) is centred on the
-  launcher's current screen, passed as the transient `--eawr-launcher-screen <index>` hint. An absent,
-  malformed or disconnected index falls back to the game's current screen. Its whole frame stays inside
-  that screen's usable area (`ui::place_window`); a size
-  larger than the usable area shrinks to it. The window is never pinned to the corner it was created in
-  or to the launcher's corner. A size change from the options page keeps the position and only pulls the
-  window back onto the screen when it would hang off it. Capture and test runs keep their pinned geometry.
+- **Where the window opens.** A windowed or full-screen player's view opens on the monitor it last used, at
+  the position it last had (full screen keeps the monitor and the windowed position it had there; a minimized window keeps the earlier place). That place is the game's own: `eawr-window.cfg`,
+  beside the settings file, written when the viewer exits and read only by the viewer (the launcher's window and a
+  launcher hint play no part; the launcher keeps its own place and reads only which monitor this file names, to stay off it). The monitor is
+  found by its rectangle; a missing file, a damaged one or a monitor that is gone centres the window on the current
+  monitor. The whole frame stays inside that monitor's usable area (`ui::place_window`); a size larger than the usable
+  area shrinks to it. A size change from the options page keeps the position and only pulls the window back onto the
+  screen when it would hang off it. Capture and test runs keep their pinned geometry and never write the file.
 - **Audio buses.** One layout per run, made at the viewer's start and shared by the front
   end and BattleAudio (`apps/viewer/src/audio_buses.hpp`): `EAWR_SFX`, `EAWR_Voice`, `EAWR_Music`
   and `EAWR_Mix`, which feeds Master. A player sees: the master slider is the Mix bus, so it

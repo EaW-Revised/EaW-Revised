@@ -2594,24 +2594,24 @@ void d8_campaign_switch() {
         expect(shared && shared->slots[0] == shared->slots[1] && shared->slots[1] == shared->slots[2], "a co-op campaign seats everyone on the host's row");
     }
     {
-        // A room with guests waits for its seats: a multiplayer campaign with fewer playable factions could never start, so the switch is
-        // refused with the reason; a campaign with enough rows, a co-op one, and a room with only the host are not.
-        Local three(make_wide_data(3, 1)), two(make_wide_data(2, 1));
-        const auto stock = three.catalog();
-        const auto small = two.catalog();
-        const auto fresh = require(net::default_galactic_lobby_options(stock.front(), difficulty, match_seed));
-        auto room = snapshot_of(fresh, {seat_of(0, 1, fresh, 1, "host"), seat_of(1, 2, fresh, 1, "g1"), seat_of(2, 3, fresh, 1, "g2")});
-        room.capacity = 3;
-        const auto refusal = net::galactic_lobby_switch_refusal(small.front(), room);
-        expect(refusal.has_value() && refusal->find("3 players") != std::string::npos && refusal->find("only 2 factions") != std::string::npos,
-            "a room for three players refuses a campaign with two factions, naming both numbers");
-        expect(!net::galactic_lobby_switch_refusal(stock.front(), room).has_value(), "a campaign with a faction for every seat is fine");
-        auto coop = small.front();
-        coop.single_player_rules = true;
-        expect(!net::galactic_lobby_switch_refusal(coop, room).has_value(), "a co-op campaign seats everyone on one side");
-        auto alone = room;
-        alone.seats.resize(1);
-        expect(!net::galactic_lobby_switch_refusal(small.front(), alone).has_value(), "a room with only the host is opened again instead");
+        // A campaign with fewer playable factions than seated players (#8130: the switch is no longer refused): the host and the first guest
+        // take the two rows, the others share a planned row; nobody is left without one.
+        Local small(make_wide_data(2, 1));
+        const auto catalog = small.catalog();
+        const auto& campaign = catalog.front();
+        const auto fresh = require(net::default_galactic_lobby_options(campaign, difficulty, match_seed));
+        std::vector<net::LobbySeat> seats{seat_of(0, 1, fresh, 1, "host")};
+        for (std::uint32_t peer = 1; peer <= 3; ++peer) seats.push_back(seat_of(peer, peer + 1, fresh, 1, "g" + std::to_string(peer)));
+        const auto room = snapshot_of(fresh, std::move(seats));
+        const auto switched = net::galactic_lobby_reseat(fresh, campaign, room, 9);
+        expect(switched.has_value() && switched->slots.size() == 4, "four players on a two faction campaign are all placed");
+        if (switched) {
+            std::size_t humans{};
+            for (const auto& row : switched->options.rows) humans += row.human ? 1U : 0U;
+            expect(humans == 2 && switched->slots[0] == 1U && switched->slots[1] == 2U
+                    && switched->slots[2] >= 1U && switched->slots[2] <= 2U && switched->slots[3] >= 1U && switched->slots[3] <= 2U,
+                "two planned rows, the host and the first guest on their own, the rest share one");
+        }
     }
     {
         // Eight playable factions on a four row dialog: three rows of their own, then shared rows; nobody on a hidden row.
@@ -2647,22 +2647,18 @@ void d8_dialog_row_limit() {
         Local few(make_wide_data(3, 0));
         expect(net::galactic_lobby_human_row_limit(few.catalog().front(), 3) == 3 && net::galactic_lobby_human_row_limit(few.catalog().front(), 4) == 4,
             "three drawn factions on a three row dialog: no row is cut, so no line is kept");
-        // The room opens for two humans by default whatever the campaign: it waits for every seat it opens with, so two players can
-        // start a multi-faction campaign (#8130 lifts this). The dropdown still offers up to the playable factions.
-        expect(net::galactic_lobby_default_humans(few.catalog().front(), 9) == 2, "three playable factions: a room for two humans");
-        expect(net::galactic_lobby_default_humans(campaign, 9) == 2, "eight playable factions: still a room for two humans");
-        expect(net::galactic_lobby_default_humans(campaign, 5) == 2, "the transport's seats never lower the default below two");
+        // #8130: a room opens with a seat for every playable row (the room's capacity) and starts with the humans present.
         Local one(make_wide_data(1, 2));
-        expect(net::galactic_lobby_default_humans(one.catalog().front(), 9) == 2, "a room is for at least two humans");
+        expect(net::galactic_lobby_max_humans(one.catalog().front(), 9) == 2, "a room is for at least two humans");
         expect(net::galactic_lobby_max_humans(campaign, 9) == 8 && net::galactic_lobby_max_humans(few.catalog().front(), 9) == 3,
-            "the dropdown offers no more humans than the playable factions, never above eight: no room for nine");
+            "a room holds no more humans than the playable factions, never above eight: no room for nine");
+        expect(net::galactic_lobby_max_humans(campaign, 5) == 5, "the transport's seats bound the capacity");
         Local many(make_wide_data(8, 1));
         expect(net::galactic_lobby_max_humans(many.catalog().front(), 12) == 8, "a nine seat map still offers eight at most");
-        // A co-op campaign (one side, co-op seats) keeps two as its default, the seat ceiling as its most.
+        // A co-op campaign (one side, co-op seats) opens with the seat ceiling: all the humans on one side.
         auto coop = few.catalog().front();
         coop.single_player_rules = true;
-        expect(net::galactic_lobby_default_humans(coop, 9) == 2 && net::galactic_lobby_max_humans(coop, 9) == 8,
-            "a co-op campaign opens for two humans, all on one side");
+        expect(net::galactic_lobby_max_humans(coop, 9) == 8, "a co-op campaign opens for eight humans, all on one side");
     }
     // A four row mod dialog on the eight faction campaign, five humans: the room seats the first three on rows of their own; every other
     // joiner shares one of those rows (a co-op seat, drawn), and a claim of a row past the limit is refused with the dialog named.
@@ -4149,7 +4145,7 @@ void viewer_many_seat_launch(std::size_t count, bool lose_during_load = false, b
     const bool sparse_room = room_seats > count;
     for (unsigned i = 1; i <= (sparse_room ? room_seats : count); ++i) owners.push_back(i);
     for (std::size_t i = 0; i < count; ++i) {
-        locals.push_back(claims ? std::make_shared<Local>(make_wide_data(3, 1)) : std::make_shared<Local>());
+        locals.push_back(claims ? std::make_shared<Local>(make_wide_data(sparse_room ? room_seats : 3, 1)) : std::make_shared<Local>());
         auto match = viewer::make_lan_match();
         match->configure_seats(owners);
         if (sparse_room) match->configure_staging_capacity(true);
@@ -4920,6 +4916,7 @@ int main(int argc, char** argv) {
         viewer_many_seat_launch(3, false, true);
         viewer_many_seat_launch(3, false, false, true);
         viewer_many_seat_launch(2, false, true, false, 3); // #8130 T2: a room for three starts with the two humans present
+        viewer_many_seat_launch(3, false, true, false, 8); // #8130 T1: three humans claim rows of a room with a seat for every row of an eight faction campaign
         viewer_many_seat_launch(4, false, false, true);
         installed_observer_agreement();
         viewer::shutdown_lan_drains();

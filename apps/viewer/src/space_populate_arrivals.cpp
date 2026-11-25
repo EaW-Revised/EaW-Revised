@@ -178,6 +178,7 @@ struct SpacePopulation::ComposeBatch final {
         bool colorizable{};
         std::string diagnostic_model{};
         render_categories::HullPart diagnostic_part{render_categories::HullPart::unclassified};
+        std::optional<std::uint32_t> model_mesh{};
     };
     std::vector<Piece> pieces;
     // Keyed by model path, mesh and submesh: a model shared by placements or
@@ -192,6 +193,7 @@ void SpacePopulation::prepare_compose_slots(bool appending) {
     if (!appending) {
         bind_players_.clear();
         live_decisions_.clear(); hull_surface_assets_.clear(); live_models_.clear(); live_shown_.clear();
+        model_mesh_names_.clear(); live_mesh_names_.clear(); live_script_hidden_meshes_.clear();
         live_defend_.clear(); live_stealth_.clear(); live_blast_charging_.clear(); live_blast_charged_.clear();
         live_clips_.clear(); land_clips_.clear(); land_idle_.clear(); land_clip_bindings_.clear(); turret_bindings_.clear(); live_alternate_clips_.clear(); live_retired_.clear();
         hardpoint_turret_bindings_.clear();
@@ -204,6 +206,8 @@ void SpacePopulation::prepare_compose_slots(bool appending) {
     live_decisions_.resize(options_.placed_ships.size(), std::nullopt);
     hull_surface_assets_.resize(options_.placed_ships.size(), {});
     live_models_.resize(options_.placed_ships.size(), std::nullopt);
+    live_mesh_names_.resize(options_.placed_ships.size());
+    live_script_hidden_meshes_.resize(options_.placed_ships.size());
     live_shown_.resize(options_.placed_ships.size(), !appending);
     live_defend_.resize(options_.placed_ships.size(), false);
     live_stealth_.resize(options_.placed_ships.size(), false);
@@ -542,6 +546,17 @@ void SpacePopulation::compose_hull_pieces(ComposeContext& context, ComposeBatch&
     auto& failed_placements = batch.failed_placements;
     auto& diagnostic_turret_roots = plan->diagnostic_turret_roots;
     bool& diagnostic_roots_complete = plan->diagnostic_roots_complete;
+    if (live_ship) {
+        auto& names = model_mesh_names_[placement.model_path];
+        if (!names) {
+            auto made = std::make_shared<std::vector<std::string>>();
+            made->reserve(model->meshes.size());
+            for (const auto& mesh : model->meshes) made->push_back(mesh.name);
+            names = std::move(made);
+        }
+        live_mesh_names_[*live_ship] = names;
+        live_script_hidden_meshes_[*live_ship].clear();
+    }
     if (render_categories::ablation != "off") {
         const auto add_roots = [&](const auto& definition) {
             if (!definition) { diagnostic_roots_complete = false; return; }
@@ -580,6 +595,7 @@ void SpacePopulation::compose_hull_pieces(ComposeContext& context, ComposeBatch&
         if (upload != nullptr) {
             pieces.push_back({upload, placement.transform->matrix, std::nullopt, gate, live_ship,
                               sim::math::identity_matrix()});
+            pieces.back().model_mesh = surface.mesh_index;
             if (render_categories::ablation != "off") {
                 const auto& mesh = model->meshes.at(surface.mesh_index);
                 pieces.back().diagnostic_part = render_categories::hull_part(mesh, mesh.submeshes.at(surface.submesh_index),
@@ -724,6 +740,7 @@ void SpacePopulation::compose_shell_pieces(ComposeContext& context, ComposeBatch
             Piece piece{&*found->second, placement.transform->matrix, std::nullopt, std::nullopt, live_ship,
                         sim::math::identity_matrix()};
             piece.shield = true;
+            piece.model_mesh = *shield;
             pieces.push_back(piece);
         }
     }
@@ -751,6 +768,7 @@ void SpacePopulation::compose_shell_pieces(ComposeContext& context, ComposeBatch
             Piece piece{&*found->second, placement.transform->matrix, std::nullopt, std::nullopt, live_ship,
                         sim::math::identity_matrix()};
             piece.cloak = true;
+            piece.model_mesh = *cloak;
             pieces.push_back(piece);
         }
     }
@@ -1157,7 +1175,7 @@ float SpacePopulation::commit_composed_pieces(ComposeContext& context, ComposeBa
             : render_categories::Role::hull);
         pieces_.push_back({{entity, piece.upload->renderer_asset, source_to_render(piece.source)}, piece.gate,
                            piece.live, piece.local, piece.shield, piece.alternate, piece.cloak, piece.cloak_hidden,
-                           piece.blast_charged, piece.colour, piece.colorizable});
+                           piece.blast_charged, piece.colour, piece.colorizable, piece.model_mesh});
         if (piece.live && !piece.shield && !piece.cloak && !piece.gate
             && (!piece.alternate || *piece.alternate == 0))
             hull_surface_assets_[*piece.live].push_back(piece.upload->renderer_asset);
@@ -1715,6 +1733,7 @@ GodotRenderer::ProxyResult SpacePopulation::append_model_proxies(GodotRenderer& 
             live_decisions_[ship] = first_decision + offset;
             hull_surface_assets_[ship] = hull_surface_assets_[recipe_ship];
             live_models_[ship] = live_models_[recipe_ship];
+            live_mesh_names_[ship] = live_mesh_names_[recipe_ship];
             // Retirement clears a ship's clip indices. Give each copy its own
             // shared owner so retiring one never clears a sibling's animation.
             const auto copy_clip = [&](const auto index) -> std::optional<std::size_t> {

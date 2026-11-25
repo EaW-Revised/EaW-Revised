@@ -450,6 +450,12 @@
     "constant": "opcode_script_suspend_locomotor",
     "name": "script suspend locomotor",
     "documented": true
+   },
+   {
+    "value": 50,
+    "constant": "opcode_script_prevent_ai",
+    "name": "script prevent AI usage",
+    "documented": true
    }
   ]
  },

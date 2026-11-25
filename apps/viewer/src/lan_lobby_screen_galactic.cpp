@@ -142,10 +142,9 @@ bool EawrLanLobby::prefetch_galactic_content(const bool needs_mod_digests) {
 // A fresh host does not wait for the mod content digests, Load Game does (galactic_press_gate).
 void EawrLanLobby::finish_pending_galactic() {
     Impl& impl = *impl_;
-    // The host options page shows the number of humans the room opens for: once the campaign list is known, it is the default (two)
-    // unless the host chose another number.
-    if (page_ == Page::host_options && impl.host_options.game_type == galactic_game_type && !impl.galactic_humans_chosen
-        && !impl.galactic_humans_defaulted && impl.galactic_backend && impl.galactic_backend->content_ready()) fill_host_seats();
+    // Once the campaign list is known, the room's seats follow the campaign's playable rows.
+    if (page_ == Page::host_options && impl.host_options.game_type == galactic_game_type && !impl.galactic_capacity_fitted
+        && impl.galactic_backend && impl.galactic_backend->content_ready()) fill_host_seats();
     if (!impl.host_pending && !impl.load_pending) { impl.load_digest_wait.reset(); impl.pending_text.clear(); impl.content_wait_since.reset(); return; }
     // A prefetch thread that could not start is retried here; the buttons never wait on a load nobody runs.
     const bool host_ready = !impl.host_pending || prefetch_galactic_content(false);
@@ -852,9 +851,9 @@ bool EawrLanLobby::galactic_item_selected(const int64_t index, const std::string
             auto fresh = net::default_galactic_lobby_options(campaign, impl.galactic_options->difficulty, impl.galactic_options->seed,
                 impl.galactic_options->input_delay);
             if (!fresh) { note_chat(model::ChatKind::error, fresh.error().message); break; }
-            // The room's seats follow the campaign (a host pick stays while the campaign can start with it). Nobody else is in the room:
-            // it is opened again with the new number (its connections are fixed when it opens). With guests seated the number stays, and
-            // the host is told when the campaign has more player factions than the room has seats.
+            // The room's seats follow the campaign's playable rows. Nobody else is in the room: it is opened again with the new number
+            // (its connections are fixed when it opens). With guests seated the number stays, and the host is told when the campaign has
+            // more player factions than the room has seats.
             const auto wanted = galactic_wanted_humans(campaign);
             const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
             if (wanted != impl.human_owners.size() && room->snapshot.seats.size() == 1 && !online) {

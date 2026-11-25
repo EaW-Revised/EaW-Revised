@@ -173,6 +173,7 @@ struct SpacePopulation {
         std::span<const std::size_t> clips(std::size_t ship) const { return clips_[ship]; }
     } piece_index_;
     std::vector<bool> live_retired_, live_death_clone_, live_shown_;
+    std::vector<std::set<std::uint32_t>> live_script_hidden_meshes_;
     std::vector<std::optional<int>> live_transforms_;
     std::vector<std::optional<std::size_t>> live_clips_, live_alternate_clips_;
     std::vector<std::shared_ptr<const animation::Player>> clips_;

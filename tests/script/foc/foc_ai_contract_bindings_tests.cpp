@@ -520,6 +520,13 @@ void freestore_unit_service() {
     expect(!engine.unit_service(units[6], 2), "FH-11/AI-08: a unit the running plan's goal reserved gets none");
     expect(!engine.unit_service(units[4], 2), "FH-11: a unit a TaskForce holds gets none");
     expect(!engine.unit_service(units[0], 1), "FH-13: another player's unit gets none");
+    {
+        // TL-08: a unit under Prevent_AI_Usage(true) is outside the freestore, so no selection path offers it.
+        auto excluded = units[0];
+        excluded.ai_excluded = true;
+        expect(engine.in_freestore(units[0], 2) && !engine.in_freestore(excluded, 2) && !engine.unit_service(excluded, 2),
+            "TL-08: an AI-excluded unit leaves the freestore and gets no unit service");
+    }
     // WTA-02 (#783): the service tests run with the player's execution service.
     player.next_execution = 33;
     expect(!engine.execution_due(2, 31) && !engine.execution_due(2, 32) && engine.execution_due(2, 33),
@@ -3706,19 +3713,39 @@ void ai_difficulty_levels() {
 // TL-04..TL-08: the battle-only object methods validate like the original; the effects the battle has no state for are
 // accepted with an unsupported_api note, and a galactic scheduler gets none of them.
 void battle_object_bindings() {
+    namespace math = eawr::sim::math;
     World world;
     foc::AiType capture; capture.type_id = 2; capture.name = "CAPTURE"; capture.capture_point = true;
     foc::AiType spawner; spawner.type_id = 3; spawner.name = "SPAWNER"; spawner.spawns_squadrons = true;
     world.host->setup.content.types.push_back(capture);
     world.host->setup.content.types.push_back(spawner);
+    foc::AiType boned; boned.type_id = 4; boned.name = "BONED";
+    boned.bones = {{"Root", {}}, {"MuzzleA_00", {math::Fixed::from_integer(100).value(), {}, {}}}};
+    world.host->setup.content.types.push_back(boned);
     world.host->types.clear(); world.host->types_by_name.clear();
     for (const auto& type : world.host->setup.content.types) {
         world.host->types.emplace(type.type_id, &type); world.host->types_by_name.emplace(type.name, &type);
     }
     auto extra = world.view->units.front(); extra.id = 11; extra.type = 2; world.view->units.push_back(extra);
     extra.id = 12; extra.type = 3; world.view->units.push_back(extra);
+    // Unit 13 has a skeleton: a quarter turn about Z puts the unit-frame +X bone on the world +Y side of its position.
+    extra.id = 13; extra.type = 4;
+    extra.position = {math::Fixed::from_integer(10).value(), math::Fixed::from_integer(20).value(), math::Fixed::from_integer(30).value()};
+    extra.rotation = {{}, {}, math::Fixed::from_raw(math::Fixed::scale * 70710678 / 100000000), math::Fixed::from_raw(math::Fixed::scale * 70710678 / 100000000)};
+    world.view->units.push_back(extra);
     auth::ModuleManifest manifest;
     expect(manifest.add("BATTLE.LUA", R"LUA(
+        function Bone(boned)
+            bone_a = boned.Get_Bone_Position('muzzlea_00')
+            bone_root = boned.Get_Bone_Position('ROOT')
+            done = true
+        end
+        function BoneMissing(boned) boned.Get_Bone_Position('nope') end
+        function BoneNoModel(ship) ship.Get_Bone_Position('root') end
+        function BoneNone(boned) boned.Get_Bone_Position() end
+        function BoneType(boned) boned.Get_Bone_Position(3) end
+        function BoneTwo(boned) boned.Get_Bone_Position('root', 'x') end
+        function BoneDead(dead) bone_dead = dead.Get_Bone_Position('root') == nil end
         function Valid(ship, cap, spawn)
             sfx_one = ship.Play_SFX_Event('Some_Event') == nil
             sfx_two = ship.Play_SFX_Event('Some_Event', 2.5) == nil
@@ -3761,7 +3788,7 @@ void battle_object_bindings() {
     const auto cap = auth::Value{auth::Handle{foc::handle_game_object, 11}};
     const auto spawn = auth::Value{auth::Handle{foc::handle_game_object, 12}};
     const auto dead = auth::Value{auth::Handle{foc::handle_game_object, 9999}};
-    struct Outcome { std::uint64_t instance{}; std::vector<auth::ScriptDiagnostic> diagnostics; };
+    struct Outcome { std::uint64_t instance{}; std::vector<auth::ScriptDiagnostic> diagnostics; std::vector<std::string> verbs; };
     const auto call = [&](const char* name, auth::ValueList arguments) {
         Outcome outcome; outcome.instance = next_instance++;
         expect(scripts.value().create_instance(outcome.instance, "BATTLE.LUA").has_value(), "TL-04: call instance");
@@ -3770,8 +3797,10 @@ void battle_object_bindings() {
         event.target = outcome.instance; event.kind = auth::ScriptEvent::Kind::call; event.name = name;
         event.arguments = std::move(arguments);
         expect(scripts.value().submit_event(std::move(event)).has_value(), "TL-04: call queues");
-        if (auto report = scripts.value().service(executor)) outcome.diagnostics = report.value().diagnostics;
-        else expect(false, "TL-04: the call is serviced");
+        if (auto report = scripts.value().service(executor)) {
+            outcome.diagnostics = report.value().diagnostics;
+            for (const auto& command : report.value().commands) outcome.verbs.push_back(command.verb);
+        } else expect(false, "TL-04: the call is serviced");
         return outcome;
     };
     const auto flag = [&](const Outcome& outcome, std::string_view name) {
@@ -3809,6 +3838,27 @@ void battle_object_bindings() {
     bad("GarrisonNone", ship, "Set_Garrison_Spawn", "TL-07: a type without the spawner behaviour is a script error");
     bad("GarrisonCount", spawn, "Set_Garrison_Spawn", "TL-07: two arguments are a script error");
     bad("GarrisonType", spawn, "Set_Garrison_Spawn", "TL-07: a non-Boolean flag is a script error");
+    {
+        const auto boned = auth::Value{auth::Handle{foc::handle_game_object, 13}};
+        const auto found = call("Bone", {boned});
+        expect(found.diagnostics.empty(), "TL-19: a found bone raises no diagnostic");
+        const auto read = [&](std::string_view name) -> std::optional<math::Vec3> {
+            const auto value = scripts.value().read_global(found.instance, name);
+            const auto* wrapper = value && value.value() ? std::get_if<auth::Handle>(&value.value()->data) : nullptr;
+            return wrapper ? foc::detail::position_of_handle(*wrapper) : std::nullopt;
+        };
+        const auto close_to = [](math::Fixed value, std::int64_t expected) {
+            const auto delta = value.raw() - math::Fixed::from_integer(expected).value().raw();
+            return delta > -math::Fixed::scale / 10 && delta < math::Fixed::scale / 10;
+        };
+        const auto muzzle = read("bone_a"), root = read("bone_root");
+        expect(muzzle && close_to(muzzle->x, 10) && close_to(muzzle->y, 120) && close_to(muzzle->z, 30),
+            "TL-19: the bone's rest point turns with the object's facing and moves with its position; the name matches without case");
+        expect(root && close_to(root->x, 10) && close_to(root->y, 20) && close_to(root->z, 30), "TL-19: the root bone is the object's origin");
+        for (const char* name : {"BoneMissing", "BoneNoModel", "BoneNone", "BoneType", "BoneTwo"})
+            bad(name, name == std::string("BoneNoModel") ? ship : boned, "Get_Bone_Position", "TL-19: a bad name, no model or wrong arguments is a script error");
+        expect(flag(call("BoneDead", {dead}), "bone_dead"), "TL-19: a dead object answers nothing");
+    }
     const auto prevent_ok = call("PreventOk", {ship});
     expect(names(prevent_ok, "Prevent_AI_Usage", auth::codes::script_warning) && flag(prevent_ok, "prevent_nil"),
         "TL-08: an owner without an AI player gets the original's warning and the call continues");
@@ -3818,8 +3868,10 @@ void battle_object_bindings() {
     ai::EngineContractAccess::proposal_fixture(engine);
     world.host->engine = &engine;
     if (engine.runs_player(world.view->units.front().owner)) {
-        expect(names(call("PreventOk", {ship}), "Prevent_AI_Usage", auth::codes::unsupported_api),
-            "TL-08: an owner with an AI player is accepted with an unsupported_api note");
+        const auto accepted = call("PreventOk", {ship});
+        expect(accepted.diagnostics.empty() && accepted.verbs == std::vector<std::string>{std::string(foc::verb_prevent_ai_usage)},
+            "TL-08: an owner with an AI player queues one replayed exclusion command and no diagnostic");
+        expect(call("Dead", {dead}).verbs.empty(), "TL-08: a dead object queues nothing");
     }
     // A galactic scheduler gets none of them: registering twice stays quiet only because nothing registers.
     World galactic;
@@ -3874,6 +3926,15 @@ void layering_object_bindings() {
         function TeleportBad(ship) ship.Teleport('nowhere') end
         function HideNone(ship) ship.Hide() end
         function HideBad(ship) ship.Hide(1) end
+        function GlobalHide(ship) Hide_Object(ship, 1) Hide_Object(ship, -1) end
+        function GlobalHideNone(ship) Hide_Object(ship) end
+        function GlobalHideBad(ship) Hide_Object(ship, 'bad') end
+        function GlobalHideTarget() Hide_Object('ship', true) end
+        function SubHide(ship) Hide_Sub_Object(ship, 1, 'Hull') Hide_Sub_Object(ship, 0, 'Hull') end
+        function SubHideMissing(ship) Hide_Sub_Object(ship, 1) end
+        function SubHideName(ship) Hide_Sub_Object(ship, 1, 2) end
+        function SubHideBadFlag(ship) Hide_Sub_Object(ship, 'bad', 'Hull') end
+        function SubHideBool(ship) Hide_Sub_Object(ship, false, 'Hull', 'ignored') end
         function SelectBad(ship) ship.Set_Selectable('yes') end
         function SelectNone(ship) ship.Set_Selectable() end
         function SelectTwo(ship) ship.Set_Selectable(true, false) end
@@ -3895,6 +3956,7 @@ void layering_object_bindings() {
     std::vector<eawr::core::Diagnostic> errors;
     foc::tactical_ai_detail::register_globals(scripts.value(), world.host, errors);
     foc::tactical_ai_detail::register_methods(scripts.value(), world.host, errors);
+    foc::tactical_ai_detail::register_tactical_presentation(scripts.value(), world.host, errors);
     expect(errors.empty(), "layering: production bindings register");
     // A second object that cannot move.
     foc::AiType rock; rock.type_id = 4; rock.name = "ROCK";
@@ -3917,6 +3979,7 @@ void layering_object_bindings() {
         std::uint64_t instance{};
         std::vector<auth::ScriptDiagnostic> diagnostics;
         std::vector<auth::ScriptCommand> commands;
+        std::vector<auth::ScriptCommand> sounds;
     };
     const auto call = [&](const char* name, auth::ValueList arguments) {
         Outcome outcome; outcome.instance = next_instance++;
@@ -3928,7 +3991,10 @@ void layering_object_bindings() {
         expect(scripts.value().submit_event(std::move(event)).has_value(), "layering: call queues");
         if (auto report = scripts.value().service(executor)) {
             outcome.diagnostics = report.value().diagnostics;
-            outcome.commands = report.value().commands;
+            for (const auto& command : report.value().commands) {
+                if (command.verb == foc::verb_hide_sound) outcome.sounds.push_back(command);
+                else outcome.commands.push_back(command);
+            }
         } else expect(false, "layering: the call is serviced");
         return outcome;
     };
@@ -3966,6 +4032,7 @@ void layering_object_bindings() {
             std::vector<eawr::core::Diagnostic> restore_errors;
             foc::tactical_ai_detail::register_globals(fresh.value(), world.host, restore_errors);
             foc::tactical_ai_detail::register_methods(fresh.value(), world.host, restore_errors);
+            foc::tactical_ai_detail::register_tactical_presentation(fresh.value(), world.host, restore_errors);
             expect(fresh.value().load(bytes.value()).has_value(), "layering: the scheduler restores");
             const auto back = fresh.value().read_global(read.instance, "kept");
             const auto* after = back && back.value() ? std::get_if<auth::Handle>(&back.value()->data) : nullptr;
@@ -3977,6 +4044,7 @@ void layering_object_bindings() {
     const auto layer = call("Layer", {ship});
     expect(layer.diagnostics.empty() && flag(layer, "done") && layer.commands.size() == 6,
         "layering: a layering update queues teleport, two hides, cancel, hyperspace in and selectable");
+    expect(layer.sounds.size() == 2, "layering: each member Hide updates attached sound");
     if (layer.commands.size() == 6) {
         std::vector<t::PlayerCommand> decoded;
         for (const auto& request : layer.commands) {
@@ -4025,6 +4093,47 @@ void layering_object_bindings() {
     bad("TeleportBad", {ship}, "Teleport", "layering: Teleport needs something it can read a position from");
     bad("HideNone", {ship}, "Hide", "layering: Hide needs its flag");
     bad("HideBad", {ship}, "Hide", "layering: Hide needs a boolean");
+    {
+        const auto outcome = call("GlobalHide", {ship});
+        expect(outcome.diagnostics.empty() && outcome.commands.size() == 2, "global hide: hide and show queue commands");
+        expect(outcome.sounds.size() == 2, "global hide: hide and show update attached sound");
+        if (outcome.commands.size() == 2) {
+            const auto first = foc::tactical_ai_detail::translate_order(outcome.commands[0]);
+            const auto second = foc::tactical_ai_detail::translate_order(outcome.commands[1]);
+            const auto* hidden = first ? std::get_if<t::ScriptHidePayload>(&first.value().payload) : nullptr;
+            const auto* shown = second ? std::get_if<t::ScriptHidePayload>(&second.value().payload) : nullptr;
+            expect(hidden && hidden->hidden && shown && !shown->hidden && first.value().units == std::vector<eawr::sim::EntityId>{10}
+                && second.value().units == std::vector<eawr::sim::EntityId>{10}, "global hide: both flags target the object through the member Hide path");
+        }
+    }
+    bad("GlobalHideNone", {ship}, "Hide_Object", "global hide: flag is required");
+    {
+        const auto outcome = call("GlobalHideBad", {ship});
+        expect(outcome.diagnostics.size() == 1 && outcome.commands.size() == 1, "global hide: invalid flag reports an error and defaults to hidden");
+    }
+    bad("GlobalHideTarget", {}, "Hide_Object", "global hide: target must be an object");
+    {
+        const auto outcome = call("SubHide", {ship});
+        expect(outcome.diagnostics.empty() && outcome.commands.size() == 2, "sub-object hide: hide and show queue presentation commands");
+        if (outcome.commands.size() == 2) {
+            const auto& first = outcome.commands[0];
+            const auto& second = outcome.commands[1];
+            expect(first.verb == foc::verb_hide_sub_object && second.verb == foc::verb_hide_sub_object
+                && first.arguments.size() == 3 && second.arguments.size() == 3
+                && std::get<bool>(first.arguments[1].data) && !std::get<bool>(second.arguments[1].data)
+                && std::get<std::string>(first.arguments[2].data) == "Hull", "sub-object hide: preserves the name and hide flag");
+        }
+    }
+    bad("SubHideMissing", {ship}, "Hide_Sub_Object", "sub-object hide: name is required");
+    bad("SubHideName", {ship}, "Hide_Sub_Object", "sub-object hide: name must be a string");
+    {
+        const auto bad_flag = call("SubHideBadFlag", {ship});
+        expect(bad_flag.diagnostics.size() == 1 && bad_flag.commands.size() == 1
+            && std::get<bool>(bad_flag.commands[0].arguments[1].data), "sub-object hide: invalid flag reports and defaults to hidden");
+        const auto boolean_flag = call("SubHideBool", {ship});
+        expect(boolean_flag.diagnostics.empty() && boolean_flag.commands.size() == 1
+            && !std::get<bool>(boolean_flag.commands[0].arguments[1].data), "sub-object hide: boolean superset and ignored extra arguments");
+    }
     bad("SelectBad", {ship}, "Set_Selectable", "layering: Set_Selectable needs a boolean");
     bad("SelectNone", {ship}, "Set_Selectable", "layering: Set_Selectable needs its flag");
     bad("SelectTwo", {ship}, "Set_Selectable", "layering: Set_Selectable takes exactly one argument");
@@ -4150,6 +4259,7 @@ void layering_library_run() {
     std::set<std::int64_t> heights;
     std::size_t teleports = 0, hyperspace = 0;
     for (const auto& request : report.value().commands) {
+        if (request.verb == foc::verb_hide_sound) continue; // presentation requests do not become tactical orders
         const auto translated = foc::tactical_ai_detail::translate_order(request);
         expect(translated.has_value(), "layering library: each command translates"); if (!translated) return;
         if (const auto* teleport = std::get_if<t::ScriptTeleportPositionPayload>(&translated.value().payload)) {

@@ -222,6 +222,7 @@ struct TacticalInstance {
     // canonical snapshot bytes (the SVEW block carries the state).
     bool script_hidden{};
     bool script_unselectable{};
+    bool script_ai_excluded{}; // TL-08 (Lua Prevent_AI_Usage): the AI's unit selection skips the unit
     friend bool operator==(const TacticalInstance&, const TacticalInstance&) = default;
 };
 

@@ -113,8 +113,8 @@ public:
         std::uint64_t sim_completed_tick{};
         double presentation_lag_ticks{};
         double sim_pacing_lag_ms{}, sim_discarded_wall_ms{};
-        // Acquisition time for the five explicitly wrapped LiveSession accessors;
-        // excludes frame()/tick_costs_after() and time spent holding a lock.
+        // Acquisition time for the wrapped LiveSession accessors, frame() and tick_costs_after() included;
+        // excludes time spent holding a lock.
         double ui_accessor_lock_wait_ms{};
         std::vector<std::pair<std::string, double>> ui_accessor_lock_phases;
         std::vector<std::pair<std::string, double>> worker_phases;

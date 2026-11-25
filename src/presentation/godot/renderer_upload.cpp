@@ -325,7 +325,7 @@ std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() co
         if (!mesh.visible) continue;
         for (const auto& surface : mesh.submeshes) incoming += detail::surface_gpu_bytes(
             surface.vertices.size(), surface.indices.size(), mesh.bone >= 0 || !surface.skin_bones.empty(),
-            legacy::authored_binormals(description));
+            legacy::carries_custom0(description));
     }
     std::uint64_t held{};
     for (const auto& category : detail::gpu_memory_ledger().totals()) held += category.live_bytes;

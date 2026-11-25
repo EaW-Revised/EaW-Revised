@@ -95,6 +95,7 @@ struct SpacePopulation {
     std::vector<scene::SpacePlacementDecision> decisions_;
     std::vector<std::vector<int>> hardpoint_states_;
     std::vector<std::vector<sim::AssetId>> hull_surface_assets_;
+    std::vector<int> live_mesh_names_;
     std::vector<std::optional<std::size_t>> live_decisions_, live_models_, live_clips_, live_alternate_clips_, live_bounds_, live_alternate_counts_;
     std::optional<scene::Scene> scene_{scene::Scene{}};
     space::PopulationIndex piece_index_;
@@ -107,7 +108,7 @@ struct SpacePopulation {
     void complete_live_append() {}
     void prepare_compose_slots(bool) {
         const auto size = options_.placed_ships.size();
-        live_decisions_.resize(size); hull_surface_assets_.resize(size); live_models_.resize(size);
+        live_decisions_.resize(size); hull_surface_assets_.resize(size); live_models_.resize(size); live_mesh_names_.resize(size);
         live_clips_.resize(size); live_alternate_clips_.resize(size); live_bounds_.resize(size); live_alternate_counts_.resize(size);
         turret_bindings_.resize(size); parent_hardpoint_turret_bindings_.resize(size); hardpoint_turret_bindings_.resize(size);
         contact_bones_.resize(size); live_death_clone_.resize(size); backdrop_ships_.resize(size);

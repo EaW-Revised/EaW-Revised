@@ -1,6 +1,7 @@
 #include "space_populate.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/presentation/space/space.hpp"
+#include "eawr/presentation/space/script_mesh_hide.hpp"
 #include "frame_timer.hpp"
 #include "render_profile_viewport.hpp"
 
@@ -108,6 +109,15 @@ bool SpacePopulation::attached_art_shown(const GatedInstance& piece) const {
     return animation::clone_attached_art_shown(live_death_clone_[ship], piece.gate->bone, contact_bones_[ship]);
 }
 
+bool SpacePopulation::hide_sub_object(const sim::EntityId entity, const std::string_view name, const bool hidden) {
+    const auto found = contact_live_ships_.find(entity);
+    if (found == contact_live_ships_.end()) return false;
+    const auto ship = found->second;
+    if (ship >= live_mesh_names_.size() || !live_mesh_names_[ship]) return false;
+    space::set_script_mesh_hidden(*live_mesh_names_[ship], live_script_hidden_meshes_[ship], name, hidden);
+    return true;
+}
+
 void SpacePopulation::rebuild_piece_index() {
     piece_index_.rebuild(live_decisions_.size(), pieces_, live_clip_instances_, [](const GatedInstance& piece) {
         return !piece.shield && !piece.cloak && (!piece.gate || piece.gate->art != HardpointGate::Art::attached_model);
@@ -130,6 +140,8 @@ void SpacePopulation::refresh_instances(const particles::StepExecutor* workers) 
     if (!workers) {
         for (const GatedInstance& piece : pieces_) {
             if (piece.live && *piece.live < live_shown_.size() && !live_shown_[*piece.live]) continue;
+            if (piece.live && piece.model_mesh && *piece.live < live_script_hidden_meshes_.size()
+                && live_script_hidden_meshes_[*piece.live].contains(*piece.model_mesh)) continue;
             if (piece.live && piece.alternate && *piece.alternate != live_alternates_[*piece.live]) continue;
             if (piece.shield) {
                 if (!piece.live || *piece.live >= live_defend_.size() || !live_defend_[*piece.live]) continue;
@@ -165,6 +177,8 @@ void SpacePopulation::refresh_instances(const particles::StepExecutor* workers) 
         const auto visible = [&](const std::size_t index) {
             const auto& piece = pieces_[index];
             if (piece.live && *piece.live < live_shown_.size() && !live_shown_[*piece.live]) return false;
+            if (piece.live && piece.model_mesh && *piece.live < live_script_hidden_meshes_.size()
+                && live_script_hidden_meshes_[*piece.live].contains(*piece.model_mesh)) return false;
             if (piece.live && piece.alternate && *piece.alternate != live_alternates_[*piece.live]) return false;
             if (piece.shield) {
                 if (!piece.live || *piece.live >= live_defend_.size() || !live_defend_[*piece.live]) return false;
