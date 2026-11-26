@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <span>
 #include "transit_reveal.hpp"
 #include "eawr/data/tag_trace.hpp"
@@ -715,13 +716,10 @@ void GalacticMode::State::rebuild_ground_badges() {
     }
 }
 
-void GalacticMode::State::rebuild_fleet_projection(const bool publication_changed) {
-    fleet_publication = displayed_snapshot;
-    if (!fixture_enabled(GalacticHudFixture::Feature::fleet_visibility))
-        fleet_visibility = galactic_view::live_fleet_visibility(*displayed_snapshot);
+viewer::galactic::StackHealth GalacticMode::State::fleet_stack_health() {
     // #4316: the projection asks for a type's health once per member and per stack icon; the answer comes from the
     // authored art, which does not change, so it is looked up by name once per type.
-    const viewer::galactic::StackHealth health = [this](const sim::galactic::TypeId type) -> std::optional<float> {
+    return [this](const sim::galactic::TypeId type) -> std::optional<float> {
         if (const auto cached = fleet_health_cache.find(type); cached != fleet_health_cache.end()) return cached->second;
         std::optional<float> value;
         if (const auto name = production_names.find(type); name != production_names.end())
@@ -729,38 +727,86 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
         fleet_health_cache.emplace(type, value);
         return value;
     };
+}
+
+viewer::galactic::StackHeroPreference GalacticMode::State::fleet_hero_preference() {
     // #6122: the same hero bit that steers the ground badge steers the space fleet image (GHUDL-16, the debug
     // build's best-ship helper): named heroes, and generic heroes with an icon, rank by Ranking_In_Category.
-    const viewer::galactic::StackHeroPreference hero_preference{ground_hero_preference,
-        [this](const sim::galactic::TypeId type) -> std::optional<std::int64_t> {
-            const auto name = production_names.find(type);
-            if (name == production_names.end()) return std::nullopt;
-            const auto art = production_art.find(name->second);
-            if (art == production_art.end()) return std::nullopt;
-            const auto& look = art->second;
-            if (look.named_hero || (look.generic_hero && !look.icon.empty())) return look.hero_rank;
-            return std::nullopt;
-        }};
-    const auto capacity = fleet_group_buttons[0].size();
-    const auto image_rank = [&health](const sim::galactic::TypeId type) -> std::optional<std::uint32_t> {
-        return galactic_view::stack_health_rank(health(type));
-    };
-    if (publication_changed && !fleet_gui_indices.empty()) {
-        std::set<sim::EntityId> live;
-        for (const auto& fleet : displayed_snapshot->fleets()) for (const auto& member : fleet.members) live.insert(member.id);
-        if (displayed_snapshot->fleet_control()) for (const auto& unit : displayed_snapshot->fleet_control()->detached_units)
-            live.insert(unit.member.id);
-        std::erase_if(fleet_gui_indices, [&](const auto& entry) { return !live.contains(entry.first); });
+    // #8428: cached per type like the health, from the same never-reassigned authored art.
+    return {ground_hero_preference, [this](const sim::galactic::TypeId type) -> std::optional<std::int64_t> {
+        if (const auto cached = fleet_hero_rank_cache.find(type); cached != fleet_hero_rank_cache.end()) return cached->second;
+        std::optional<std::int64_t> value;
+        if (const auto name = production_names.find(type); name != production_names.end())
+            if (const auto art = production_art.find(name->second); art != production_art.end()) {
+                const auto& look = art->second;
+                if (look.named_hero || (look.generic_hero && !look.icon.empty())) value = look.hero_rank;
+            }
+        fleet_hero_rank_cache.emplace(type, value);
+        return value;
+    }};
+}
+
+void GalacticMode::State::update_fleet_projection(const std::shared_ptr<const sim::galactic::GalacticSnapshot>& source) {
+    const auto measured = measure_zoom(FramePhase::fleet_projection);
+    if (fleet_visibility_for != source) {
+        if (!fixture_enabled(GalacticHudFixture::Feature::fleet_visibility))
+            fleet_visibility = galactic_view::live_fleet_visibility(*source);
+        fleet_visibility_for = source;
     }
+    if (fleet_indices_pruned_for != source) {
+        if (!fleet_gui_indices.empty()) {
+            std::set<sim::EntityId> live;
+            for (const auto& fleet : source->fleets()) for (const auto& member : fleet.members) live.insert(member.id);
+            if (source->fleet_control()) for (const auto& unit : source->fleet_control()->detached_units)
+                live.insert(unit.member.id);
+            std::erase_if(fleet_gui_indices, [&](const auto& entry) { return !live.contains(entry.first); });
+        }
+        fleet_indices_pruned_for = source;
+    }
+    const auto health = fleet_stack_health();
+    const auto hero_preference = fleet_hero_preference();
     const std::vector<std::pair<sim::EntityId, std::int64_t>> indices(fleet_gui_indices.begin(), fleet_gui_indices.end());
     auto display_traits = fleet_display_traits;
-    if (displayed_snapshot->fleet_control())
-        galactic_view::apply_fleet_transport_traits(display_traits, displayed_snapshot->fleet_control()->types);
-    fleet_intelligence = sim::galactic::observed_fleets(*displayed_snapshot, galaxy->local.player,
-        display_traits, capacity, fleet_visibility, image_rank, indices, hero_preference.rank, departing_transports);
-    if (displayed_snapshot->fleet_control())
-        galactic_view::apply_local_transport_traits(fleet_intelligence.cards, displayed_snapshot->fleets(), displayed_snapshot->fleet_control()->types);
+    if (source->fleet_control())
+        galactic_view::apply_fleet_transport_traits(display_traits, source->fleet_control()->types);
+    const galactic_view::FleetProjectionInputs inputs{galaxy->local.player, display_traits, fleet_group_buttons[0].size(),
+        fleet_visibility,
+        [&health](const sim::galactic::TypeId type) -> std::optional<std::uint32_t> { return galactic_view::stack_health_rank(health(type)); },
+        indices, hero_preference.rank, departing_transports, ground_hero_preference ? 1U : 0U};
+    fleet_projection_cache.update(source, inputs);
+    if (fleet_projection_cache.last_full()) fleet_icons_all_dirty = true;
+    for (const auto planet : fleet_projection_cache.last_changed()) fleet_icon_dirty.push_back(planet);
+    if (options.hud_verify) {
+        // Developer verify mode (--eawr-galactic-hud-verify yes): the incremental projection equals a full one.
+        ++hud_verify_checks;
+        const auto full = galactic_view::project_observed_fleets(*source, inputs);
+        if (const auto planet = galactic_view::first_fleet_projection_difference(full, fleet_projection_cache.result())) {
+            ++hud_verify_mismatches;
+            if (hud_verify_detail.empty()) hud_verify_detail = "fleet projection planet " + std::to_string(*planet);
+        }
+    }
+}
+
+const sim::galactic::FleetIntelligence* GalacticMode::State::project_publication_fleets(
+    const std::shared_ptr<const sim::galactic::GalacticSnapshot>& shown) {
+    if (!fleet_organize || !galaxy) return nullptr;
+    update_fleet_projection(shown);
+    // The map keeps a departing transport's fleet that the HUD leaves out; the projections differ only then.
+    if (!departing_transports.empty()) return nullptr;
+    const auto seat = std::find_if(metadata.seats.begin(), metadata.seats.end(),
+        [this](const auto& row) { return row.id == galaxy->local.seat; });
+    if (seat == metadata.seats.end() || seat->player != galaxy->local.player) return nullptr;
+    return &fleet_projection_cache.result();
+}
+
+void GalacticMode::State::rebuild_fleet_projection() {
+    fleet_publication = displayed_snapshot;
+    // Prunes the presentation indices once per publication; a no-op when the refresh already projected it.
+    update_fleet_projection(displayed_snapshot);
+    const auto health = fleet_stack_health();
+    const auto hero_preference = fleet_hero_preference();
     ++fleet_projection_rebuilds;
+    auto icons_timer = measure_zoom(FramePhase::fleet_icons);
     visible_fleet_badges.clear();
     // GHUD-S76: stack icons require a filtered fleet card, never presence
     // alone. Presence still qualifies the mixed orbit-slot layout.
@@ -773,20 +819,48 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
         if (row.owner != galaxy->local.player) aware_other.try_emplace(row.planet, row.owner);
     const auto* style = command_catalog.find("g_planet_fleet");
     const auto stacks = style ? style->list(data::ui::Field::blank_texture_name) : std::span<const std::string>{};
-    std::vector<std::pair<galactic_view::ObjectId, viewer::galactic::FleetStackIcon>> placed;
     // fleet_stacks.hpp's mixed layout: the same any-other-owner test as fleet_stack_icons.
     mixed_fleet_planets.clear();
     for (const auto& row : aware_other) mixed_fleet_planets.insert(row.first);
     for (const auto& card : fleet_intelligence.cards) if (!card.local) mixed_fleet_planets.insert(card.planet);
-    for (const auto& [planet, cards] : by_planet) {
+    // #8428: a planet's icons read only its own cards and presence, so only the planets a projection update changed
+    // since the last pass are recomputed (every planet after a full projection or another stack texture count).
+    if (stacks.size() != fleet_icon_textures) { fleet_icon_textures = stacks.size(); fleet_icons_all_dirty = true; }
+    const auto icons_for = [&](const galactic_view::ObjectId planet, const std::vector<const sim::galactic::ObservedFleet*>& cards) {
         const auto other = aware_other.find(planet);
         const auto aware = other == aware_other.end() ? std::nullopt : std::optional{other->second};
-        for (const auto& icon : viewer::galactic::fleet_stack_icons(cards, health, stacks.size(), aware, hero_preference))
-            placed.emplace_back(planet, icon);
+        return viewer::galactic::fleet_stack_icons(cards, health, stacks.size(), aware, hero_preference);
+    };
+    if (fleet_icons_all_dirty) {
+        fleet_icon_cache.clear();
+        for (const auto& [planet, cards] : by_planet) fleet_icon_cache.emplace(planet, icons_for(planet, cards));
+    } else {
+        std::sort(fleet_icon_dirty.begin(), fleet_icon_dirty.end());
+        fleet_icon_dirty.erase(std::unique(fleet_icon_dirty.begin(), fleet_icon_dirty.end()), fleet_icon_dirty.end());
+        for (const auto planet : fleet_icon_dirty) {
+            const auto cards = by_planet.find(planet);
+            if (cards == by_planet.end()) fleet_icon_cache.erase(planet);
+            else fleet_icon_cache.insert_or_assign(planet, icons_for(planet, cards->second));
+        }
     }
+    fleet_icons_all_dirty = false; fleet_icon_dirty.clear();
+    if (options.hud_verify) {
+        ++hud_verify_checks;
+        std::map<galactic_view::ObjectId, std::vector<viewer::galactic::FleetStackIcon>> full;
+        for (const auto& [planet, cards] : by_planet) full.emplace(planet, icons_for(planet, cards));
+        if (full != fleet_icon_cache) {
+            ++hud_verify_mismatches;
+            if (hud_verify_detail.empty()) hud_verify_detail = "fleet stack icons";
+        }
+    }
+    std::vector<std::pair<galactic_view::ObjectId, const viewer::galactic::FleetStackIcon*>> placed;
+    for (const auto& [planet, icons] : fleet_icon_cache) for (const auto& icon : icons) placed.emplace_back(planet, &icon);
+    icons_timer.finish();
     for (auto& [key, badge] : fleet_badges) badge.shown = false;
-    rebuild_ground_badges();
-    for (const auto& [planet, icon] : placed) {
+    { const auto measured = measure_zoom(FramePhase::fleet_ground); rebuild_ground_badges(); }
+    const auto badges_timer = measure_zoom(FramePhase::fleet_badges);
+    for (const auto& [planet, shown_icon] : placed) {
+        const auto& icon = *shown_icon;
         const auto key = std::pair{planet, icon.icon};
         auto [entry, inserted] = fleet_badges.try_emplace(key);
         auto& badge = entry->second;
@@ -1166,8 +1240,9 @@ void GalacticMode::State::update_fleet_hud() {
     bool changed = publication_changed || fleet_layout_dirty || held_changed || fleet_view_planet != selected_planet
         || fleet_view_selection != selected_fleet || fleet_view_member != selected_fleet_member;
     if (publication_changed || fleet_layout_dirty || held_changed) {
-        rebuild_fleet_projection(publication_changed);
+        rebuild_fleet_projection();
     }
+    auto cards_timer = measure_zoom(FramePhase::fleet_cards);
     if (changed) {
         update_fleet_panel_cards();
     }
@@ -1176,6 +1251,8 @@ void GalacticMode::State::update_fleet_hud() {
     fleet_organize->set_visible(selected_planet && seat_flight().state() == galactic_view::CameraState::focused
         && !seat_flight().advanced_map());
     update_fleet_diorama();
+    cards_timer.finish();
+    auto layouts_timer = measure_zoom(FramePhase::fleet_layouts);
     const auto placement = fleet_organize->placement();
     changed = changed || placement != fleet_cell_placement || fleet_layout_dirty;
     fleet_layout_dirty = false;
@@ -1183,11 +1260,18 @@ void GalacticMode::State::update_fleet_hud() {
         rebuild_fleet_cell_layouts(placement);
     }
     update_fleet_controls(placement, changed);
+    layouts_timer.finish();
+    const auto info_timer = measure_zoom(FramePhase::fleet_info);
     update_advanced_open_button(placement);
     update_planet_info(placement);
     update_planet_info_card(placement);
     if (changed) update_fleet_captions(placement);
     service_fleet_stack_popup();
+}
+
+namespace {
+// GFDH-03: the engine's fixed colour for empty orbit drop slots (RGBA 25, 85, 151, 255).
+const Color drop_slot_colour(25.0F / 255.0F, 85.0F / 255.0F, 151.0F / 255.0F, 1.0F);
 }
 
 // GHUDL-16 / debug build planet fleet positioning: the left and right icons sit at the
@@ -1214,27 +1298,40 @@ void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId plan
         button->set_size(size); static_cast<EawrHudButton*>(button)->set_hit_rect({{}, size});
         return size;
     };
-    // #3072: during a fleet drag the hovered planet also shows its empty local
-    // stack icons as drop targets: the authored empty stack art (texture 0, as a
-    // presence-only stack) in the local faction's colour. The receiver hit-tests them.
-    if ((dragged_fleet || dragged_ground_planet || (ground_hud.pressed_object && map_input.box_end))
-        && planet == fleet_drag_planet) {
+    // #3072 / GFDH-03: while a fleet or ground stack is held, the empty orbit slots of the
+    // source and of every planet a hyperspace path reaches show as drop targets: the first
+    // Blank_Texture_Name entry (the debug build's base texture 0) in the fixed drop-slot colour
+    // (debug build fleet display update; not the faction colour). The hovered planet's slots
+    // are the receivers the drop hit-tests; the other planets' are display-only.
+    const bool hovered = planet == fleet_drag_planet;
+    const bool reachable = std::binary_search(fleet_reach_planets.begin(), fleet_reach_planets.end(), planet);
+    // Only a reachable planet shows slots: a hovered planet without a hyperspace path shows none.
+    if (hovered && !reachable)
+        for (std::size_t icon = 0; icon < fleet_empty_slots.size(); ++icon) {
+            if (fleet_empty_slots[icon]) fleet_empty_slots[icon]->hide();
+            fleet_empty_shown[icon] = false;
+        }
+    if (fleet_drag_held() && reachable) {
         const auto stacks = style->list(data::ui::Field::blank_texture_name);
         const bool mixed = mixed_fleet_planets.contains(planet);
-        for (std::size_t index = mixed ? 1 : 0; index < fleet_empty_slots.size() && !stacks.empty(); ++index) {
+        auto& slots = hovered ? fleet_empty_slots : fleet_reach_slots[planet];
+        for (std::size_t index = 0; index < slots.size() && !stacks.empty(); ++index) {
             const auto icon = static_cast<std::uint8_t>(index);
+            auto*& button = slots[icon];
             const auto filled = fleet_badges.find({planet, icon});
-            if (filled != fleet_badges.end() && filled->second.shown) continue;
-            auto*& button = fleet_empty_slots[icon];
+            if ((mixed && index == 0) || (filled != fleet_badges.end() && filled->second.shown)) {
+                if (button) button->hide();
+                if (hovered) fleet_empty_shown[icon] = false;
+                continue;
+            }
             if (!button) {
                 button = memnew(EawrHudButton);
-                button->set_name(String::utf8(("fleet_empty_slot_" + std::to_string(icon)).c_str()));
+                button->set_name(String::utf8((hovered ? "fleet_empty_slot_" + std::to_string(icon)
+                    : "fleet_reach_slot_" + std::to_string(planet) + "_" + std::to_string(icon)).c_str()));
                 button->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
                 button->set_texture_normal(command_texture(stacks.front()));
-                if (content) if (const auto owner = content->factions.find(galaxy->local.player);
-                    owner != content->factions.end() && owner->second.present)
-                    button->set_self_modulate(Color(owner->second.primary.r, owner->second.primary.g, owner->second.primary.b, 1.0F));
-                if (fleet_drag_receiver) hud->move_child(fleet_drag_receiver, hud->get_child_count() - 1);
+                button->set_self_modulate(drop_slot_colour);
+                if (hovered && fleet_drag_receiver) hud->move_child(fleet_drag_receiver, hud->get_child_count() - 1);
             }
             // #7809: the drop slots belong to the drag target planet's group, so its depth and occluders apply.
             if (auto* group = planet_ui_group(planet); button->get_parent() != group) {
@@ -1245,7 +1342,14 @@ void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId plan
             static_cast<void>(place(button, icon));
             button->set_modulate(Color(1, 1, 1, alpha));
             button->set_visible(alpha > 0 && button->get_texture_normal().is_valid());
-            fleet_empty_shown[icon] = button->is_visible();
+            if (hovered) fleet_empty_shown[icon] = button->is_visible();
+        }
+        // The hovered planet's receivers replace its display-only copies; a pointer that came to
+        // rest on one of them keeps its rollover once the receivers are placed (GFDH-01).
+        if (hovered) {
+            if (const auto copies = fleet_reach_slots.find(planet); copies != fleet_reach_slots.end())
+                for (auto* button : copies->second) if (button) button->hide();
+            show_fleet_drag_highlight(fleet_drag_pointer, planet);
         }
     }
     for (auto found = fleet_badges.lower_bound({planet, std::uint8_t{0}});
@@ -1298,6 +1402,9 @@ void GalacticMode::State::write_fleet_report(std::ostream& output) const {
         << ", \"diorama_panel\": " << (fleet_diorama_alternate ? std::to_string(*fleet_diorama_alternate) : "null")
         << ", \"diorama_alpha\": " << fleet_diorama_alpha
         << ", \"projection_rebuilds\": " << fleet_projection_rebuilds
+        << ", \"projection_updates\": {\"full\": " << fleet_projection_cache.receipts().full
+        << ", \"partial\": " << fleet_projection_cache.receipts().partial << ", \"reused\": " << fleet_projection_cache.receipts().reused
+        << ", \"planets\": " << fleet_projection_cache.receipts().planets << "}"
         << ", \"visibility_source\": " << json(fixture_enabled(GalacticHudFixture::Feature::fleet_visibility)
             ? "explicit-synthetic-current-sight" : "live-WGUI-06-current-sight")
         << ", \"enemy_contents_layout\": \"GHUD-C06 expanded-list seam\", \"cards\": [";
@@ -1426,6 +1533,20 @@ void GalacticMode::State::write_fleet_report(std::ostream& output) const {
         output << (written++ ? ", " : "") << "{\"icon\": " << icon << ", \"rect\": [" << rect.position.x << ", "
             << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
     }
+    output << "], \"reach_builds\": " << fleet_reach_builds << ", \"reach_planets\": [";
+    for (std::size_t index = 0; index < fleet_reach_planets.size(); ++index)
+        output << (index ? ", " : "") << fleet_reach_planets[index];
+    output << "], \"reach_slots\": [";
+    written = 0;
+    for (const auto& [planet, slots] : fleet_reach_slots)
+        for (std::size_t icon = 0; icon < slots.size(); ++icon) {
+            if (!slots[icon] || !slots[icon]->is_visible_in_tree()) continue;
+            const auto rect = slots[icon]->get_global_rect();
+            const auto tint = slots[icon]->get_self_modulate();
+            output << (written++ ? ", " : "") << "{\"planet\": " << planet << ", \"icon\": " << icon << ", \"rect\": ["
+                << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y
+                << "], \"tint\": [" << tint.get_r8() << ", " << tint.get_g8() << ", " << tint.get_b8() << "]}";
+        }
     output << "]}, \"drop_slots\": [";
     for (std::size_t slot = 0; slot < fleet_drop_rects.size(); ++slot) {
         const auto& rect = fleet_drop_rects[slot];

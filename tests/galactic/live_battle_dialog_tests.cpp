@@ -670,6 +670,22 @@ void publication() {
         && dialog.results.score_cost == std::array<double, 2>{2, 4}
         && dialog.results.combat_power == std::array<double, 2>{5, 10},
         "summary groups confirmed original types, filters unscored/unrelated losses and separates heroes");
+    {
+        // WAR-43a (#8509): the space structures cleared with the loser's base are listed losses like any other scored type.
+        auto cleared = std::make_shared<eawr::platform::LiveAutoResolveOutcome>(*outcome);
+        cleared->structure_losses = {{"yard", 2}, {"yard", 2}, {"unscored", 2}, {"yard", 3}};
+        frame.auto_resolve_outcome = cleared;
+        const auto listed = view::live_battle_dialog_view(frame, {1}, 1, {}, names);
+        const auto yard = std::find_if(listed.results.losses[1].begin(), listed.results.losses[1].end(),
+            [](const auto& row) { return row.type == "yard"; });
+        expect(listed.results.totals[1] == 4 && yard != listed.results.losses[1].end() && yard->count == 2
+            && listed.results.totals[0] == 1,
+            "WAR-43a cleared structures join the enemy losses (scored, by type) and never the winner's");
+        const auto hint = checked(view::encode_auto_summary_hint(*cleared, "Mod_Planet"));
+        expect(checked(view::decode_auto_summary_hint(hint))->structure_losses.size() == 4,
+            "WAR-43a a saved automatic summary keeps its structure losses");
+        frame.auto_resolve_outcome = outcome;
+    }
     expect(view::live_battle_dialog_view(frame, {1}, 1, {70, 70}, names).phase == view::BattleDialogPhase::hidden,
         "Continue acknowledgement hides the summary without a simulation command");
     expect(view::live_battle_dialog_view(frame, {3}, 3, {}, names).phase == view::BattleDialogPhase::hidden,

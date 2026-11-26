@@ -53,11 +53,13 @@ class Frame:
     gpu: float = -1.0
     lock: float = 0.0
     stale: bool = False
+    fight: dict = field(default_factory=dict)  # u, eu, atk, proj, fx, part, dc, obj (empty when the frame carried none)
 
 
 @dataclass
 class Source:
     label: str
+    workers: int = 0
     ticks: list = field(default_factory=list)
     markers: list = field(default_factory=list)  # (kind, tick)
     hitches: list = field(default_factory=list)  # recorded by the game: dicts
@@ -73,6 +75,9 @@ class Capture:
     frames: list = field(default_factory=list)
     frame_hitches: list = field(default_factory=list)
     pc: list = field(default_factory=list)
+    contexts: list = field(default_factory=list)  # `context` records, oldest first
+    threads: list = field(default_factory=list)  # `thr` records: {"t", "th": [[name, share, labeled], ...]}
+    mem: list = field(default_factory=list)  # `mem` records
     dropped: dict = field(default_factory=dict)  # src -> last total
     gc_phase_table: list = field(default_factory=list)  # (name, per-tick inclusive list, exclusive sum, calls)
     notes: list = field(default_factory=list)
@@ -114,6 +119,7 @@ def load_feed(paths, skip_ticks: int) -> Capture:
                 capture.header = capture.header or row
             elif kind == "source":
                 capture.source(src).label = row.get("label", str(src))
+                capture.source(src).workers = row.get("workers", capture.source(src).workers)
             elif kind == "phase-name":
                 names[(src, row["id"])] = row["name"]
             elif kind == "tick":
@@ -131,10 +137,18 @@ def load_feed(paths, skip_ticks: int) -> Capture:
                 else:
                     capture.source(src).hitches.append(row)
             elif kind == "frame":
+                fight = {k: row[k] for k in ("u", "eu", "atk", "proj", "fx", "part", "dc", "obj") if k in row}
                 capture.frames.append(Frame(row["n"], row["t"], row["ms"], row.get("main", -1.0), row.get("render", -1.0),
-                                            row.get("gpu", -1.0), row.get("lock", 0.0), bool(row.get("stale"))))
+                                            row.get("gpu", -1.0), row.get("lock", 0.0), bool(row.get("stale")), fight))
             elif kind == "pc":
                 capture.pc.append(row)
+            elif kind == "context":
+                if not capture.contexts or any(capture.contexts[-1].get(k) != v for k, v in row.items() if k != "t"):
+                    capture.contexts.append(row)
+            elif kind == "thr":
+                capture.threads.append(row)
+            elif kind == "mem":
+                capture.mem.append(row)
             elif kind == "verdict":
                 capture.source(src).verdicts.append(row.get("text", ""))
             elif kind == "pattern":
@@ -518,11 +532,135 @@ def _table(header: list, rows: list, markdown: bool) -> list:
     return ["  ".join(header)] + ["  ".join(r) for r in rows]
 
 
+def correlation(xs: list, ys: list) -> float | None:
+    """Pearson correlation; None when either series is constant or shorter than 3."""
+    if len(xs) < 3 or len(xs) != len(ys):
+        return None
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    sx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    sy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    if sx == 0 or sy == 0:
+        return None
+    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (sx * sy)
+
+
+def context_lines(capture: Capture) -> list:
+    """The PC and settings context (the latest `context` record) in a few readable lines."""
+    if not capture.contexts:
+        return []
+    c = capture.contexts[-1]
+    out = ["", "== context"]
+    p, e = c.get("p_cores"), c.get("e_cores")
+    split = f" ({p} performance + {e} efficiency cores)" if e else ""
+    out.append(f"cpu: {c.get('cpu') or '?'}, {c.get('cores', '?')} cores / {c.get('logical', '?')} logical processors{split}"
+               + ("" if c.get("topology", True) else " (topology not read)"))
+    if c.get("gpu"):
+        out.append(f"gpu: {c['gpu']} ({c.get('gpu_type', '?')}), driver {c.get('gpu_driver') or '?'}, api {c.get('gpu_api') or '?'}, "
+                   f"{c.get('renderer', '?')} on {c.get('rd_driver', '?')}")
+    res = c.get("res")
+    out.append(f"display: {'x'.join(str(v) for v in res) if res else '?'} {c.get('window', '?')}, vsync {c.get('vsync', '?')}, "
+               f"fps cap {c.get('fps_cap', '?')}, render thread {c.get('render_thread', '?')} (setting {c.get('render_thread_setting', '?')})")
+    video = c.get("video")
+    if video:
+        out.append("video: " + ", ".join(f"{k} {v}" for k, v in video.items()))
+    threads = c.get("threads")
+    if threads:
+        parts = [f"hardware {threads.get('hardware', '?')}"]
+        for name in ("sim", "particles"):
+            pool = threads.get(name)
+            if pool:
+                parts.append(f"{name} {pool['resolved']} ({pool['mode']}, automatic would be {pool['automatic']})")
+        out.append("threads: " + ", ".join(parts))
+    workers = [f"{s.label} {s.workers}" for s in capture.sources.values() if s.workers]
+    if workers:
+        out.append("simulation workers in use: " + ", ".join(workers))
+    return out
+
+
+def thread_lines(capture: Capture, markdown: bool) -> list:
+    """Per-thread CPU: each thread mean and max share of one core over the capture (1.0 = one thread-equivalent)."""
+    if not capture.threads:
+        return []
+    shares: dict = {}
+    labeled: dict = {}
+    for row in capture.threads:
+        for name, share, is_labeled in row.get("th", []):
+            shares.setdefault(name, []).append(share)
+            labeled[name] = labeled.get(name, False) or bool(is_labeled)
+    seconds = len(capture.threads)
+    rows = []
+    for name, values in shares.items():
+        # A second without a row means the thread was below the reporting floor or not alive: count it as 0.
+        padded = values + [0.0] * max(0, seconds - len(values))
+        rows.append((statistics.fmean(padded), name, max(values), percentile(padded, 0.95), labeled[name]))
+    rows.sort(reverse=True)
+    total = [sum(share for _, share, _ in row.get("th", [])) for row in capture.threads]
+    out = ["", f"== threads (cpu share of one core, {seconds} s; labeled = named by the game)"]
+    out.extend(_table(["thread", "mean", "p95", "max", "labeled"],
+                      [[n, f"{m:.2f}", f"{p95:.2f}", f"{mx:.2f}", "yes" if lab else "no"] for m, n, mx, p95, lab in rows[:25]], markdown))
+    out.append(f"sum of listed threads: mean {statistics.fmean(total):.2f} cores, max {max(total):.2f}")
+    named = [r for r in rows if r[4]]
+    if named:
+        out.append(f"hottest labeled thread: {named[0][1]} mean {named[0][0]:.2f}, max {named[0][2]:.2f}")
+    return out
+
+
+def mem_lines(capture: Capture) -> list:
+    if not capture.mem:
+        return []
+    commit = [m["commit_mb"] for m in capture.mem]
+    ws = [m["ws_mb"] for m in capture.mem]
+    faults = [m["pf_s"] for m in capture.mem if m.get("pf_s", -1) >= 0]
+    out = ["", f"== memory ({len(capture.mem)} s)",
+           f"commit MiB: first {commit[0]}, last {commit[-1]}, max {max(commit)}; working set MiB: first {ws[0]}, last {ws[-1]}, max {max(ws)}"]
+    if faults:
+        out.append(f"page faults per s: p50 {percentile(faults, .5):.0f} p95 {percentile(faults, .95):.0f} max {max(faults):.0f}")
+    return out
+
+
+def fight_lines(capture: Capture, markdown: bool) -> list:
+    """Fight intensity per frame and its link to the frame time: correlation and frame time by intensity quartile."""
+    frames = [f for f in capture.frames if f.fight]
+    if len(frames) < 8:
+        return []
+    out = ["", f"== fight intensity ({len(frames)} frames)"]
+    keys = [("u", "own units"), ("eu", "enemy units"), ("atk", "attacking"), ("proj", "projectiles"), ("fx", "effects"),
+            ("part", "particles"), ("dc", "draw calls"), ("obj", "visible instances")]
+    rows = []
+    for key, label in keys:
+        values = [f.fight.get(key, 0) for f in frames]
+        r = correlation([float(v) for v in values], [f.ms for f in frames])
+        rows.append([label, f"{percentile(values, .5):.0f}", f"{percentile(values, .95):.0f}", f"{max(values)}",
+                     "-" if r is None else f"{r:+.2f}"])
+    out.extend(_table(["counter", "p50", "p95", "max", "corr with frame ms"], rows, markdown))
+    # Frame time by intensity: the frames split into four equal groups by (units + enemy units + projectiles + particles / 10).
+    def score(f):
+        d = f.fight
+        return d.get("u", 0) + d.get("eu", 0) + d.get("proj", 0) + d.get("part", 0) / 10.0
+    ordered = sorted(frames, key=score)
+    quarter = max(1, len(ordered) // 4)
+    groups = [ordered[i * quarter:(i + 1) * quarter if i < 3 else len(ordered)] for i in range(4)]
+    out.append("")
+    out.append("frame time by fight intensity (score = units + projectiles + particles / 10, quartiles of frames):")
+    table = []
+    for i, group in enumerate(groups, 1):
+        ms = [f.ms for f in group]
+        mains = [f.main for f in group if f.main >= 0]
+        renders = [f.render for f in group if f.render >= 0]
+        gpus = [f.gpu for f in group if f.gpu >= 0]
+        table.append([f"Q{i}", f"{score(group[0]):.0f}-{score(group[-1]):.0f}", f"{statistics.fmean(ms):.1f}", f"{percentile(ms, .95):.1f}",
+                      f"{statistics.fmean(mains):.1f}" if mains else "-", f"{statistics.fmean(renders):.1f}" if renders else "-",
+                      f"{statistics.fmean(gpus):.1f}" if gpus else "-"])
+    out.extend(_table(["quartile", "score", "frame mean", "frame p95", "main", "render", "gpu"], table, markdown))
+    return out
+
+
 def report(capture: Capture, spike_ms: float | None, markdown: bool, budget: float) -> list:
     out = []
     if capture.header:
         out.append(f"{capture.kind}: schema {capture.header.get('schema')}, build {capture.header.get('build') or '?'}, "
                    f"engine {capture.header.get('engine') or '?'}")
+    out.extend(context_lines(capture))
     if capture.kind == "gc-trace" and spike_ms is None:
         spike_ms = 33.0  # the old tool's default
     for ident, source in capture.sources.items():
@@ -591,6 +729,9 @@ def report(capture: Capture, spike_ms: float | None, markdown: bool, budget: flo
         out.append(f"frame hitches: {len(frame_hitches)}")
         for n, ms, median in frame_hitches[:50]:
             out.append(f"  frame {n} {ms:.1f} ms (median {median:.1f})")
+    out.extend(fight_lines(capture, markdown))
+    out.extend(thread_lines(capture, markdown))
+    out.extend(mem_lines(capture))
     if capture.pc:
         others = [p["others"] for p in capture.pc if p.get("others", -1) >= 0]
         if others:

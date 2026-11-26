@@ -19,6 +19,26 @@ namespace eawr::sim::tactical {
     return remaining < maximum ? remaining : maximum;
 }
 
+// The contiguous teams one authored purchase of `members` craft makes, in order. The committed creation and the script
+// host's staged proxies both take their grouping from here. Callers validate maximum > 0.
+[[nodiscard]] inline std::vector<std::size_t> squadron_team_sizes(std::size_t members, std::size_t maximum) {
+    std::vector<std::size_t> sizes;
+    for (std::size_t begin = 0; begin < members;) {
+        const auto count = squadron_team_size(members - begin, maximum);
+        sizes.push_back(count);
+        begin += count;
+    }
+    return sizes;
+}
+
+// What a script creation of one data-defined type brings, in the order the commit allocates references: `members` physical
+// objects, then one container per entry of `teams` (the member count of each team, in container order).
+struct SpawnLayout {
+    std::size_t members{};
+    std::vector<std::size_t> teams;
+    friend bool operator==(const SpawnLayout&, const SpawnLayout&) = default;
+};
+
 // Spin_Away_On_Death (#447, docs/behaviour/space-fighter-deaths.md SP-01): the chance that a
 // killed craft spins away before it explodes, and for how long.
 struct SpinAwayProfile {
@@ -114,6 +134,9 @@ struct SquadronTable {
     [[nodiscard]] const CraftProfile* find_craft(TypeId type_id) const noexcept;
     [[nodiscard]] const SquadronProfile* find_squadron(TypeId type_id) const noexcept;
     [[nodiscard]] const SpawnerProfile* find_spawner(TypeId type_id, PlayerId owner = 0) const noexcept;
+    // The objects a creation of this type makes: a squadron brings its craft and the teams that group them; any other
+    // type (a ship, a lone craft) one object and no team. Empty when the squadron's team maximum is zero.
+    [[nodiscard]] std::optional<SpawnLayout> spawn_layout(TypeId type_id) const;
     [[nodiscard]] const SpawnerProfile* find_spawner_at_tech(TypeId type_id, PlayerId owner, std::uint32_t tech) const noexcept;
     [[nodiscard]] bool empty() const noexcept { return craft.empty() && squadrons.empty() && spawners.empty() && campaign_spawners.empty() && tech_spawners.empty(); }
     friend bool operator==(const SquadronTable&, const SquadronTable&) = default;

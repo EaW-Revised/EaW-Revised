@@ -437,7 +437,8 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   synchronization of the Separate render thread), the session-lock wait, stale frames and pipeline compilations, as the `frame_diag`
   object of the report. GPU samples have no source frame identifier and are reported separately from matched CPU frames.
   Off by default: one bool test per frame, no callback queued
-  ([battle bench](../../docs/performance/battle-bench.md)).
+  ([battle bench](../../docs/performance/battle-bench.md)). The launcher keeps `--eawr-frame-diag` and `--eawr-frame-diag-csv` a
+  player start (saved settings apply); `--eawr-frame-diag-calibrate` stalls the render thread and stays an evidence run.
 - `--eawr-perf-trace <csv>` ([battle bench](../../docs/performance/battle-bench.md)): one row per
   drawn frame of the live session: the frame's wall-clock ms, the engine's process ms (the viewer's own frame work), the root viewport's measured render CPU
   and GPU ms, draw calls, objects and primitives (the renderer's numbers are the previous frame's), and

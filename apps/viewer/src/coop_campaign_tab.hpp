@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string_view>
 
 namespace eawr::viewer {
@@ -9,6 +10,15 @@ inline bool campaign_in_tab(bool single_player_rules, bool coop_tab) noexcept {
 inline bool room_campaign_tab(std::string_view campaign, std::string_view previous_campaign,
                               bool single_player_rules, bool current_tab, bool checkpoint_changed = false) noexcept {
     return campaign != previous_campaign || checkpoint_changed ? single_player_rules : current_tab;
+}
+
+// #8497: whether the host is told that the picked campaign has room for more players than the room holds. Only when it has
+// (a room with room enough says nothing), and once per room for that number: `noted` is the largest number already named in this
+// room (0 after the room opens); a campaign wanting even more names the new number once.
+inline bool room_capacity_note_due(std::uint32_t held, std::uint32_t wanted, std::uint32_t& noted) noexcept {
+    if (wanted <= held || wanted <= noted) return false;
+    noted = wanted;
+    return true;
 }
 
 // Which of the two tabs are drawn, and which one is selected. A tab with no campaign behind it is an empty box (the

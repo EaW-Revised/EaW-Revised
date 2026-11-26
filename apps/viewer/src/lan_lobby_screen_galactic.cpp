@@ -222,8 +222,9 @@ std::optional<std::string> EawrLanLobby::host_galactic_game(const net::GalacticL
     }
     const auto& campaigns = impl.galactic_backend->campaigns();
     if (campaigns.empty()) return std::string("No campaign is installed.");
-    // The room opens on the first row a player can hold; a mod may have no multiplayer campaign at all.
-    const auto* hostable = eawr::campaign::first_hostable_lobby_campaign(campaigns);
+    // The room opens on the host's last picked campaign (#8497: a room opened again keeps its mode), else on the first row a player
+    // can hold; a mod may have no multiplayer campaign at all.
+    const auto* hostable = net::galactic_lobby_host_campaign(campaigns, impl.galactic_host_campaign);
     if (hostable == nullptr) return std::string("No installed campaign has a playable faction, so no campaign room can be hosted.");
     // The seed is the host's choice and travels with the options, so every peer derives the same galaxy from it.
     const std::uint64_t seed = net::draw_galactic_session_seed();
@@ -851,17 +852,20 @@ bool EawrLanLobby::galactic_item_selected(const int64_t index, const std::string
             auto fresh = net::default_galactic_lobby_options(campaign, impl.galactic_options->difficulty, impl.galactic_options->seed,
                 impl.galactic_options->input_delay);
             if (!fresh) { note_chat(model::ChatKind::error, fresh.error().message); break; }
-            // The room's seats follow the campaign's playable rows. Nobody else is in the room: it is opened again with the new number
-            // (its connections are fixed when it opens). With guests seated the number stays, and the host is told when the campaign has
-            // more player factions than the room has seats.
+            // The room's seats follow the campaign's playable rows (a co-op campaign: its side's human slots, #8497). Nobody else is in
+            // the room: it is opened again with the new number (its connections are fixed when it opens). With guests seated the number
+            // stays, and the host is told once when the campaign has room for more players than the room holds. A room opened again,
+            // also after leaving, opens on this campaign, so it keeps the mode the host chose.
+            impl.galactic_host_campaign = campaign.name;
             const auto wanted = galactic_wanted_humans(campaign);
             const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
             if (wanted != impl.human_owners.size() && room->snapshot.seats.size() == 1 && !online) {
                 reopen_galactic_room(std::move(fresh).value(), wanted);
                 return true;
             }
-            if (wanted > impl.human_owners.size())
-                note_chat(model::ChatKind::normal, "This room holds " + std::to_string(impl.human_owners.size()) + " players; the campaign has room for "
+            const auto held = static_cast<std::uint32_t>(impl.human_owners.size());
+            if (viewer::room_capacity_note_due(held, wanted, impl.capacity_noted))
+                note_chat(model::ChatKind::normal, "This room holds " + std::to_string(held) + " players; the campaign has room for "
                     + std::to_string(wanted) + ". Open the room again to hold more.");
             if (!match_->lobby_galactic_game(fresh.value())) {
                 if (const auto lobby = match_->lobby_state(); lobby && lobby->notice) note_chat(model::ChatKind::error, lobby->notice->message);

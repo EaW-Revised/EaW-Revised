@@ -461,6 +461,10 @@ struct EawrLanLobby::Impl final {
     // A campaign room opens with a seat for every playable row of the campaign (human_owners) and starts with the humans present (#8130).
     bool galactic_capacity_fitted{};    // the room's seats were fitted to the campaign list on the host options page
     std::uint32_t galactic_seat_limit{}; // the transport's seats of the room (the map's rows) when the room was opened
+    // #8497: the campaign the host last picked in staging; a room opened again (also after leaving) opens on it, so it keeps its mode.
+    std::string galactic_host_campaign;
+    std::size_t staging_dialog_rows{};  // the staging dialog's player rows, once it was built: a co-op room's human slots follow it
+    std::uint32_t capacity_noted{};     // the largest "campaign has room for N" already told in this room (0 after it opens)
     bool host_port_mapping{};           // the router mapping the host asked for, kept for a re-opened room
     skirmish::SetupSelection selection;
     bool custom_maps{};

@@ -1066,9 +1066,14 @@ private:
     bool gc_follow_mate_{}; // Test hook (#8355): EAWR_GC_COLOURS_FOLLOW_MATE=1 frames the first team mate's unit.
     std::string gc_colours_before_toggle_; // JSON rows of the model colours the frame before the flip
     std::vector<std::array<std::uint8_t, 3>> gc_palette_;
-    // Built on first use once the start names the factions (the local seat keeps its faction's main colour).
+    // Built on first use once the start names the factions; rebuilt when the controller policy changes (GCC-08).
     mutable std::map<sim::SeatId, std::array<std::uint8_t, 3>> gc_seat_colours_;
+    mutable std::map<sim::SeatId, std::array<std::uint8_t, 3>> gc_model_seat_colours_;
     mutable bool gc_seat_colours_ready_{};
+    // GCC-08: the colour seats with the live departures applied, and the controller policy they were built from.
+    mutable std::vector<sim::galactic::Seat> gc_live_seats_;
+    mutable std::optional<sim::tactical::BattleControllerPolicy> gc_seat_policy_;
+    mutable const sim::tactical::TacticalSnapshot* gc_seat_frame_{};
     std::map<std::string, std::array<std::uint8_t, 3>> type_no_colorization_;
     bool colorization_enabled_{true};
     std::set<sim::tactical::PlayerId> neutral_model_owners_; // WGT-120: cached from authored faction neutrality

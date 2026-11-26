@@ -16,6 +16,7 @@
 #include "eawr/core/tick_profile.hpp"
 #include "eawr/core/perf_diag/feed_writer.hpp"
 #include "eawr/core/perf_diag/sim_feed.hpp"
+#include "eawr/core/perf_diag/thread_cpu.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -778,6 +779,7 @@ private:
     // viewer down): an exception becomes the session's failure and the thread ends, so
     // waiters wake and stop() still joins.
     void run() noexcept {
+        const core::perf_diag::ThreadLabel sim_label("sim"); // a no-op without a telemetry feed
         try {
             loop();
         } catch (const std::exception& error) {
@@ -806,7 +808,7 @@ private:
 
     // Worker 0 of the pool. Only it touches session_ while running.
     void loop() {
-        const ThreadWorkerAdapter executor(options_.workers, ThreadWorkerAdapter::Dispatch::by_cost);
+        const ThreadWorkerAdapter executor(options_.workers, ThreadWorkerAdapter::Dispatch::by_cost, {}, "sim-worker");
         auto clock_start = Clock::now();
         std::uint64_t clock_tick = world().completed_tick();
         Clock::duration interval{};
@@ -1573,7 +1575,7 @@ private:
     // #8058: diagnostics feed and the simulation thread's scratch for it. Write-only; never read by the simulation.
     core::perf_diag::SimFeed feed_;
     // #8058 P6: with a telemetry feed running, the writer drains feed_ (declared after it: detached before it dies).
-    core::perf_diag::FeedAttachment feed_attachment_{feed_, "tactical"};
+    core::perf_diag::FeedAttachment feed_attachment_{feed_, "tactical", options_.workers};
     MeasureScratch scratch_;
     struct DiagIds final {
         core::perf_diag::PhaseId step{}, fog{}, ai{}, lua{}, land_motion{}, publish_tail{}, worker_total{}, serial_remainder{};

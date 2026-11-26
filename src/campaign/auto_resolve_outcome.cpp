@@ -23,7 +23,9 @@ bool valid(const AutoResolveOutcomeApplication& a) {
         || a.result.forces.size() > sim::galactic::galactic_max_objects || a.record.size() > sim::galactic::galactic_max_objects
         || a.learning.size() > sim::galactic::galactic_max_objects || a.land_invaders.size() > sim::galactic::galactic_max_objects
         || a.retreat_fleets.size() > sim::galactic::galactic_max_objects
-        || (!a.land && (!a.land_invaders.empty() || a.fix_land_structures))) return false;
+        || a.structure_losses.size() > sim::galactic::galactic_max_objects
+        || (!a.land && (!a.land_invaders.empty() || a.fix_land_structures))
+        || (a.land && !a.structure_losses.empty())) return false;
     std::set<sim::EntityId> ids;
     for (const auto& death : a.deaths) if (!death.id || !death.owner || !ids.insert(death.id).second) return false;
     sim::EntityId last{};
@@ -37,6 +39,7 @@ bool valid(const AutoResolveOutcomeApplication& a) {
     ids.clear();
     for (const auto id : a.retreat_fleets) if (!id || !ids.insert(id).second) return false;
     for (const auto& row : a.record) if (row.original_type.empty() || !row.owner) return false;
+    for (const auto& row : a.structure_losses) if (row.original_type.empty() || !row.owner) return false;
     return true;
 }
 }
@@ -193,6 +196,20 @@ bool auto_resolve_clears_space_structures(const AutoResolveOutcomeApplication& a
         && presence->starbase.owner != a.result.winner;
 }
 
+core::Result<std::vector<AutoResolveRecordEntry>> auto_resolve_structure_losses(const AutoResolveOutcomeApplication& a,
+    const sim::galactic::ControlPlanet* presence, const std::span<const sim::galactic::ProductionObject> objects,
+    const std::function<std::optional<std::string>(sim::galactic::TypeId)>& type_name) {
+    std::vector<AutoResolveRecordEntry> losses;
+    if (!auto_resolve_clears_space_structures(a, presence)) return core::Result<std::vector<AutoResolveRecordEntry>>::success(std::move(losses));
+    for (const auto& object : objects) {
+        if (object.domain != sim::galactic::ProductionDomain::space || object.kind != sim::galactic::ProductionKind::structure || !object.owner) continue;
+        auto name = type_name ? type_name(object.type) : std::nullopt;
+        if (!name || name->empty()) return fail<std::vector<AutoResolveRecordEntry>>("unbound space special structure");
+        losses.push_back({std::move(*name), object.owner});
+    }
+    return core::Result<std::vector<AutoResolveRecordEntry>>::success(std::move(losses));
+}
+
 core::Result<void> apply_auto_resolve_outcome(sim::galactic::GalacticSession& galaxy,
     const AutoResolveOutcomeApplication& a, const AutoResolveOutcomeServices& services) {
     if (!valid(a)) return fail<void>("invalid auto-resolve application");
@@ -252,6 +269,11 @@ core::Result<std::vector<std::uint8_t>> encode_auto_resolve_outcome(const AutoRe
     for (const auto& r : a.record) { text(r.original_type); put(r.owner, 4); }
     put(a.learning.size(), 4);
     for (const auto& r : a.learning) { put(r.player, 4); put(r.id, 8); text(r.type); put(r.survived, 1); }
+    // WAR-43a: an optional tail, so an outcome without cleared structures keeps its exact bytes (and journal hashes).
+    if (!a.structure_losses.empty()) {
+        put(a.structure_losses.size(), 4);
+        for (const auto& r : a.structure_losses) { text(r.original_type); put(r.owner, 4); }
+    }
     if (b.size() > 1'048'576) return fail<std::vector<std::uint8_t>>("outcome payload exceeds boundary limit");
     return core::Result<std::vector<std::uint8_t>>::success(std::move(b));
 }
@@ -277,6 +299,11 @@ core::Result<AutoResolveOutcomeApplication> decode_auto_resolve_outcome(const st
     for (std::size_t i = 0; i < records; ++i) { AutoResolveRecordEntry r; r.original_type = text(); r.owner = static_cast<std::uint32_t>(get(4)); a.record.push_back(std::move(r)); }
     const auto learning = count(17);
     for (std::size_t i = 0; i < learning; ++i) { AutoResolveLearning r; r.player = static_cast<std::uint32_t>(get(4)); r.id = get(8); r.type = text(); r.survived = flag(); a.learning.push_back(std::move(r)); }
+    if (!failed && at != b.size()) {
+        const auto losses = count(8);
+        if (!failed && !losses) failed = true; // the tail is written only when it has entries
+        for (std::size_t i = 0; i < losses; ++i) { AutoResolveRecordEntry r; r.original_type = text(); r.owner = static_cast<std::uint32_t>(get(4)); a.structure_losses.push_back(std::move(r)); }
+    }
     if (failed || at != b.size() || !valid(a)) return fail<AutoResolveOutcomeApplication>("malformed outcome payload");
     return core::Result<AutoResolveOutcomeApplication>::success(std::move(a));
 }

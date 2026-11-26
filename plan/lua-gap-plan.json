@@ -3186,22 +3186,6 @@
    "score": 1
   },
   {
-   "id": "tactical_story.global.spawn",
-   "host": "tactical_story",
-   "kind": "global",
-   "family": "spawn",
-   "names": [
-    "Spawn_Special_Weapon",
-    "Spawn_Unit"
-   ],
-   "owner_lane": "sk",
-   "mods_blocked": 9,
-   "order": 1,
-   "severity": "high",
-   "call_sites": 3155,
-   "score": 28395
-  },
-  {
    "id": "tactical_story.member.set",
    "host": "tactical_story",
    "kind": "member",
@@ -3220,25 +3204,10 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 2,
+   "order": 1,
    "severity": "high",
    "call_sites": 2982,
    "score": 26222
-  },
-  {
-   "id": "tactical_story.global.lock",
-   "host": "tactical_story",
-   "kind": "global",
-   "family": "lock",
-   "names": [
-    "Lock_Controls"
-   ],
-   "owner_lane": "sk",
-   "mods_blocked": 9,
-   "order": 3,
-   "severity": "high",
-   "call_sites": 2779,
-   "score": 25011
   },
   {
    "id": "tactical_story.member.suspend",
@@ -3250,7 +3219,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 4,
+   "order": 2,
    "severity": "high",
    "call_sites": 2229,
    "score": 19421
@@ -3265,7 +3234,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 5,
+   "order": 3,
    "severity": "high",
    "call_sites": 1598,
    "score": 14382
@@ -3280,7 +3249,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 6,
+   "order": 4,
    "severity": "high",
    "call_sites": 1156,
    "score": 10404
@@ -3295,7 +3264,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 7,
+   "order": 5,
    "severity": "high",
    "call_sites": 1034,
    "score": 9306
@@ -3310,7 +3279,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 8,
+   "order": 6,
    "severity": "high",
    "call_sites": 920,
    "score": 8280
@@ -3325,7 +3294,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 9,
+   "order": 7,
    "severity": "high",
    "call_sites": 907,
    "score": 8163
@@ -3341,7 +3310,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 10,
+   "order": 8,
    "severity": "high",
    "call_sites": 894,
    "score": 8046
@@ -3358,7 +3327,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 11,
+   "order": 9,
    "severity": "high",
    "call_sites": 614,
    "score": 5526
@@ -3373,7 +3342,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 12,
+   "order": 10,
    "severity": "high",
    "call_sites": 602,
    "score": 5418
@@ -3388,7 +3357,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 13,
+   "order": 11,
    "severity": "high",
    "call_sites": 597,
    "score": 5373
@@ -3403,7 +3372,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 14,
+   "order": 12,
    "severity": "high",
    "call_sites": 551,
    "score": 4959
@@ -3418,7 +3387,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 15,
+   "order": 13,
    "severity": "high",
    "call_sites": 519,
    "score": 4671
@@ -3434,7 +3403,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 16,
+   "order": 14,
    "severity": "high",
    "call_sites": 500,
    "score": 4500
@@ -3449,7 +3418,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 17,
+   "order": 15,
    "severity": "high",
    "call_sites": 473,
    "score": 4257
@@ -3464,7 +3433,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 18,
+   "order": 16,
    "severity": "high",
    "call_sites": 440,
    "score": 3960
@@ -3480,25 +3449,10 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 19,
+   "order": 17,
    "severity": "high",
    "call_sites": 340,
    "score": 3060
-  },
-  {
-   "id": "tactical_object.global.spawn",
-   "host": "tactical_object",
-   "kind": "global",
-   "family": "spawn",
-   "names": [
-    "Spawn_Unit"
-   ],
-   "owner_lane": "sk",
-   "mods_blocked": 9,
-   "order": 20,
-   "severity": "high",
-   "call_sites": 335,
-   "score": 3015
   },
   {
    "id": "tactical_story.global.create",
@@ -3510,7 +3464,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 21,
+   "order": 18,
    "severity": "high",
    "call_sites": 312,
    "score": 2808
@@ -3525,7 +3479,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 22,
+   "order": 19,
    "severity": "high",
    "call_sites": 306,
    "score": 2754
@@ -3540,7 +3494,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 23,
+   "order": 20,
    "severity": "high",
    "call_sites": 293,
    "score": 2637
@@ -3556,7 +3510,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 24,
+   "order": 21,
    "severity": "high",
    "call_sites": 346,
    "score": 2472
@@ -3571,7 +3525,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 7,
-   "order": 25,
+   "order": 22,
    "severity": "high",
    "call_sites": 293,
    "score": 2051
@@ -3587,7 +3541,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 26,
+   "order": 23,
    "severity": "high",
    "call_sites": 219,
    "score": 1971
@@ -3602,7 +3556,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 27,
+   "order": 24,
    "severity": "high",
    "call_sites": 216,
    "score": 1944
@@ -3617,7 +3571,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 28,
+   "order": 25,
    "severity": "high",
    "call_sites": 203,
    "score": 1827
@@ -3632,7 +3586,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 29,
+   "order": 26,
    "severity": "high",
    "call_sites": 181,
    "score": 1629
@@ -3649,7 +3603,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 30,
+   "order": 27,
    "severity": "high",
    "call_sites": 176,
    "score": 1584
@@ -3664,7 +3618,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 31,
+   "order": 28,
    "severity": "high",
    "call_sites": 174,
    "score": 1566
@@ -3681,7 +3635,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 32,
+   "order": 29,
    "severity": "high",
    "call_sites": 171,
    "score": 1539
@@ -3697,7 +3651,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 33,
+   "order": 30,
    "severity": "high",
    "call_sites": 167,
    "score": 1503
@@ -3712,7 +3666,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 34,
+   "order": 31,
    "severity": "high",
    "call_sites": 164,
    "score": 1476
@@ -3727,7 +3681,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 35,
+   "order": 32,
    "severity": "high",
    "call_sites": 144,
    "score": 1296
@@ -3742,25 +3696,10 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 36,
+   "order": 33,
    "severity": "high",
    "call_sites": 140,
    "score": 1260
-  },
-  {
-   "id": "tactical_object.global.lock",
-   "host": "tactical_object",
-   "kind": "global",
-   "family": "lock",
-   "names": [
-    "Lock_Controls"
-   ],
-   "owner_lane": "sk",
-   "mods_blocked": 8,
-   "order": 37,
-   "severity": "high",
-   "call_sites": 150,
-   "score": 1200
   },
   {
    "id": "tactical_story.global.enable",
@@ -3773,7 +3712,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 38,
+   "order": 34,
    "severity": "high",
    "call_sites": 129,
    "score": 1161
@@ -3788,7 +3727,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 8,
-   "order": 39,
+   "order": 35,
    "severity": "high",
    "call_sites": 86,
    "score": 646
@@ -3803,7 +3742,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 8,
-   "order": 40,
+   "order": 36,
    "severity": "high",
    "call_sites": 77,
    "score": 609
@@ -3818,7 +3757,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 41,
+   "order": 37,
    "severity": "high",
    "call_sites": 60,
    "score": 540
@@ -3833,7 +3772,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 3,
-   "order": 42,
+   "order": 38,
    "severity": "high",
    "call_sites": 178,
    "score": 534
@@ -3848,7 +3787,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 43,
+   "order": 39,
    "severity": "high",
    "call_sites": 55,
    "score": 495
@@ -3863,7 +3802,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 44,
+   "order": 40,
    "severity": "high",
    "call_sites": 53,
    "score": 477
@@ -3878,7 +3817,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 45,
+   "order": 41,
    "severity": "high",
    "call_sites": 52,
    "score": 468
@@ -3893,7 +3832,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 3,
-   "order": 46,
+   "order": 42,
    "severity": "high",
    "call_sites": 146,
    "score": 438
@@ -3910,7 +3849,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 47,
+   "order": 43,
    "severity": "high",
    "call_sites": 52,
    "score": 420
@@ -3926,7 +3865,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 48,
+   "order": 44,
    "severity": "high",
    "call_sites": 53,
    "score": 411
@@ -3941,7 +3880,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 49,
+   "order": 45,
    "severity": "high",
    "call_sites": 44,
    "score": 396
@@ -3960,7 +3899,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 8,
-   "order": 50,
+   "order": 46,
    "severity": "high",
    "call_sites": 64,
    "score": 385
@@ -3975,7 +3914,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 51,
+   "order": 47,
    "severity": "high",
    "call_sites": 37,
    "score": 333
@@ -3990,7 +3929,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 8,
-   "order": 52,
+   "order": 48,
    "severity": "high",
    "call_sites": 35,
    "score": 280
@@ -4005,7 +3944,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 53,
+   "order": 49,
    "severity": "high",
    "call_sites": 30,
    "score": 270
@@ -4024,7 +3963,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 54,
+   "order": 50,
    "severity": "high",
    "call_sites": 46,
    "score": 267
@@ -4039,7 +3978,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 55,
+   "order": 51,
    "severity": "high",
    "call_sites": 25,
    "score": 225
@@ -4054,7 +3993,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 56,
+   "order": 52,
    "severity": "high",
    "call_sites": 23,
    "score": 207
@@ -4069,7 +4008,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 57,
+   "order": 53,
    "severity": "high",
    "call_sites": 23,
    "score": 207
@@ -4084,7 +4023,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 58,
+   "order": 54,
    "severity": "high",
    "call_sites": 22,
    "score": 198
@@ -4099,7 +4038,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 8,
-   "order": 59,
+   "order": 55,
    "severity": "high",
    "call_sites": 22,
    "score": 176
@@ -4114,7 +4053,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 8,
-   "order": 60,
+   "order": 56,
    "severity": "high",
    "call_sites": 22,
    "score": 176
@@ -4129,7 +4068,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 61,
+   "order": 57,
    "severity": "high",
    "call_sites": 18,
    "score": 162
@@ -4144,7 +4083,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 62,
+   "order": 58,
    "severity": "high",
    "call_sites": 15,
    "score": 135
@@ -4159,7 +4098,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 63,
+   "order": 59,
    "severity": "high",
    "call_sites": 11,
    "score": 99
@@ -4174,7 +4113,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 64,
+   "order": 60,
    "severity": "high",
    "call_sites": 11,
    "score": 99
@@ -4189,7 +4128,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 65,
+   "order": 61,
    "severity": "high",
    "call_sites": 11,
    "score": 99
@@ -4204,7 +4143,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 66,
+   "order": 62,
    "severity": "high",
    "call_sites": 11,
    "score": 99
@@ -4219,7 +4158,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 67,
+   "order": 63,
    "severity": "high",
    "call_sites": 11,
    "score": 99
@@ -4234,7 +4173,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 3,
-   "order": 68,
+   "order": 64,
    "severity": "high",
    "call_sites": 31,
    "score": 93
@@ -4249,7 +4188,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 69,
+   "order": 65,
    "severity": "high",
    "call_sites": 10,
    "score": 90
@@ -4264,7 +4203,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 70,
+   "order": 66,
    "severity": "high",
    "call_sites": 10,
    "score": 90
@@ -4279,7 +4218,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 71,
+   "order": 67,
    "severity": "high",
    "call_sites": 10,
    "score": 90
@@ -4294,7 +4233,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 9,
-   "order": 72,
+   "order": 68,
    "severity": "high",
    "call_sites": 10,
    "score": 90
@@ -4309,7 +4248,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 8,
-   "order": 73,
+   "order": 69,
    "severity": "high",
    "call_sites": 11,
    "score": 88
@@ -4324,7 +4263,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 8,
-   "order": 74,
+   "order": 70,
    "severity": "high",
    "call_sites": 11,
    "score": 88
@@ -4339,7 +4278,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 4,
-   "order": 75,
+   "order": 71,
    "severity": "high",
    "call_sites": 20,
    "score": 80
@@ -4354,7 +4293,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 7,
-   "order": 76,
+   "order": 72,
    "severity": "high",
    "call_sites": 10,
    "score": 70
@@ -4372,7 +4311,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 77,
+   "order": 73,
    "severity": "high",
    "call_sites": 34,
    "score": 60
@@ -4387,7 +4326,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 78,
+   "order": 74,
    "severity": "high",
    "call_sites": 27,
    "score": 54
@@ -4404,7 +4343,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 3,
-   "order": 79,
+   "order": 75,
    "severity": "high",
    "call_sites": 17,
    "score": 43
@@ -4423,7 +4362,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 80,
+   "order": 76,
    "severity": "high",
    "call_sites": 20,
    "score": 40
@@ -4438,7 +4377,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 4,
-   "order": 81,
+   "order": 77,
    "severity": "high",
    "call_sites": 9,
    "score": 36
@@ -4453,7 +4392,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 3,
-   "order": 82,
+   "order": 78,
    "severity": "high",
    "call_sites": 9,
    "score": 27
@@ -4469,7 +4408,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 3,
-   "order": 83,
+   "order": 79,
    "severity": "high",
    "call_sites": 11,
    "score": 27
@@ -4484,7 +4423,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 4,
-   "order": 84,
+   "order": 80,
    "severity": "high",
    "call_sites": 6,
    "score": 24
@@ -4499,7 +4438,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 85,
+   "order": 81,
    "severity": "high",
    "call_sites": 12,
    "score": 24
@@ -4515,7 +4454,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 86,
+   "order": 82,
    "severity": "high",
    "call_sites": 12,
    "score": 23
@@ -4531,7 +4470,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 87,
+   "order": 83,
    "severity": "high",
    "call_sites": 10,
    "score": 18
@@ -4547,7 +4486,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 88,
+   "order": 84,
    "severity": "high",
    "call_sites": 10,
    "score": 17
@@ -4562,7 +4501,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 89,
+   "order": 85,
    "severity": "high",
    "call_sites": 8,
    "score": 16
@@ -4577,7 +4516,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 4,
-   "order": 90,
+   "order": 86,
    "severity": "high",
    "call_sites": 4,
    "score": 16
@@ -4592,7 +4531,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 91,
+   "order": 87,
    "severity": "high",
    "call_sites": 13,
    "score": 13
@@ -4607,22 +4546,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 92,
-   "severity": "high",
-   "call_sites": 6,
-   "score": 12
-  },
-  {
-   "id": "tactical_plan_space.global.spawn",
-   "host": "tactical_plan_space",
-   "kind": "global",
-   "family": "spawn",
-   "names": [
-    "Spawn_Unit"
-   ],
-   "owner_lane": "sk",
-   "mods_blocked": 2,
-   "order": 93,
+   "order": 88,
    "severity": "high",
    "call_sites": 6,
    "score": 12
@@ -4637,7 +4561,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 94,
+   "order": 89,
    "severity": "high",
    "call_sites": 12,
    "score": 12
@@ -4653,7 +4577,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 3,
-   "order": 95,
+   "order": 90,
    "severity": "high",
    "call_sites": 4,
    "score": 10
@@ -4668,7 +4592,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 96,
+   "order": 91,
    "severity": "high",
    "call_sites": 5,
    "score": 10
@@ -4683,7 +4607,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 3,
-   "order": 97,
+   "order": 92,
    "severity": "high",
    "call_sites": 3,
    "score": 9
@@ -4698,7 +4622,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 3,
-   "order": 98,
+   "order": 93,
    "severity": "high",
    "call_sites": 3,
    "score": 9
@@ -4713,7 +4637,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 99,
+   "order": 94,
    "severity": "high",
    "call_sites": 4,
    "score": 8
@@ -4728,7 +4652,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 100,
+   "order": 95,
    "severity": "high",
    "call_sites": 4,
    "score": 8
@@ -4743,7 +4667,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 101,
+   "order": 96,
    "severity": "high",
    "call_sites": 8,
    "score": 8
@@ -4758,7 +4682,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 102,
+   "order": 97,
    "severity": "high",
    "call_sites": 4,
    "score": 8
@@ -4773,7 +4697,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 103,
+   "order": 98,
    "severity": "high",
    "call_sites": 7,
    "score": 7
@@ -4789,7 +4713,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 104,
+   "order": 99,
    "severity": "high",
    "call_sites": 7,
    "score": 7
@@ -4804,7 +4728,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 105,
+   "order": 100,
    "severity": "high",
    "call_sites": 3,
    "score": 6
@@ -4822,7 +4746,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 106,
+   "order": 101,
    "severity": "high",
    "call_sites": 6,
    "score": 6
@@ -4837,7 +4761,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 107,
+   "order": 102,
    "severity": "high",
    "call_sites": 3,
    "score": 6
@@ -4852,7 +4776,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 108,
+   "order": 103,
    "severity": "high",
    "call_sites": 6,
    "score": 6
@@ -4867,7 +4791,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 109,
+   "order": 104,
    "severity": "high",
    "call_sites": 3,
    "score": 6
@@ -4882,7 +4806,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 110,
+   "order": 105,
    "severity": "high",
    "call_sites": 6,
    "score": 6
@@ -4897,7 +4821,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 111,
+   "order": 106,
    "severity": "high",
    "call_sites": 2,
    "score": 4
@@ -4912,7 +4836,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 112,
+   "order": 107,
    "severity": "high",
    "call_sites": 4,
    "score": 4
@@ -4927,25 +4851,10 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 2,
-   "order": 113,
+   "order": 108,
    "severity": "high",
    "call_sites": 2,
    "score": 4
-  },
-  {
-   "id": "tactical_evaluators.global.spawn",
-   "host": "tactical_evaluators",
-   "kind": "global",
-   "family": "spawn",
-   "names": [
-    "Spawn_Unit"
-   ],
-   "owner_lane": "sk",
-   "mods_blocked": 1,
-   "order": 114,
-   "severity": "high",
-   "call_sites": 2,
-   "score": 2
   },
   {
    "id": "tactical_evaluators.global.discretedistribution",
@@ -4957,7 +4866,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 115,
+   "order": 109,
    "severity": "high",
    "call_sites": 1,
    "score": 1
@@ -4972,7 +4881,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 116,
+   "order": 110,
    "severity": "high",
    "call_sites": 1,
    "score": 1
@@ -4987,7 +4896,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 117,
+   "order": 111,
    "severity": "high",
    "call_sites": 1,
    "score": 1
@@ -5002,7 +4911,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 118,
+   "order": 112,
    "severity": "high",
    "call_sites": 1,
    "score": 1
@@ -5017,7 +4926,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 119,
+   "order": 113,
    "severity": "high",
    "call_sites": 1,
    "score": 1
@@ -5032,7 +4941,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 120,
+   "order": 114,
    "severity": "high",
    "call_sites": 1,
    "score": 1
@@ -5047,7 +4956,7 @@
    ],
    "owner_lane": "sk",
    "mods_blocked": 1,
-   "order": 121,
+   "order": 115,
    "severity": "high",
    "call_sites": 1,
    "score": 1

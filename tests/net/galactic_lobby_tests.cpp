@@ -579,6 +579,11 @@ void coop_catalog_without_multiplayer_campaign() {
     for (auto& faction : catalog[0].factions) faction.playable = false;
     expect(cp::first_hostable_lobby_campaign(catalog) == &catalog[1], "a row with no playable faction is skipped");
     expect(!net::default_galactic_lobby_options(catalog[0], difficulty, match_seed).has_value(), "the skipped row is the one that would be refused");
+    // #8497: a room opened again opens on the host's last pick (keeping its mode); an unknown or unhostable pick falls back to the first row.
+    expect(net::galactic_lobby_host_campaign(list, "Real_Solo_Alpha") == &list[1], "the host's last pick is the row a new room opens on");
+    expect(net::galactic_lobby_host_campaign(list, "") == &list[0] && net::galactic_lobby_host_campaign(list, "Gone") == &list[0],
+        "no pick, or a pick the catalog no longer lists: the first hostable row");
+    expect(net::galactic_lobby_host_campaign(catalog, catalog[0].name) == &catalog[1], "a pick with no playable faction is not opened on");
     // co-op rows name the faction the players take
     expect(cp::lobby_campaign_row_title(list[0], "Gateways") == "BETA_GUILD - Gateways"
         && cp::lobby_campaign_row_title(list[1], "Gateways") == "ALPHA_HOUSE - Gateways",
@@ -2658,7 +2663,18 @@ void d8_dialog_row_limit() {
         // A co-op campaign (one side, co-op seats) opens with the seat ceiling: all the humans on one side.
         auto coop = few.catalog().front();
         coop.single_player_rules = true;
-        expect(net::galactic_lobby_max_humans(coop, 9) == 8, "a co-op campaign opens for eight humans, all on one side");
+        expect(net::galactic_lobby_max_humans(coop, 9) == 8, "no staging dialog known: a co-op campaign opens with the seat ceiling");
+        // #8497: with the staging dialog known, a co-op room holds the human slots of its side: the side's own row and the dialog rows
+        // the campaign's rows leave free (four rows here: three factions and the neutral one), within two and the transport's seats.
+        expect(net::galactic_lobby_max_humans(coop, 9, 9) == 6, "nine dialog rows, four campaign rows: the side's row and five free ones");
+        expect(net::galactic_lobby_max_humans(coop, 4, 9) == 4, "the transport's seats still bound a co-op room");
+        expect(net::galactic_lobby_max_humans(coop, 9, 6) == 3, "six dialog rows: the side's row and two free ones");
+        expect(net::galactic_lobby_max_humans(coop, 9, 4) == 2 && net::galactic_lobby_max_humans(coop, 9, 3) == 2,
+            "a dialog with no free row still holds two co-op humans");
+        expect(net::galactic_lobby_max_humans(coop, 12, 20) == 8, "a tall dialog never lifts a co-op room above eight");
+        // Multiplayer unchanged: the playable factions, whatever the dialog.
+        expect(net::galactic_lobby_max_humans(few.catalog().front(), 9, 9) == 3 && net::galactic_lobby_max_humans(campaign, 9, 4) == 8
+            && net::galactic_lobby_max_humans(one.catalog().front(), 9, 9) == 2, "a multiplayer room's capacity ignores the dialog rows");
     }
     // A four row mod dialog on the eight faction campaign, five humans: the room seats the first three on rows of their own; every other
     // joiner shares one of those rows (a co-op seat, drawn), and a claim of a row past the limit is refused with the dialog named.

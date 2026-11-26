@@ -262,8 +262,10 @@ private:
         if (names.bounty) view.bounty = names.bounty(view.conflict,local);
         if (names.space_picture && !outcome.land) view.picture = names.space_picture(local, view.won);
         std::vector<CampaignRecordEntry> record;
-        record.reserve(outcome.record.size());
+        record.reserve(outcome.record.size() + outcome.structure_losses.size());
         for (const auto& row : outcome.record) record.push_back({row.original_type, row.owner});
+        // WAR-43a: the cleared space structures are scoring kills, listed like any other loss (the advisor reads only `record`).
+        for (const auto& row : outcome.structure_losses) record.push_back({row.original_type, row.owner});
         view.results = campaign_record_results(record, local,
             [&](auto owner) { return owner == (local == outcome.invader ? outcome.defender : outcome.invader); }, names.type);
     }

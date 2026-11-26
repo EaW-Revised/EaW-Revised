@@ -383,7 +383,24 @@ std::vector<std::string> describe_galactic_ai_goals(const GalacticAiRuntimeView&
                    << " target=" << goal.target << " desire=" << goal.desire << " active=" << goal.active
                    << " plan=" << (goal.plan.empty() ? "none" : goal.plan) << " running=" << goal.running_plan
                    << " retained_move_requests=" << move_requests;
+            if (!goal.selection.empty()) detail << " selection{" << goal.selection << '}';
             lines.push_back(detail.str());
+        }
+        // Observer output only: this player's queued production per planet and queue (front first, with its start frame).
+        if (actions) if (const auto snapshot = actions->snapshot(); snapshot && snapshot->production()) {
+            for (const auto& planet : snapshot->production()->planets) {
+                std::ostringstream queued;
+                for (std::size_t domain = 0; domain < planet.queues.size(); ++domain) {
+                    std::ostringstream entries;
+                    std::size_t count{};
+                    for (const auto& entry : planet.queues[domain]) {
+                        if (entry.builder != selected.player) continue;
+                        entries << (count++ ? "," : "") << engine->galactic_type_name(entry.type) << '@' << entry.start_frame;
+                    }
+                    if (count) queued << (domain ? " space[" : " ground[") << entries.str() << ']';
+                }
+                if (!queued.str().empty()) lines.push_back("player " + std::to_string(selected.player) + " queue planet=" + std::to_string(planet.planet) + queued.str());
+            }
         }
     }
     return lines;

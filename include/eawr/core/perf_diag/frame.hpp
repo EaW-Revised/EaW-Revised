@@ -42,8 +42,10 @@ struct RenderSample final {
     float gpu_ms{};             // viewport GPU time (latest available)
     float setup_ms{};           // frame setup CPU time
     std::uint32_t flags{};
+    std::uint32_t draw_calls{}; // the viewport's draw calls of the preceding frame (read on the render thread)
+    std::uint32_t objects{};    // the viewport's visible objects of the preceding frame
 };
-static_assert(sizeof(RenderSample) == 24);
+static_assert(sizeof(RenderSample) == 32);
 
 // CPU draw preceding the callback tag; the GPU getter does not identify its source frame.
 struct FrameLags final {
@@ -57,6 +59,8 @@ struct FrameSample final {
     float render_cpu_ms{};
     float render_gpu_ms{};
     float render_setup_ms{};
+    std::uint32_t render_draw_calls{};
+    std::uint32_t render_objects{};
     bool have_main{};
     bool have_cpu{};
     bool have_gpu{};
@@ -90,6 +94,8 @@ public:
             if (Slot* slot = claim(record.tag - lags_.cpu, sink)) {
                 slot->sample.render_cpu_ms = record.cpu_ms;
                 slot->sample.render_setup_ms = record.setup_ms;
+                slot->sample.render_draw_calls = record.draw_calls;
+                slot->sample.render_objects = record.objects;
                 slot->sample.have_cpu = true;
                 finish(*slot, sink);
             }

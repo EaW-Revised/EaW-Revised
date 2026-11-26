@@ -59,11 +59,30 @@ std::size_t galactic_lobby_human_row_limit(const gc::MpLobbyCampaign& campaign, 
     return std::min(rows, galactic_lobby_max_human_sides);
 }
 
-std::uint32_t galactic_lobby_max_humans(const gc::MpLobbyCampaign& campaign, const std::uint32_t seat_limit) noexcept {
+std::uint32_t galactic_lobby_max_humans(const gc::MpLobbyCampaign& campaign, const std::uint32_t seat_limit, const std::size_t dialog_rows) noexcept {
     const auto playable = static_cast<std::uint32_t>(std::count_if(campaign.factions.begin(), campaign.factions.end(),
         [](const gc::MpLobbyFaction& faction) { return faction.playable && !faction.neutral; }));
     const auto ceiling = std::max<std::uint32_t>(2U, std::min<std::uint32_t>(seat_limit, static_cast<std::uint32_t>(gc::galactic_max_human_seats)));
-    return campaign.single_player_rules ? ceiling : std::clamp<std::uint32_t>(playable, 2U, ceiling);
+    if (!campaign.single_player_rules) return std::clamp<std::uint32_t>(playable, 2U, ceiling);
+    if (dialog_rows == 0) return ceiling;
+    // #8497: every campaign row takes a dialog row (a short list draws them all); the co-op side's further seats stack on the rows left.
+    const std::size_t spare = dialog_rows > campaign.factions.size() ? dialog_rows - campaign.factions.size() : 0U;
+    const auto slots = static_cast<std::uint32_t>(std::min<std::size_t>(1U + spare, gc::galactic_max_human_seats));
+    return std::clamp<std::uint32_t>(slots, 2U, ceiling);
+}
+
+const gc::MpLobbyCampaign* galactic_lobby_host_campaign(const std::span<const gc::MpLobbyCampaign> campaigns,
+    const std::string_view preferred) noexcept {
+    const auto hostable = [](const gc::MpLobbyCampaign& campaign) {
+        return std::any_of(campaign.factions.begin(), campaign.factions.end(),
+            [](const gc::MpLobbyFaction& faction) { return faction.playable && !faction.neutral; });
+    };
+    if (!preferred.empty())
+        for (const auto& campaign : campaigns)
+            if (campaign.name == preferred && hostable(campaign)) return &campaign;
+    for (const auto& campaign : campaigns)
+        if (hostable(campaign)) return &campaign;
+    return nullptr;
 }
 
 LobbyGameMode lobby_game_mode(const LobbyGame& game) noexcept {

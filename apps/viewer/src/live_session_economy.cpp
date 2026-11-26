@@ -163,43 +163,64 @@ std::optional<std::array<std::uint8_t, 3>> LiveSessionView::owner_ui_colour(cons
 }
 
 void LiveSessionView::ensure_gc_seat_colours() const {
-    if (gc_seat_colours_ready_ || !options_.borrowed_battle || !start_ || team_of_player_.empty()) return;
+    if (!options_.borrowed_battle || !start_ || team_of_player_.empty()) return;
+    // GCC-08: who is #1 of a faction's slot follows the battle's shared controller policy (a seat that left turns inactive
+    // on every peer at the same tick), so the table is rebuilt whenever a new policy is published.
+    // Called per instance: the same snapshot needs no check at all.
+    if (gc_seat_colours_ready_ && gc_seat_frame_ == battle_frame_.latest.get()) return;
+    gc_seat_frame_ = battle_frame_.latest.get();
+    const auto* policy = battle_frame_.latest && battle_frame_.latest->controller_policy()
+        ? &*battle_frame_.latest->controller_policy() : setup_ && setup_->controllers ? &*setup_->controllers : nullptr;
+    if (gc_seat_colours_ready_ && gc_seat_policy_ == (policy ? std::optional{*policy} : std::nullopt)) return;
+    gc_seat_policy_ = policy ? std::optional{*policy} : std::nullopt;
     gc_seat_colours_ready_ = true;
     gc_seat_colours_.clear();
-    // #8355: the local seat and every enemy keep their faction's own look (no entry); the local side's mates, human or
-    // allied AI, get tinted variants of the local faction's colour. Developer workshop switch:
-    // EAWR_GC_ALLY_OWN_COLOURS=1 gives each human mate a palette colour of its own instead of a shade.
-    std::optional<std::array<std::uint8_t, 3>> own;
-    const auto local = std::find_if(options_.colour_seats.begin(), options_.colour_seats.end(),
-        [&](const auto& row) { return row.seat_id == options_.controller_seat; });
-    if (local != options_.colour_seats.end()) {
-        if (const auto faction = ui::faction_colour(faction_colours_, player_faction(local->player), true))
-            own = std::array<std::uint8_t, 3>{faction->r, faction->g, faction->b};
-    }
+    gc_model_seat_colours_.clear();
+    gc_live_seats_ = options_.colour_seats;
+    if (policy)
+        for (auto& seat : gc_live_seats_) {
+            const auto binding = std::find_if(policy->seats.begin(), policy->seats.end(),
+                [&](const auto& row) { return row.seat == seat.seat_id; });
+            if (binding != policy->seats.end()) seat.active = seat.active && binding->active;
+        }
+    // #8355/#8359: every enemy keeps its faction's own look (no entry); the local faction's main player (#1 of its lobby
+    // slot, GCC-08) takes the faction's coloured `Color`; the other players of the local side, human or allied AI, get
+    // tinted variants of the colour-off colour.
+    // Developer workshop switch: EAWR_GC_ALLY_OWN_COLOURS=1 gives each human mate a palette colour of its own instead of a shade.
     const bool shades = godot::OS::get_singleton()->get_environment("EAWR_GC_ALLY_OWN_COLOURS") != godot::String("1");
-    // PROVISIONAL (#8359): the local faction's Coop_Player_Colours list (absent: the shade family).
-    std::vector<std::array<std::uint8_t, 3>> coop_colours;
-    if (local != options_.colour_seats.end())
-        for (const auto& entry : ui::faction_coop_colours(faction_colours_, player_faction(local->player)))
-            coop_colours.push_back({entry.r, entry.g, entry.b});
     std::vector<sim::SeatId> ai_mates;
-    for (const auto& seat : options_.colour_seats)
+    for (const auto& seat : gc_live_seats_)
         if (seat.active && seat.kind == sim::SeatKind::ai && seat.player != player_ && is_ally_of_local(seat.player))
             ai_mates.push_back(seat.seat_id);
-    for (const auto& seat : options_.colour_seats)
-        if (const auto colour = ui::gc_participant_colour(seat.seat_id, options_.colour_seats, options_.colour_teams,
-                gc_palette_, shades, options_.controller_seat, own, ai_mates, coop_colours)) gc_seat_colours_.emplace(seat.seat_id, *colour);
+    const auto build_colours = [&](const sim::SeatId perspective, auto& destination) {
+        std::optional<std::array<std::uint8_t, 3>> own;
+        std::optional<std::array<std::uint8_t, 3>> main_colour;
+        std::vector<std::array<std::uint8_t, 3>> coop_colours;
+        const auto local = std::find_if(gc_live_seats_.begin(), gc_live_seats_.end(),
+            [&](const auto& row) { return row.seat_id == perspective; });
+        if (local != gc_live_seats_.end()) {
+            if (const auto faction = ui::faction_colour(faction_colours_, player_faction(local->player), true))
+                own = std::array<std::uint8_t, 3>{faction->r, faction->g, faction->b};
+            if (const auto team = ui::faction_colour(faction_colours_, player_faction(local->player)))
+                main_colour = std::array<std::uint8_t, 3>{team->r, team->g, team->b};
+            for (const auto& entry : ui::faction_coop_colours(faction_colours_, player_faction(local->player)))
+                coop_colours.push_back({entry.r, entry.g, entry.b});
+        }
+        for (const auto& seat : gc_live_seats_)
+            if (const auto colour = ui::gc_participant_colour(seat.seat_id, gc_live_seats_, options_.colour_teams,
+                    gc_palette_, shades, perspective, own, ai_mates, coop_colours, main_colour))
+                destination.emplace(seat.seat_id, *colour);
+    };
+    build_colours(options_.controller_seat, gc_seat_colours_);
+    if (options_.view_only) build_colours(ui::gc_main_seat(gc_live_seats_, player_), gc_model_seat_colours_);
+    else gc_model_seat_colours_ = gc_seat_colours_;
 }
 
 std::optional<std::array<std::uint8_t, 3>> LiveSessionView::participant_colour(
         sim::SeatId seat, const tactical::PlayerId owner) const {
     if (options_.borrowed_battle) {
         ensure_gc_seat_colours();
-        if (seat.value == 0) {
-            const auto found = std::find_if(options_.colour_seats.begin(), options_.colour_seats.end(),
-                [owner](const auto& row) { return row.player == owner && row.active && row.kind == sim::SeatKind::human; });
-            if (found != options_.colour_seats.end()) seat = found->seat_id;
-        }
+        if (seat.value == 0) seat = ui::gc_main_seat(gc_live_seats_, owner); // the faction's #1 (GCC-08)
         if (const auto colour = gc_seat_colours_.find(seat); colour != gc_seat_colours_.end()) return colour->second;
     }
     return owner_ui_colour(owner);
@@ -210,7 +231,7 @@ std::optional<std::array<std::uint8_t, 3>> LiveSessionView::instance_model_colou
     const auto faction = model_colour(instance.owner, object_id);
     const bool participant_units = gc_participant_units() && !neutral_model_owners_.contains(instance.owner);
     if (participant_units) ensure_gc_seat_colours();
-    return ui::gc_instance_model_colour(participant_units, instance, faction, options_.colour_seats, gc_seat_colours_);
+    return ui::gc_coop_model_colour(participant_units, instance, faction, gc_live_seats_, gc_model_seat_colours_, player_);
 }
 
 void LiveSessionView::apply_gc_colour_toggle() {
@@ -247,7 +268,9 @@ bool LiveSessionView::gc_participant_units() const noexcept {
 std::optional<std::array<std::uint8_t, 3>> LiveSessionView::minimap_unit_colour(
         const tactical::TacticalInstance& instance, const std::string& object_id) const {
     if (!gc_participant_units()) return std::nullopt;
-    return instance_model_colour(instance, object_id);
+    ensure_gc_seat_colours();
+    return ui::gc_instance_model_colour(!neutral_model_owners_.contains(instance.owner), instance,
+        model_colour(instance.owner, object_id), gc_live_seats_, gc_seat_colours_);
 }
 
 bool LiveSessionView::model_uses_player_colour(const tactical::PlayerId player) const noexcept {

@@ -8,6 +8,7 @@
 #include "font_provision.hpp"
 #include "gpu_memory_trace.hpp"
 #include "menu_timeline.hpp"
+#include "perf_context.hpp"
 #include "settings_store.hpp"
 #include "startup_trace.hpp"
 #include "startup_window.hpp"
@@ -98,6 +99,8 @@ void ViewerHost::write_window_title(const std::string& title) {
     if (auto* display = DisplayServer::get_singleton()) display->window_set_title(String::utf8(title.c_str()));
 }
 
+void ViewerHost::reapply_window_title() { window_title_.reapply(write_window_title); }
+
 // Exceptions must not escape a GDExtension callback into the engine.
 void ViewerHost::_ready() try {
     if (!apply_engine_guard(*this)) return;  // engine guard (owner rule 11-03): engine_guard_startup.hpp
@@ -117,13 +120,23 @@ void ViewerHost::_ready() try {
     // The ONE writer of the window title (the engine guard no longer appends to it). It states the viewer and
     // engine builds and the engine signature (red-flagged "UNPATCHED ENGINE (...)" when the guard says unpatched),
     // plus the launcher's mod profile name. It never shows the engine's "(DEBUG)": the title goes through the
-    // DisplayServer and is re-applied after every engine title update (see _notification).
+    // DisplayServer and is re-applied after every engine title update. The engine's first one comes right after
+    // this _ready: the scene tree readies its children first and then sends the root window its own
+    // post-enter-tree translation update, which rewrites the title ("<name> (DEBUG)") and reaches no child. So the
+    // title is written now and once more from the first deferred call (after startup), then again on every
+    // translation change that does reach the host (see _notification) and on every root title_changed signal.
+    // The rig test (test_viewer_window_title.py) reads the real window title, through those later re-titles too.
     {
         const std::string name = ProjectSettings::get_singleton()->get_setting("application/config/name", "EAWR Viewer")
             .operator String().utf8().get_data();
         const auto& profile = viewer_profile_options().profile;
         window_title_.set(eawr::presentation::ui::window_title(name, profile ? profile->name : std::string(),
             viewer_build_type(), engine_summary(), engine_signature()), write_window_title);
+        callable_mp(this, &ViewerHost::reapply_window_title).call_deferred();
+        // A title property change on the root window (Window::set_title) rewrites it again and then emits this
+        // signal, synchronously, so the re-apply follows the engine's write with no frame in between.
+        if (auto* tree = get_tree(); tree && tree->get_root())
+            tree->get_root()->connect("title_changed", callable_mp(this, &ViewerHost::reapply_window_title));
     }
     // UI-07: a text control taking focus cancels held world input (UI-I3).
     get_viewport()->connect("gui_focus_changed", callable_mp(this, &ViewerHost::on_gui_focus_changed));
@@ -343,8 +356,10 @@ void ViewerHost::_ready() try {
             const String engine_text = version.get("string", String());
             feed.engine = std::string(engine_text.utf8().get_data());
             std::string error;
-            if (core::perf_diag::FeedWriter::start_process(std::move(feed), error))
+            if (core::perf_diag::FeedWriter::start_process(std::move(feed), error)) {
+                core::perf_diag::FeedWriter::set_context_active(perf_context_fields());
                 UtilityFunctions::print(String("EAWR telemetry feed on: ") + String::utf8(ViewerPath::utf8(telemetry).c_str()));
+            }
             else UtilityFunctions::print(String("EAWR telemetry feed off: ") + String::utf8(error.c_str()));
         }
     }

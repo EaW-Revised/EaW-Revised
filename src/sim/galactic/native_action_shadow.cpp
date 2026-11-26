@@ -461,6 +461,16 @@ public:
         }
         loaded_[row.id] = {row.owner, row.orbit, row.members, row.orbit_slot, std::move(motion), row.raid_destination};
     }
+    void declare_fresh_fleet_blocker(FleetId id) {
+        // WGEP-24 / #8490: mirrors GalacticSession::Impl::declare_fresh_fleet_blocker.
+        if (!data_.base->production() || !data_.base->production()->fleet_blockers || !fleets.contains(id)) return;
+        const auto& blockers = *data_.base->production()->fleet_blockers;
+        bool present = std::any_of(blockers.begin(), blockers.end(), [id](const auto& row) { return row.fleet == id; });
+        for (const Data* layer = &data_; !present && layer; layer = layer->read_parent.get()) present = layer->fleet_blockers.contains(id);
+        if (present) return;
+        data_.fleet_blockers[id] = false; data_.created_blockers.push_back(id);
+        refresh_fleet_combat_skip(id);
+    }
     void refresh_fleet_combat_skip(FleetId id) {
         if (!data_.base->production() || !data_.base->production()->fleet_blockers || !fleets.contains(id)) return;
         const auto& blockers = *data_.base->production()->fleet_blockers;

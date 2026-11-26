@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 
+#include "eawr/core/perf_diag/phase.hpp"
 #include "eawr/core/perf_diag/sim_feed.hpp"
 
 namespace eawr::core::perf_diag {
@@ -39,24 +40,50 @@ struct FeedOptions final {
 };
 
 // One rendered frame, pushed by the frame side (the main thread) through push_frame(). The record carries numbers the
-// viewer already measured; -1 marks "not measured" (no render-thread timing, no GPU time).
+// viewer already measured; -1 marks "not measured" (no render-thread timing, no GPU time). The fight-intensity counters
+// are valid only when FrameFlags::fight is set (the frame side could read them).
 struct FrameRecord final {
     std::uint64_t frame{};
-    std::uint64_t wall_us{};        // steady_clock microseconds at the end of the frame
+    std::uint64_t wall_us{};        // steady_clock microseconds at the start of the frame
     float frame_ms{};               // present-to-present wall time
     float main_ms{-1.0F};           // main thread work outside limiter sleeps
     float render_cpu_ms{-1.0F};
-    float gpu_ms{-1.0F};
+    float gpu_ms{-1.0F};            // the newest GPU time the renderer had (its source frame is not known)
     float ui_lock_ms{};             // waited for the session mutex
-    std::uint16_t flags{};          // bit 0: the presented tick was clamped at the newest tick (stale frame)
+    std::uint16_t flags{};
     std::uint16_t reserved{};
-    std::uint32_t reserved2{};
+    // Fight intensity of the frame (what was on screen); draw calls and objects are the renderer's own counts.
+    std::uint32_t units{};          // the local player's units the player sees
+    std::uint32_t enemy_units{};    // hostile units the player sees
+    std::uint32_t attacking{};      // units (both sides) that have an attack target
+    std::uint32_t projectiles{};    // projectiles in flight
+    std::uint32_t effects{};        // live battle effects (each owns emitters)
+    std::uint32_t particles{};      // live particles (battle effects and unit emitters)
+    std::uint32_t draw_calls{};
+    std::uint32_t objects{};        // visible instances the renderer drew
 };
-static_assert(sizeof(FrameRecord) == 48);
+static_assert(sizeof(FrameRecord) == 72);
 
 struct FrameFlags final {
     static constexpr std::uint16_t stale = 1;
+    static constexpr std::uint16_t fight = 2; // the fight-intensity counters of the record are valid
 };
+
+// The main thread's named phases of one frame (the existing frame timers), summed per name: ids come from
+// FeedWriter::intern_frame_phase_active(). The largest phases are kept when a frame carries more than max_entries.
+struct FramePhases final {
+    static constexpr std::size_t max_entries = 40;
+    struct Entry final {
+        PhaseId id{no_phase};
+        std::uint16_t reserved{};
+        float ms{};
+    };
+    std::uint64_t frame{};
+    std::uint32_t count{};
+    std::uint32_t reserved{};
+    Entry entries[max_entries]{};
+};
+static_assert(sizeof(FramePhases) == 16 + 8 * FramePhases::max_entries);
 
 class FeedWriter final {
 public:
@@ -83,13 +110,23 @@ public:
     [[nodiscard]] static bool active() noexcept;
     // Attaches a session's feed under a label ("tactical", "galactic"): the feed is enabled and drained until detached.
     // Returns the source id, or -1 without a writer. May briefly wait for one drain pass of the writer thread.
-    [[nodiscard]] static int attach_active(SimFeed& feed, std::string_view label);
+    // `workers` (when known) is the session simulation worker count, written into the `source` record.
+    [[nodiscard]] static int attach_active(SimFeed& feed, std::string_view label, std::size_t workers = 0);
     // Final drain of that source, then the feed is switched off. The feed must still be alive.
     static void detach_active(int source) noexcept;
     // Asks the writer thread for a capture file of the last capture_window seconds; non-blocking, any thread.
     static void request_capture_active() noexcept;
     // Frame side producer (main thread only, one producer): ignored without a writer.
     static void push_frame_active(const FrameRecord& record) noexcept;
+    // The id of a main-thread frame phase name (copied on first sight, main thread only); no_phase without a writer or when
+    // the table is full.
+    [[nodiscard]] static PhaseId intern_frame_phase_active(std::string_view name) noexcept;
+    // One frame's phases (main thread only): ignored without a writer.
+    static void push_frame_phases_active(const FramePhases& phases) noexcept;
+    // The PC and settings context of the `context` record: a JSON object body without braces
+    // (`"gpu":"...","vsync":true`), written next to the CPU facts at the start of every segment and again whenever this is
+    // called with a different text. Aggregates only; any thread. Ignored without a writer.
+    static void set_context_active(std::string_view fields);
 
     // --- counters, any thread ---
     [[nodiscard]] std::uint64_t records_written() const noexcept { return records_.load(std::memory_order_relaxed); }
@@ -114,7 +151,8 @@ private:
 // the active writer, if any, and detaches it again. Without a writer both calls are one atomic load.
 class FeedAttachment final {
 public:
-    FeedAttachment(SimFeed& feed, const std::string_view label) : source_(FeedWriter::attach_active(feed, label)) {}
+    FeedAttachment(SimFeed& feed, const std::string_view label, const std::size_t workers = 0)
+        : source_(FeedWriter::attach_active(feed, label, workers)) {}
     ~FeedAttachment() { FeedWriter::detach_active(source_); }
     FeedAttachment(const FeedAttachment&) = delete;
     FeedAttachment& operator=(const FeedAttachment&) = delete;

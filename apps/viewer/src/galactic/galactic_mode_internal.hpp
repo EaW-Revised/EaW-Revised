@@ -37,6 +37,7 @@
 #include "fleet_panels.hpp"
 #include "orbit_landing_view.hpp"
 #include "fleet_traits.hpp"
+#include "fleet_projection_cache.hpp"
 #include "fleet_drag.hpp"
 #include "ground_hud.hpp"
 #include "planet_detail_layout.hpp"
@@ -665,7 +666,15 @@ struct GalacticMode::State final {
     [[nodiscard]] galactic_view::ClockGates clock_gates() const;
     [[nodiscard]] bool build_fleet_hud();
     void update_fleet_hud();
-    void rebuild_fleet_projection(const bool publication_changed);
+    void rebuild_fleet_projection();
+    [[nodiscard]] viewer::galactic::StackHealth fleet_stack_health();
+    [[nodiscard]] viewer::galactic::StackHeroPreference fleet_hero_preference();
+    // #8428: brings the fleet projection to `source` (incrementally), with its current sight and presentation indices.
+    void update_fleet_projection(const std::shared_ptr<const sim::galactic::GalacticSnapshot>& source);
+    // The projection of a new publication, before it is displayed, for the live view to share; null when the view must
+    // project itself (no fleet HUD, or departing transports the HUD leaves out and the map keeps).
+    [[nodiscard]] const sim::galactic::FleetIntelligence* project_publication_fleets(
+        const std::shared_ptr<const sim::galactic::GalacticSnapshot>& shown);
     void update_fleet_panel_cards();
     void rebuild_fleet_cell_layouts(const presentation::ui::ShellPlacement& placement);
     void update_fleet_controls(const presentation::ui::ShellPlacement& placement, const bool changed);
@@ -751,6 +760,7 @@ struct GalacticMode::State final {
     // #4316: max health by type. Never cleared: production_names and production_art are assigned only while the view
     // is built (GalacticMode::State::build_view), before the first fleet projection, and not again for this State.
     std::unordered_map<sim::galactic::TypeId, std::optional<float>> fleet_health_cache;
+    std::unordered_map<sim::galactic::TypeId, std::optional<std::int64_t>> fleet_hero_rank_cache; // #8428: same rule
     // WGUI-166: the hovered stack icon's delayed fleet encyclopedia (shared popup).
     EawrUnitCards* fleet_popup{};
     std::uint64_t fleet_popup_key{};
@@ -763,7 +773,16 @@ struct GalacticMode::State final {
     [[nodiscard]] presentation::ui::UnitCardLooks fleet_stack_looks(const FleetStackBadge& badge);
     std::map<galactic_view::ObjectId, std::vector<godot::TextureButton*>> visible_fleet_badges;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> fleet_publication;
-    sim::galactic::FleetIntelligence fleet_intelligence;
+    // #8428: one projection per publication, reprojecting only changed planets; fleet_intelligence reads its result.
+    galactic_view::IncrementalFleetProjection fleet_projection_cache;
+    const sim::galactic::FleetIntelligence& fleet_intelligence{fleet_projection_cache.result()};
+    // The publications fleet_visibility and the presentation-index pruning were last brought to.
+    std::shared_ptr<const sim::galactic::GalacticSnapshot> fleet_visibility_for, fleet_indices_pruned_for;
+    // Planets whose stack icons must be recomputed: every planet a projection update changed since the last icon pass.
+    std::vector<galactic_view::ObjectId> fleet_icon_dirty;
+    bool fleet_icons_all_dirty{true};
+    std::size_t fleet_icon_textures{};
+    std::map<galactic_view::ObjectId, std::vector<viewer::galactic::FleetStackIcon>> fleet_icon_cache;
     viewer::galactic::OrbitLandingView orbit_landing_view;
     std::uint64_t orbit_landing_event_cursor{};
     std::vector<sim::EntityId> departing_transports;
@@ -831,6 +850,23 @@ struct GalacticMode::State final {
     std::array<godot::TextureButton*, 3> fleet_empty_slots{};
     std::array<bool, 3> fleet_empty_shown{};
     galactic_view::ObjectId fleet_drag_planet{};
+    // GFDH-03: display-only empty slots of every other reachable planet while a stack is held,
+    // and the reachable set, kept per publication and source (one graph build per change).
+    std::map<galactic_view::ObjectId, std::array<godot::TextureButton*, 3>> fleet_reach_slots;
+    std::vector<galactic_view::ObjectId> fleet_reach_planets;
+    std::shared_ptr<const sim::galactic::GalacticSnapshot> fleet_reach_publication;
+    galactic_view::ObjectId fleet_reach_origin{};
+    galactic_view::ReachKey fleet_reach_key;
+    std::uint64_t fleet_reach_builds{};
+    void refresh_fleet_reach();
+    [[nodiscard]] bool fleet_drag_held() const;
+    [[nodiscard]] galactic_view::ObjectId fleet_reach_slot_planet(godot::Vector2 point) const;
+    void hide_fleet_reach_slots();
+    // GFDH-01: the hovered map icon's additive authored rollover quad during a drag.
+    godot::TextureRect* fleet_drag_highlight{};
+    std::size_t fleet_drag_highlight_index{std::numeric_limits<std::size_t>::max()};
+    godot::Vector2 fleet_drag_pointer;
+    void show_fleet_drag_highlight(godot::Vector2 point, galactic_view::ObjectId planet);
     std::set<galactic_view::ObjectId> mixed_fleet_planets;
     std::vector<galactic_view::ObjectId> dragged_stack;
     galactic_view::ObjectId dragged_fleet{}, last_fleet_drag_source{}, last_fleet_drag_target{}, last_fleet_drag_destination{};
@@ -1043,7 +1079,9 @@ struct GalacticMode::State final {
     std::uint64_t animation_updates{};
     // Opt-in main-thread attribution. The main/animation/camera totals include
     // their nested phases; these are CPU enqueue times, not GPU completion.
-    enum class FramePhase : std::size_t { main, snapshot, instances, animation, sample, bind, material_clock, corruption, camera, submit, routes, hud_facts, hud_commands, hud_fleets, hud_ground, hud_orbit, hud_radar, hud_labels, hud_weapon, hud_total, lighting, visibility, count };
+    enum class FramePhase : std::size_t { main, snapshot, instances, animation, sample, bind, material_clock, corruption, camera, submit, routes, hud_facts, hud_commands, hud_fleets, hud_ground, hud_orbit, hud_radar, hud_labels, hud_weapon, hud_total, lighting, visibility,
+        // #8428: developer-only sub-phases of the publication refresh and the fleet HUD (zoom timing only).
+        reveal_visibility, live_view, fleet_projection, fleet_icons, fleet_ground, fleet_badges, fleet_cards, fleet_layouts, fleet_info, count };
     struct FramePhaseCost final { double milliseconds{}, worst_call_ms{}; std::uint64_t calls{}; };
     std::array<FramePhaseCost, static_cast<std::size_t>(FramePhase::count)> frame_phase_costs{};
     struct FramePhaseMeasure final {
@@ -1066,6 +1104,10 @@ struct GalacticMode::State final {
     };
     [[nodiscard]] FramePhaseMeasure measure_frame(const FramePhase phase) {
         return FramePhaseMeasure((perf_requested || options.zoom_timing) ? &frame_phase_costs[static_cast<std::size_t>(phase)] : nullptr);
+    }
+    // Nested sub-phases cost clock reads, so only the developer zoom timing switch measures them.
+    [[nodiscard]] FramePhaseMeasure measure_zoom(const FramePhase phase) {
+        return FramePhaseMeasure(options.zoom_timing ? &frame_phase_costs[static_cast<std::size_t>(phase)] : nullptr);
     }
     struct ZoomTimingFrame final {
         std::uint64_t frame{}, entry_usec{};

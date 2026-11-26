@@ -726,14 +726,11 @@ void GalacticMode::State::update_ground_hud() {
         button->set_size({static_cast<float>(rect.width),static_cast<float>(rect.height)});
         button->set_hit_rect({{},button->get_size()});
         // #8366 (#7956): retail draws a pad's company icon and a structure slot's building icon at their own size, centred in
-        // the slot, never stretched to it (retail capture of Remake 4.0 Fondor, out/eyecheck/gc-8366). #8414: that size is the
-        // texture times the viewport scale times the component's authored Scale (a mod's 1.5 on a pad, 0.9 on a structure
-        // slot); a component without Scale keeps the viewport-only size.
+        // the slot, never stretched to it (retail capture of Remake 4.0 Fondor, out/eyecheck/gc-8366). GHUD-S100 (#8489): a
+        // company pad ignores its component Scale; a structure slot applies its own (#8414).
         if (std::size_t slot{}; name.starts_with("Pad_") || structure_slot(name, slot)) {
-            const auto* authored = command_catalog.find(name);
-            const auto icon_scale = authored
-                ? galactic_view::command_bar_component_scale(*authored, static_cast<float>(placement.scale))
-                : static_cast<float>(placement.scale);
+            const auto icon_scale = galactic_view::ground_slot_icon_scale(name.starts_with("Pad_"),
+                command_catalog.find(name), static_cast<float>(placement.scale));
             button->set_icon_fit(presentation::ui::IconFitMode::natural, icon_scale);
         }
         if (name.starts_with("Pad_")) {

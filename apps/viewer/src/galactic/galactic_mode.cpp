@@ -641,13 +641,32 @@ bool GalacticMode::State::refresh_game() {
     }
     if (frame.latest == published_snapshot) return true;
     // #3931: with the reveal on, every presentation reader gets the omniscient draw view of this publication.
+    auto reveal_timer = measure_zoom(FramePhase::reveal_visibility);
     const auto shown = options.galactic_reveal ? galactic_view::reveal_snapshot(frame.latest) : frame.latest;
     if (!fixture_enabled(GalacticHudFixture::Feature::fleet_visibility))
         fleet_visibility = galactic_view::live_fleet_visibility(*shown);
+    fleet_visibility_for = shown;
     refresh_transit_visibility(*shown);
+    reveal_timer.finish();
+    // #8428: one fleet projection per new publication, shared by the live view and the fleet HUD.
+    const auto* shared_projection = project_publication_fleets(shown);
+    auto live_view_timer = measure_zoom(FramePhase::live_view);
+    const galactic_view::FleetMapVisibility map_visibility{fleet_visibility, transit_visibility,
+        options.all_ai_capture || options.galactic_reveal, options.galactic_reveal};
     auto built = galactic_view::build_live_view(*shown, metadata, galaxy->local.seat, neutral_owner,
-        scene_objects, {fleet_visibility, transit_visibility, options.all_ai_capture || options.galactic_reveal, options.galactic_reveal});
+        scene_objects, map_visibility, shared_projection);
+    live_view_timer.finish();
     if (!built.view) { failure = built.failure; return false; }
+    if (options.hud_verify && shared_projection) {
+        // Developer verify mode: the map built from the shared projection equals the one projecting by itself.
+        ++hud_verify_checks;
+        const auto own = galactic_view::build_live_view(*shown, metadata, galaxy->local.seat, neutral_owner,
+            scene_objects, map_visibility);
+        if (!own.view || own.view->fleets != built.view->fleets) {
+            ++hud_verify_mismatches;
+            if (hud_verify_detail.empty()) hud_verify_detail = "live view fleets";
+        }
+    }
     // Rows shared by storage between two publications are equal without a member-wise compare.
     const auto rows_differ = [](const auto& now, const auto& before) {
         return (now.data() != before.data() || now.size() != before.size())

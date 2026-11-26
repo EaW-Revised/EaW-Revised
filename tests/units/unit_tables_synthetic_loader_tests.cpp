@@ -573,6 +573,76 @@ void space_body_collision_bound_tables() {
     }
 }
 
+void duplicate_hangar_starting_counts() {
+    namespace tactical = eawr::sim::tactical;
+    for (const unsigned tier : {0U, 3U}) for (const int first : {0, 2}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto replace = [&](const std::string& from, const std::string& to) {
+            const auto at = xml.find(from);
+            if (at == std::string::npos) return false;
+            xml.replace(at, from.size(), to);
+            return true;
+        };
+        const std::string suffix = std::to_string(tier);
+        const std::string reserve_suffix = tier == 0 ? "0" : "2";
+        const int reserve = tier == 0 ? 1 : -2;
+        const bool authored = replace("<Space_Model_Name>TEST_FRIGATE.ALO</Space_Model_Name>",
+                "<Space_Model_Name>Test_Station.alo</Space_Model_Name>")
+            && replace("<SpaceBehavior>TARGETING,REVEAL , HIDE_WHEN_FOGGED, SIMPLE_SPACE_LOCOMOTOR</SpaceBehavior>",
+                "<SpaceBehavior>SPAWN_SQUADRON, SIMPLE_SPACE_LOCOMOTOR</SpaceBehavior>"
+                "<Starting_Spawned_Units_Tech_" + suffix + ">Test_Squadron, " + std::to_string(first)
+                + "</Starting_Spawned_Units_Tech_" + suffix + ">"
+                "<Starting_Spawned_Units_Tech_" + suffix + ">Test_Squadron_Pair, 3</Starting_Spawned_Units_Tech_" + suffix + ">"
+                "<Starting_Spawned_Units_Tech_" + suffix + ">test_squadron, 7</Starting_Spawned_Units_Tech_" + suffix + ">"
+                "<Reserve_Spawned_Units_Tech_" + reserve_suffix + ">Test_Squadron, " + std::to_string(reserve)
+                + "</Reserve_Spawned_Units_Tech_" + reserve_suffix + ">"
+                "<Reserve_Spawned_Units_Tech_" + reserve_suffix + ">Test_Squadron, 9</Reserve_Spawned_Units_Tech_" + reserve_suffix + ">"
+                "<Spawned_Squadron_Delay_Seconds>0</Spawned_Squadron_Delay_Seconds>")
+            && replace("<HardPoints> HP_Test_Laser, HP_Test_Engine, HP_Test_Missing </HardPoints>",
+                "<HardPoints>HP_Test_Bay</HardPoints>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        const auto* carrier = loaded.tables ? loaded.tables->find("Test_Frigate") : nullptr;
+        expect(authored && carrier && carrier->spawner
+            && carrier->spawner->campaign_starting[tier].size() == 3
+            && carrier->spawner->campaign_starting[tier][2].count == 7,
+            "FL-22: XML keeps the ordered repeated starting row and its authored count");
+        if (!carrier || !carrier->spawner || !loaded.tables) continue;
+        const auto motion = eawr::units::motion_table(*loaded.tables);
+        expect(static_cast<bool>(motion), "FL-22: repeated starting rows remain valid hangar content");
+        if (!motion) continue;
+        const auto type = eawr::assets::object_type_crc("Test_Frigate");
+        const auto fighter = eawr::assets::object_type_crc("Test_Squadron");
+        const auto bomber = eawr::assets::object_type_crc("Test_Squadron_Pair");
+        for (const unsigned tech : {tier, 5U}) {
+            const auto* profile = motion.value().squadrons.find_spawner_at_tech(type, 1, tech);
+            expect(profile && profile->entries.size() == 3 && !profile->bays.empty(),
+                "FL-22: selected and fallback tiers retain all three starting rows");
+            if (!profile || profile->entries.size() != 3 || profile->bays.empty()) continue;
+            expect(profile->entries[0].squadron == fighter && profile->entries[0].starting == first
+                && profile->entries[1].squadron == bomber && profile->entries[1].starting == 3
+                && profile->entries[2].squadron == fighter && profile->entries[2].starting == first
+                && profile->entries[0].reserve == reserve && profile->entries[1].reserve == 0
+                && profile->entries[2].reserve == reserve,
+                "FL-22: first matching counts win independently for repeated starting and reserve types");
+            tactical::SpawnerState state;
+            const std::vector<bool> intact(profile->bays.size(), true);
+            unsigned launches = 0;
+            for (std::uint64_t frame = 0; frame < 600; frame += 30)
+                if (tactical::service_spawner(*profile, state, 73, frame, 1, intact)) ++launches;
+            expect(launches == static_cast<unsigned>(2 * first + 3)
+                && state.entries.size() == 3 && state.entries[0].alive == first
+                && state.entries[1].alive == 3 && state.entries[2].alive == first,
+                "FL-22: live hangar fills the first-count caps, including a zero first count");
+            if (state.entries.size() == 3) expect(state.entries[0].remaining
+                    == (reserve < 0 ? tactical::unlimited_reserve : reserve)
+                && state.entries[2].remaining == state.entries[0].remaining,
+                "FL-22: finite and signed unlimited reserves retain their launch budget");
+        }
+    }
+}
+
 void synthetic_tables() {
     space_body_collision_bound_tables();
     space_ai_class_consumers();
@@ -730,6 +800,7 @@ void synthetic_tables() {
     subobject_list_tables();
     structure_soft_radius_tables();
     signed_weaken_reduction_tables();
+    duplicate_hangar_starting_counts();
     redirect_carrier_class_tables();
     redirect_carrier_inheritance_tables();
     class_agnostic_reveal_targeting_weapon_tables();

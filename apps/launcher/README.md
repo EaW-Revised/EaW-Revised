@@ -52,7 +52,11 @@ test/gate runs exit with code 7.
    `--allow-unknown-build` is forwarded as `--eawr-allow-unknown-build`. The project's default is the Separate render thread;
    `--no-fog` (or a mod profile's `launch.no_fog`) is forwarded as `--eawr-no-fog`, "Fog of war: off", an owner convenience
    that is not retail and is refused in multiplayer; `--safe-render-thread` adds Godot's `--render-thread safe` right after `--path` (the opt-out; the player zip's `EAWR (Safe render thread).cmd` uses it). Anything after `--` (and unknown
-   options) goes to the viewer, `--godot-quit-after <n>` becomes Godot's `--quit-after`.
+   options) goes to the viewer, `--godot-quit-after <n>` becomes Godot's `--quit-after`. To record frame diagnostics on your
+   own settings from the EAWR Mods window, start it from a shortcut `"<kit folder>\EAWR.exe" -- --eawr-frame-diag` (optionally
+   `--eawr-frame-diag-csv <path>`): EAWR.exe forwards the arguments after `--` to every game it starts, and these two
+   switches keep the start a player start (saved settings apply). `--eawr-frame-diag-calibrate` does not: it stalls the render
+   thread and stays an evidence run.
 3. **Explains failures**: a missing game, a bad folder, a missing runtime or project, a runtime that will not
    start, or Godot exiting with an error within a minute of starting opens a message box with the reason (the
    viewer's own text from its `--eawr-report` file when it wrote one) and the log paths. `--no-dialogs` sends the

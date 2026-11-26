@@ -32,9 +32,13 @@ inline constexpr PlayerId synthetic_neutral_owner = 4;
 
 // Immutable simulation values supply every dynamic field. Metadata supplies art/faction
 // names and the admitted seat roster; explicit scene-only objects never enter the sim.
+// `projection` (#8428) is the local player's observed fleets of this same publication and visibility when the caller has
+// already projected them (the fleet HUD's projection without departing-transport exclusions); the view reads only its
+// presence rows and card fleets, which the HUD's traits, capacity and ranks never change. Null projects here.
 [[nodiscard]] ViewResult build_live_view(const sim::galactic::GalacticSnapshot& snapshot,
     const GalaxySnapshotStub& metadata, SeatId seat, PlayerId neutral_owner,
-    std::span<const ObjectId> scene_objects = {}, FleetMapVisibility visibility = {});
+    std::span<const ObjectId> scene_objects = {}, FleetMapVisibility visibility = {},
+    const sim::galactic::FleetIntelligence* projection = nullptr);
 
 // Source basis (X, Y on the galaxy plane, Z up), floats for presentation only.
 struct Vec3 final {

@@ -38,5 +38,8 @@ struct SelectionScores {
     std::uint32_t selected_total, const sim::PartitionExecutor&);
 [[nodiscard]] Real freestore_preference(Real path_cost, Real maximum_cost, bool garrison, bool reserved);
 [[nodiscard]] std::vector<Real> production_preferences(std::span<const Real> excess_seconds);
+// WGA-508: the total-force validity test of one attempted domain. The plan is refused when the force of the target
+// still unmatched, over the target's total force, is above the contrast threshold. A target with no force is never unmet.
+[[nodiscard]] bool total_force_unmet(Real target_total, Real unmatched_total, Real threshold);
 
 } // namespace eawr::script::foc::ai::galactic_goals

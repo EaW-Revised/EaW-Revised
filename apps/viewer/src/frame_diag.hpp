@@ -4,14 +4,20 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
 
+#include "eawr/core/perf_diag/feed_writer.hpp"
 #include "eawr/core/perf_diag/frame.hpp"
 #include "eawr/core/perf_diag/marker.hpp"
+#include "eawr/core/perf_diag/thread_cpu.hpp"
 #include "eawr/core/tick_profile.hpp"
 
 namespace eawr::presentation::godot_backend {
@@ -42,9 +48,21 @@ public:
     [[nodiscard]] bool enabled() const noexcept { return enabled_; }
     void set_enabled(const bool on);
 
-    // Main thread, frame entry / exit. begin_frame is one bool test while off.
+    // What the frame showed, for the telemetry feed fight-intensity columns (counts only; main thread).
+    struct FightCounts final {
+        std::uint32_t units{}, enemy_units{}, attacking{}, projectiles{}, effects{}, particles{};
+    };
+
+    // Main thread, frame entry / exit. begin_frame is one bool test while off. `fight` (optional) is what the frame
+    // showed; the feed carries it next to the frame times.
     void begin_frame();
-    void end_frame(bool stale, bool running, const core::tick_profile::Recording& ui_recording);
+    void end_frame(bool stale, bool running, const core::tick_profile::Recording& ui_recording,
+                   const FightCounts* fight = nullptr);
+    // A named main-thread phase of the open frame that was measured outside the tick_profile recording (a frame timer).
+    // Summed per name into the phase row of the frame in the telemetry feed. Main thread; a no-op without a feed.
+    void note_phase(std::string_view name, double ms);
+    // True while a telemetry feed receives this frame side (frame timers then run even without --eawr-perf-trace).
+    [[nodiscard]] bool feed_active() const noexcept { return feed_; }
 
     struct Summary final {
         std::uint64_t frames{};          // frames recorded on the main thread
@@ -70,6 +88,8 @@ private:
     FrameDiag();
     static void render_thread_sample(std::int64_t tag);
     void on_matched(const core::perf_diag::FrameSample& sample);
+    void push_feed_frame(const core::perf_diag::FrameSample& sample);
+    void push_feed_phases(const core::tick_profile::Recording& ui_recording);
     void drain_rings();
     void read_pipeline_monitors(std::uint64_t frame);
 
@@ -94,6 +114,19 @@ private:
     std::vector<core::perf_diag::RenderSample> raw_;   // csv path only
     std::vector<Old> old_;                             // calibration only
     core::perf_diag::FrameRings rings_{1024};
+    // The telemetry feed side: per-frame extras joined to the matched frame by number, the phase name ids and the main
+    // thread label. The matcher emits a frame one or more frames after its end, so the extras wait in a window.
+    struct Extra final {
+        std::uint64_t frame{~0ULL};
+        FightCounts fight{};
+        bool fight_valid{};
+    };
+    std::array<Extra, 64> extras_{};
+    std::map<std::string, core::perf_diag::PhaseId, std::less<>> phase_ids_;
+    std::vector<std::pair<core::perf_diag::PhaseId, float>> frame_phase_;  // reused every frame
+    std::optional<core::perf_diag::ThreadLabel> main_label_;
+    float latest_gpu_ms_{-1.0F};
+    bool feed_{};                      // a telemetry feed runs: frames and phases go to it
     static constexpr std::size_t history_cap = 200000;
 };
 

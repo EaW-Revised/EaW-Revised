@@ -211,6 +211,8 @@ struct LiveAutoResolveOutcome {
     bool land{};
     campaign::BattleResult result;
     std::vector<LiveAutoResolveRecordEntry> record;
+    // WAR-43a: space specials cleared with the loser's destroyed base: results-screen losses, not battle history.
+    std::vector<LiveAutoResolveRecordEntry> structure_losses;
 };
 // WGS-P01: value-only adapters for an optional presentation-hint snapshot.
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> encode_auto_summary_hint(

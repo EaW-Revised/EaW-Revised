@@ -5,6 +5,7 @@
 #include "eawr/core/perf_diag/feed_writer.hpp"
 #include "eawr/core/perf_diag/pc_context.hpp"
 #include "eawr/core/perf_diag/sim_feed.hpp"
+#include "eawr/core/perf_diag/thread_cpu.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -99,6 +100,13 @@ void off_contracts() {
     }
     FeedWriter::request_capture_active(); // no writer: nothing happens
     FeedWriter::push_frame_active(FrameRecord{});
+    FeedWriter::push_frame_phases_active(FramePhases{});
+    FeedWriter::set_context_active("\"gpu\":\"x\"");
+    expect(FeedWriter::intern_frame_phase_active("frame.x") == no_phase, "no frame phase id without a writer");
+    {
+        const ThreadLabel label("never-recorded");
+        expect(labeled_threads().empty(), "a thread label is a no-op while no feed runs");
+    }
     FeedWriter writer(options_for(dir));
     expect(!writer.running() && !fs::exists(dir), "a writer that was never started creates no file and no directory");
 }
@@ -116,12 +124,38 @@ void feed_contracts() {
         expect(FeedWriter::active(), "a started writer is the active one");
         FeedWriter second(options_for(dir));
         expect(!second.start(error), "a second writer is refused");
+        const ThreadLabel test_label("test-thread");
+        expect(labeled_threads().size() == 1 && labeled_threads().front().second == "test-thread", "a label is recorded while a feed runs");
+        FeedWriter::set_context_active("\"gpu\":\"Test GPU\",\"vsync\":\"on\"");
         {
             FeedAttachment attachment(feed, "tactical");
             expect(feed.enabled(), "an attachment enables the feed");
             produce(feed, 1, 120, 100);
-            for (std::uint64_t frame = 1; frame <= 40; ++frame)
-                FeedWriter::push_frame_active(FrameRecord{frame, 1'000'000 + frame * 16'000, 16.0F, 5.0F, 6.0F, 14.0F, 0.0F, 0, 0, 0});
+            for (std::uint64_t frame = 1; frame <= 40; ++frame) {
+                FrameRecord record{frame, 1'000'000 + frame * 16'000, 16.0F, 5.0F, 6.0F, 14.0F, 0.0F, 0, 0, 0};
+                if (frame <= 20) {
+                    record.flags = FrameFlags::fight;
+                    record.units = 120;
+                    record.enemy_units = 90;
+                    record.attacking = 55;
+                    record.projectiles = 7;
+                    record.effects = 12;
+                    record.particles = 3000;
+                    record.draw_calls = 910;
+                    record.objects = 640;
+                }
+                FeedWriter::push_frame_active(record);
+            }
+            const PhaseId named = FeedWriter::intern_frame_phase_active("frame.test");
+            expect(named != no_phase && FeedWriter::intern_frame_phase_active("frame.test") == named, "a frame phase name interns once");
+            FramePhases phases{};
+            phases.frame = 5;
+            phases.count = 1;
+            phases.entries[0].id = named;
+            phases.entries[0].ms = 2.5F;
+            FeedWriter::push_frame_phases_active(phases);
+            // The once-per-second records (threads, memory) need two seconds: the first sample only primes the baseline.
+            std::this_thread::sleep_for(2300ms);
             FeedWriter::request_capture_active();
             for (int wait = 0; wait < 300 && writer.captures_written() == 0; ++wait) std::this_thread::sleep_for(10ms);
             expect(writer.captures_written() == 1, "a requested capture is written by the writer thread");
@@ -147,6 +181,21 @@ void feed_contracts() {
            "ticks carry their phases by id");
     expect(count_of(feed_text, "{\"r\":\"marker\"") == 2 && feed_text.find("\"k\":\"save\",\"n\":50") != std::string::npos, "markers are records");
     expect(count_of(feed_text, "{\"r\":\"frame\"") == 40, "frames pushed by the frame side are records");
+    expect(count_of(feed_text, "\"u\":120,\"eu\":90,\"atk\":55,\"proj\":7,\"fx\":12,\"part\":3000,\"dc\":910,\"obj\":640}") == 20,
+           "frames that carry fight counters write them, the others write none");
+    expect(feed_text.find("\"phase-name\",\"src\":-1,\"id\":0,\"name\":\"frame.test\"") != std::string::npos
+               && feed_text.find("{\"r\":\"fph\",\"n\":5,\"ph\":[[0,2.500]]}") != std::string::npos,
+           "frame phases are announced by name and written per frame");
+    expect(feed_text.find("{\"r\":\"context\",\"t\":") != std::string::npos && feed_text.find("\"cores\":") != std::string::npos
+               && feed_text.find("\"logical\":") != std::string::npos,
+           "the context record carries the CPU facts");
+    expect(feed_text.find("\"gpu\":\"Test GPU\",\"vsync\":\"on\"}") != std::string::npos,
+           "the context record carries the fields the viewer gave, once they changed");
+    expect(feed_text.find("{\"r\":\"mem\",\"t\":") != std::string::npos && feed_text.find("\"commit_mb\":") != std::string::npos
+               && feed_text.find("\"ws_mb\":") != std::string::npos && feed_text.find("\"pf_s\":") != std::string::npos,
+           "the memory record carries commit, working set and page faults per second");
+    expect(feed_text.find("{\"r\":\"thr\",\"t\":") != std::string::npos && feed_text.find("[\"test-thread\",") != std::string::npos,
+           "the thread record lists the labeled thread");
     expect(count_of(feed_text, "\"r\":\"hitch\"") == 1 && feed_text.find("\"kind\":\"tick\",\"n\":100,") != std::string::npos
                && feed_text.find("\"phase\":\"command-source\"") != std::string::npos,
            "the slow tick is one hitch, attributed to the phase with the excess");
@@ -266,6 +315,36 @@ void capture_does_not_block_attachment() {
     writer.stop();
 }
 
+void thread_contracts() {
+    // The sampler turns two readings into shares of one core; counters are in units of 100 ns (1e7 per second).
+    ThreadCpuSampler sampler;
+    const std::vector<std::pair<std::uint64_t, std::string>> labels{{1, "sim-worker-0"}, {2, "main"}};
+    std::vector<ThreadCounters> first{{1, 0, ""}, {2, 0, ""}, {3, 0, "Engine Thread"}, {4, 0, ""}};
+    expect(sampler.shares_between(first, 1'000'000, labels, 1e7).empty(), "the first reading only primes the baseline");
+    std::vector<ThreadCounters> second{{1, 9'000'000, ""}, {2, 0, ""}, {3, 5'000'000, "Engine Thread"}, {4, 100'000, ""}, {5, 7, ""}};
+    const auto shares = sampler.shares_between(second, 2'000'000, labels, 1e7);
+    expect(shares.size() == 3, "labeled threads and busy unlabeled threads are listed; an idle unlabeled one and a new one are not");
+    expect(!shares.empty() && shares[0].name == "sim-worker-0" && std::abs(shares[0].share - 0.9F) < 1e-4F && shares[0].labeled,
+           "the busiest thread comes first with its share of one core");
+    expect(shares.size() == 3 && shares[1].name == "Engine Thread" && !shares[1].labeled && std::abs(shares[1].share - 0.5F) < 1e-4F,
+           "an unlabeled busy thread keeps the name the engine gave it");
+    expect(shares.size() == 3 && shares[2].name == "main" && shares[2].share == 0.0F, "a labeled idle thread is still listed");
+    std::vector<ThreadCounters> third{{1, 9'000'000, ""}, {2, 0, ""}, {3, 9'000'000, ""}, {4, 100'000, ""}, {5, 7, ""}};
+    const auto later = sampler.shares_between(third, 2'000'000, labels, 1e7);
+    expect(later.empty(), "a reading with no time passed gives no shares");
+    const auto live = read_thread_counters();
+    expect(live.empty() || std::any_of(live.begin(), live.end(), [](const ThreadCounters& c) { return c.id == current_thread_os_id(); }),
+           "the live reading lists this thread where the platform offers it");
+    expect(clean_cpu_brand("  Intel(R) Core(TM) i7-12700K   CPU @ 3.60GHz\0\0xx").find("  ") == std::string::npos
+               && clean_cpu_brand("  AMD  Ryzen 7 ") == "AMD Ryzen 7",
+           "the CPU brand is trimmed and blanks collapse");
+    expect(parse_cpuinfo_model("processor\t: 0\nmodel name\t: Test CPU  @ 2GHz\n") == std::string("Test CPU @ 2GHz"), "model name line");
+    expect(!parse_cpuinfo_model("processor : 0\n"), "no model name line");
+    const CpuInfo& cpu = cpu_info();
+    expect(cpu.logical >= 1 && cpu.cores >= 1 && cpu.cores <= cpu.logical && cpu.performance_cores + cpu.efficiency_cores == cpu.cores,
+           "the CPU info is sane");
+}
+
 void pc_contracts() {
     const auto cpu = parse_proc_stat_cpu("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3\n");
     expect(cpu && cpu->first == 150 && cpu->second == 1000, "proc stat: busy excludes idle and iowait");
@@ -298,6 +377,7 @@ int main() {
     prior_run_retention_contracts();
     capture_does_not_block_attachment();
     pc_contracts();
+    thread_contracts();
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

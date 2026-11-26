@@ -44,6 +44,13 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
     setup.seed = start.setup.seed;
     setup.content.catalog_types = inputs.catalog_types;
     setup.allow_special_weapons = start.match.allow_superweapons;
+    // Spawn_Special_Weapon stands its object at the map's special-weapon source: the first source object in map data order
+    // (the order with several sources is unverified), raised by its own Layer_Z_Adjust; none without a source.
+    for (const auto& placement : inputs.placements) {
+        if (!placement.special_weapon_source || !placement.position) continue;
+        if (auto raised = battle::layer_position(*placement.position, placement.layer_z_adjust)) setup.special_weapon_source = raised.value();
+        break;
+    }
     setup.perception.campaign_game = false; // SAE-01
     for (const auto& category : tables.categories) setup.content.categories.emplace(upper(category.name), category.value);
     for (const auto& property : tables.properties) setup.content.properties.emplace(upper(property.name), property.value);

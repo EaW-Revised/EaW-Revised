@@ -22,6 +22,13 @@ const CraftProfile* SquadronTable::find_craft(const TypeId type_id) const noexce
 const SquadronProfile* SquadronTable::find_squadron(const TypeId type_id) const noexcept {
     return find_by_type(squadrons, type_id);
 }
+std::optional<SpawnLayout> SquadronTable::spawn_layout(const TypeId type_id) const {
+    const auto* squadron = find_squadron(type_id);
+    // The same test the company birth makes: a type that is no squadron, or is also a craft, is one object.
+    if (squadron == nullptr || find_craft(type_id) != nullptr) return SpawnLayout{1, {}};
+    if (squadron->max_squad_size == 0) return std::nullopt;
+    return SpawnLayout{squadron->members.size(), squadron_team_sizes(squadron->members.size(), squadron->max_squad_size)};
+}
 const SpawnerProfile* SquadronTable::find_spawner(const TypeId type_id, const PlayerId owner) const noexcept {
     if (const auto found = campaign_spawners.find({type_id, owner}); found != campaign_spawners.end()) return &found->second;
     return find_by_type(spawners, type_id);

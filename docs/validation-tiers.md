@@ -86,8 +86,11 @@ everything; if a command fails, the PR is not ready.
 A PR runs only the tests directly relevant to its changed paths; the full suite runs on merge bundles of `main`.
 The choice is data, never a guess: it is the existing selector `tools/test_index/select_tests.py` (path rules in
 `tests/test_labels.txt`, docs/test-selection.md), the one path-to-label map. Its label expression (always with `core`,
-excluding `batch-only`) is the focused selection; `replay76` is set when save, checkpoint, load or replay paths change.
-A gameplay change (the selector prints "FULL SET") and any selector failure mean the full set, with the reason named.
+excluding `batch-only`) is the focused selection: the changed areas (a galactic change its `gc-*` part, see
+docs/test-selection.md rule 4) plus one label for each test the diff names (a changed test file) or the PR owns.
+`replay76` is set only when hash, checkpoint, net or save code changes (`REPLAY76_PATHS`, with the paths that set it
+named) or a code path no rule places. There is no per-PR full set; only an empty diff or a selector failure is "full",
+with the reason named.
 A diff that makes `windows_build.py` add a test to the stage (a `tests/` CMake edit adds `ci_registration` and `ci_test_index`, a
 `tests/ci` edit the whole `ci-tools` label, `tools/offload` or viewer CMake paths their own tests) also adds that test's least populated label
 to the expression, so the label selection covers it and the job stays on the cross route. For a full-set head the command is
@@ -102,7 +105,7 @@ python tools/offload/receipt_check.py <PR> <full head sha>    # OK (focused: <la
 
 The job summary records `ctest_regex`, `ctest_labels` and `ctest_exclude_labels`. `receipt_check.py` accepts a receipt
 with a selection only when its labels cover `--focused` for that exact head, with no name regex and every stage passed; a selection it
-cannot prove (wrong labels, excluded labels, a second narrowing filter, a gameplay head) fails closed. Receipts without
+cannot prove (wrong labels, excluded labels, a second narrowing filter, a head the selector cannot read) fails closed. Receipts without
 a selection (the full set) work as before. `tests/ci/test_focused_tests.py` covers the mapping and the acceptance.
 
 Bundle full set: MM runs the full set on `main` every 6-10 merges or about every 4 hours. Red: the owning lane

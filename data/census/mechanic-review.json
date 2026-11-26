@@ -60,7 +60,7 @@
       "path": "src/script/foc/tactical_ai_bindings.cpp",
       "start": "void register_globals(",
       "end": "} // namespace tactical_ai_detail",
-      "sha256_lf": "e5d5f41a702da7db9df92adda8cd61ed5f576656bb15309090c0e4ea3e2909cc"
+      "sha256_lf": "46089efc73755475a24fea4ee4760063932e0ac8d8977f3fcb091394a9022b9b"
     },
     "src/script/foc/tactical_ai.cpp#unsupported_plan_calls": {
       "path": "src/script/foc/tactical_ai.cpp",
@@ -138,7 +138,7 @@
       "path": "src/sim/tactical/session_storage.cpp",
       "start": "core::Result<void> TacticalSession::Impl::commit_units(std::vector<LiveUnit>& units,",
       "end": "} // namespace eawr::sim::tactical",
-      "sha256_lf": "4468dca67231848b630f6b7592891facfa6f4bd107e672e42e85265e75988797"
+      "sha256_lf": "bd69fd3df2798c96bf384ab1ed637a8a0d8413c577d1bb3cb08ec77459b56a0f"
     },
     "src/sim/tactical/pads.cpp#respawn_after_death": {
       "path": "src/sim/tactical/pads.cpp",

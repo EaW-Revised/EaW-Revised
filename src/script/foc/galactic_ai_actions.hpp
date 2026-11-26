@@ -386,6 +386,10 @@ public:
     // the production queue with each purchase row as it will be after they apply (the newest pending remaining time per build).
     using PendingBillRemaining = std::function<std::optional<sim::math::Fixed>(sim::EntityId)>;
     void bind_pending_bill_remaining(PendingBillRemaining pending) { pending_bill_remaining_ = std::move(pending); }
+    // Async lane: a finish (cancel) the AI decided whose slice has not applied yet. The AI's purchase row is already failed
+    // while the world's queue entry stays until the slice applies, so a restore accepts that pair (#8588).
+    using PendingFinish = std::function<bool(sim::EntityId)>;
+    void bind_pending_finish(PendingFinish pending) { pending_finish_ = std::move(pending); }
     // Async lane: identities the AI holds beyond the world's frontier (intents decided but not applied yet).
     void bind_identity_ceiling(std::function<sim::EntityId()> ceiling) { identity_ceiling_ = std::move(ceiling); }
     // Identities from this one up are the lane's: objects the AI holds that the world creates when their slice applies.
@@ -478,6 +482,7 @@ private:
     FreestoreRestoreValidator freestore_validation_;
     PendingFreestoreReplay pending_freestore_replay_;
     PendingBillRemaining pending_bill_remaining_;
+    PendingFinish pending_finish_;
     std::function<sim::EntityId()> identity_ceiling_;
     std::shared_ptr<GalacticAiWriteProbe> write_probe_;
     std::function<sim::EntityId()> lane_floor_;

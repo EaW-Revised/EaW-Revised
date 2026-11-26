@@ -117,6 +117,21 @@ void test_legacy_sort_triangles_and_atlas() {
                     && std::bit_cast<std::array<float, 3>>(full.bounds_min) == std::bit_cast<std::array<float, 3>>(subset.bounds_min)
                     && std::bit_cast<std::array<float, 3>>(full.bounds_max) == std::bit_cast<std::array<float, 3>>(subset.bounds_max),
                     "emitter selection preserves interleaved geometry, invalid-slot filtering and sort ties");
+                // #8471: the backend takes the kept bounds instead of measuring every vertex, so they must be the
+                // exact per-vertex bounds whenever the flag is set.
+                if (!full.vertices.empty()) {
+                    particles::Vec3 low = full.vertices.front().position, high = low;
+                    for (const auto& vertex : full.vertices) {
+                        low = {std::min(low.x, vertex.position.x), std::min(low.y, vertex.position.y), std::min(low.z, vertex.position.z)};
+                        high = {std::max(high.x, vertex.position.x), std::max(high.y, vertex.position.y), std::max(high.z, vertex.position.z)};
+                    }
+                    expect(full.bounds_valid
+                        && std::bit_cast<std::array<float, 3>>(full.bounds_min) == std::bit_cast<std::array<float, 3>>(low)
+                        && std::bit_cast<std::array<float, 3>>(full.bounds_max) == std::bit_cast<std::array<float, 3>>(high),
+                        "kept stream bounds equal the exact bounds of the built vertices");
+                }
+                full.clear();
+                expect(!full.bounds_valid, "a cleared stream carries no bounds");
             }
         }
     }

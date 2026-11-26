@@ -104,6 +104,7 @@ void execute_native_fleet(Owner& owner, const GameCommand& command, const std::u
             target = owner.next_id++;
             owner.insert(Fleet{target, issuer->player, planet, {}, transfer->slot}); ++owner.live_object_count;
             owner.record_fleet_shell(target, issuer->player, planet);
+            owner.declare_fresh_fleet_blocker(target);
             owner.dirty[static_cast<std::size_t>(StateSection::session)] = true;
             emit(GalacticEventKind::fleet_created, target, planet);
         }
@@ -140,6 +141,7 @@ void execute_native_fleet(Owner& owner, const GameCommand& command, const std::u
         // WGM-196: retail writes the requested slot without an occupancy test; so do we.
         owner.insert(Fleet{id, issuer->player, create->planet, {}, create->slot}); ++owner.live_object_count;
         owner.record_fleet_shell(id, issuer->player, create->planet);
+        owner.declare_fresh_fleet_blocker(id);
         owner.dirty[static_cast<std::size_t>(StateSection::session)] = true;
         emit(GalacticEventKind::command_executed, id, create->planet);
         emit(GalacticEventKind::fleet_created, id, create->planet); attach(create->members, id);

@@ -37,7 +37,8 @@ namespace eawr::presentation::ui {
 
 // Holds the title the viewer wants and writes it through `sink` (DisplayServer::window_set_title). The engine
 // rewrites the title (with its own "(DEBUG)") when a translation/title update runs, so the owner re-applies it
-// after every such update. An empty title is never written.
+// after every such update (the first one, right after the host's _ready, reaches only the root window: the host
+// re-applies from a deferred call). An empty title is never written.
 class OwnedTitle {
 public:
     template <class Sink> void set(std::string text, Sink&& sink) {

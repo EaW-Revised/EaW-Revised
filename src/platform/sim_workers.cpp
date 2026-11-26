@@ -1,5 +1,6 @@
 #include "eawr/platform/sim_workers.hpp"
 
+#include "eawr/core/perf_diag/thread_cpu.hpp"
 #include "eawr/sim/replay.hpp"
 
 #include <algorithm>
@@ -86,8 +87,9 @@ void run_one(const std::function<void(std::size_t)>& job, const std::size_t part
 
 class ThreadWorkerAdapter::Pool final {
 public:
-    Pool(const std::size_t workers, const Dispatch dispatch, ClockRead clock)
-        : workers_(workers), dispatch_(dispatch), budget_(ThreadWorkerAdapter::inline_budget(workers)), clock_(std::move(clock)) {
+    Pool(const std::size_t workers, const Dispatch dispatch, ClockRead clock, const std::string_view label)
+        : workers_(workers), dispatch_(dispatch), budget_(ThreadWorkerAdapter::inline_budget(workers)), clock_(std::move(clock)),
+          label_(label.empty() ? std::string_view("pool") : label) {
         try {
             threads_.reserve(workers - 1);
             for (std::size_t worker = 1; worker < workers; ++worker) {
@@ -238,6 +240,7 @@ private:
     }
 
     void work(const std::size_t worker) {
+        const core::perf_diag::ThreadLabel thread_label(label_, worker); // a no-op without a telemetry feed
         running_pool = this;
         std::uint32_t seen = 0; // generation_ starts at 0 and only dispatch() or stop() advance it
         for (;;) {
@@ -283,6 +286,7 @@ private:
     Dispatch dispatch_;
     Clock::duration budget_;
     ClockRead clock_;
+    std::string label_;
     std::vector<std::thread> threads_;
     std::optional<std::string> start_error_;
     std::mutex phase_mutex_; // one phase at a time
@@ -303,10 +307,11 @@ private:
     std::atomic<std::uint64_t> pool_phases_{0};
 };
 
-ThreadWorkerAdapter::ThreadWorkerAdapter(const std::size_t worker_count, const Dispatch dispatch, ClockRead clock)
+ThreadWorkerAdapter::ThreadWorkerAdapter(const std::size_t worker_count, const Dispatch dispatch, ClockRead clock,
+    const std::string_view label)
     : worker_count_(worker_count) {
     if (worker_count >= 1 && worker_count <= max_worker_count) {
-        pool_ = std::make_unique<Pool>(worker_count, dispatch, std::move(clock));
+        pool_ = std::make_unique<Pool>(worker_count, dispatch, std::move(clock), label);
     }
 }
 
