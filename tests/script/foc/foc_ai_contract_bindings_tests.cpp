@@ -2017,8 +2017,182 @@ end
     }
 }
 
+void script_spawn_contracts() {
+    // Spawn_Unit / Spawn_Special_Weapon: the handles answer at once, the staged grouping equals the committed one, same-step
+    // commands on the staged objects reach the committed objects, malformed calls are refused, and the whole run is
+    // replayed (it goes through the ordered creation command) and agrees at every worker count.
+    namespace t = eawr::sim::tactical;
+    using Q = eawr::sim::math::Fixed;
+    const auto q = [](std::int64_t value) { return Q::from_integer(value).value(); };
+    constexpr t::TypeId craft_type = 101, wing_type = 100, ship_type = 60, weapon_type = 70, large_type = 102, empty_type = 103;
+    constexpr std::size_t wing_members = 5, wing_team = 2;
+    std::string reference;
+    for (const auto workers : {1U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        t::TacticalSetup setup;
+        setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+        setup.units = {{10, 1, 2}};
+        t::EconomyRules economy;
+        economy.players = {{1, {}, 0, true}, {2, {}, 0, true}};
+        for (const auto type : {ship_type, weapon_type, craft_type})
+            economy.footprints.push_back(t::FootprintProfile{type, std::nullopt, Q{}});
+        t::MotionTable motion;
+        t::CraftProfile craft;
+        craft.type_id = craft_type; craft.max_speed = q(5); craft.min_speed = q(1); craft.rate_of_turn = q(6);
+        craft.lift = q(6); craft.thrust = q(1); craft.roll_rate = q(6); craft.bank_angle = q(70); craft.strafe_distance = q(200);
+        motion.squadrons.craft = {craft};
+        t::SquadronProfile wing;
+        wing.type_id = wing_type;
+        wing.members.assign(wing_members, craft_type);
+        wing.offsets.assign(wing_members, eawr::sim::math::Vec3{});
+        wing.max_squad_size = wing_team;
+        auto large = wing;
+        large.type_id = large_type;
+        large.members.assign(t::script_reference_member_limit, craft_type);
+        large.offsets.assign(large.members.size(), eawr::sim::math::Vec3{});
+        auto empty = wing;
+        empty.type_id = empty_type;
+        motion.squadrons.squadrons = {wing, large, empty};
+        const auto layout = motion.squadrons.spawn_layout(wing_type);
+        expect(layout && layout->members == 5 && layout->teams == std::vector<std::size_t>({2, 2, 1}),
+            "Spawn_Unit: the shared grouping splits five craft by the authored maximum into 2, 2 and 1");
+        const auto lone = motion.squadrons.spawn_layout(ship_type);
+        expect(lone && lone->members == 1 && lone->teams.empty(), "Spawn_Unit: a ship is one object and no team");
+        t::DurabilityTable durability;
+        for (const auto type : {ship_type, weapon_type, craft_type}) {
+            t::DurabilityProfile health; health.type_id = type; health.max_hull = q(100);
+            durability.profiles.push_back(health);
+        }
+        auto made = t::TacticalSession::create(setup, {}, durability, motion, std::nullopt, {}, {}, {}, economy);
+        expect(made.has_value(), "Spawn_Unit: session creates");
+        if (!made) { std::cerr << made.error().message << '\n'; return; }
+        auto& world = made.value();
+        // Session validation normally prevents empty squadrons; inject one to exercise the binding's defensive seam.
+        auto& fixture_squadrons = const_cast<t::MotionTable&>(world.motion()).squadrons.squadrons;
+        fixture_squadrons.back().members.clear(); fixture_squadrons.back().offsets.clear();
+        World fixture;
+        auto& host = fixture.host;
+        host->world = &world;
+        host->snapshot = world.snapshot();
+        host->setup.local_player = 2;
+        host->setup.perception.campaign_game = false;
+        host->setup.special_weapon_source = eawr::sim::math::Vec3{q(300), q(400), q(0)};
+        host->players.clear();
+        for (const auto& player : host->setup.players) host->players.emplace(player.player, &player);
+        const auto add_type = [&](const t::TypeId id, const char* name) {
+            foc::AiType type; type.type_id = id; type.name = name; type.selectable = true; type.locomotor = true;
+            host->setup.content.types.push_back(type);
+        };
+        add_type(craft_type, "CRAFT"); add_type(wing_type, "WING"); add_type(ship_type, "SHIPX"); add_type(weapon_type, "WEAPONX");
+        add_type(large_type, "LARGE"); add_type(empty_type, "EMPTY");
+        host->types.clear(); host->types_by_name.clear();
+        for (const auto& row : host->setup.content.types) {
+            host->types.emplace(row.type_id, &row); host->types_by_name.emplace(row.name, &row);
+        }
+        host->view = foc::detail::build_view(world, *host->snapshot);
+        auth::ModuleManifest modules;
+        expect(modules.add("SPAWN.LUA", R"lua(
+function Axis(object, index) local axes = {object.Get_Position().Get_XYZ()} return axes[index] end
+function Spawn()
+    local p = Find_Player('local')
+    local wing = Find_Object_Type('WING')
+    members = Spawn_Unit(wing, {5, 6, 7}, p)
+    count_ok = members[5] ~= nil and members[6] == nil
+    handles_ok = members[1].Is_Valid() and members[1].Get_Type() == Find_Object_Type('CRAFT')
+        and members[1].Get_Owner() == p and Axis(members[1], 1) == 5
+    local a = members[1].Get_Parent_Object()
+    local b = members[2].Get_Parent_Object()
+    local c = members[3].Get_Parent_Object()
+    local d = members[4].Get_Parent_Object()
+    local e = members[5].Get_Parent_Object()
+    grouping_ok = a == b and c == d and a ~= c and e ~= c and e ~= a and a.Get_Type() == wing and a.Is_Valid()
+    lookup_ok = Find_First_Object('CRAFT') == members[1] and Find_First_Object('WING') == a
+    ship = Spawn_Unit(Find_Object_Type('SHIPX'), members[1], p)[1]
+    ship.Teleport({50, 60, 0})
+    ship.Make_Invulnerable(true)
+    weapon = Spawn_Special_Weapon('WEAPONX', p)
+    weapon_ok = weapon.Is_Valid() and weapon.Get_Type() == Find_Object_Type('WEAPONX') and Axis(weapon, 1) == 300
+        and Axis(weapon, 2) == 400
+    invalid = not pcall(function() Spawn_Unit('WING', {0, 0, 0}, p) end)
+        and not pcall(function() Spawn_Unit(wing, {0, 0, 0}) end)
+        and not pcall(function() Spawn_Unit(wing, false, p) end)
+        and not pcall(function() Spawn_Unit(wing, {0, 0, 0}, nil) end)
+        and not pcall(function() Spawn_Special_Weapon(Find_Object_Type('WEAPONX'), p) end)
+        and not pcall(function() Spawn_Special_Weapon('WEAPONX', p, p) end)
+        and not pcall(function() Spawn_Special_Weapon('MISSING', p) end)
+    oversized_refused = not pcall(function() Spawn_Unit(Find_Object_Type('LARGE'), {0, 0, 0}, p) end)
+    empty_refused = not pcall(function() Spawn_Unit(Find_Object_Type('EMPTY'), {0, 0, 0}, p) end)
+end
+)lua").has_value(), "Spawn_Unit: script loads");
+        auto scripts = auth::ScriptScheduler::create({}, modules);
+        expect(scripts.has_value(), "Spawn_Unit: scheduler starts"); if (!scripts) return;
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::tactical_ai_detail::register_globals(scripts.value(), host, errors);
+        foc::tactical_ai_detail::register_methods(scripts.value(), host, errors);
+        foc::tactical_ai_detail::register_battle_object_bindings(scripts.value(), host, errors);
+        expect(errors.empty(), "Spawn_Unit: production bindings register");
+        expect(scripts.value().create_instance(1, "SPAWN.LUA").has_value(), "Spawn_Unit: caller instance creates");
+        auth::ScriptEvent event;
+        event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, 1, 0};
+        event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Spawn";
+        expect(scripts.value().submit_event(event).has_value(), "Spawn_Unit: event submits");
+        const auto report = scripts.value().service(executor);
+        expect(report && report.value().diagnostics.empty(), "Spawn_Unit: the call services without a diagnostic");
+        if (report) for (const auto& note : report.value().diagnostics) std::cerr << "Spawn_Unit diagnostic: " << note.code << ": " << note.message << "\n";
+        if (!report) return;
+        for (const auto* name : {"count_ok", "handles_ok", "grouping_ok", "lookup_ok", "weapon_ok", "invalid", "oversized_refused", "empty_refused"}) {
+            const auto value = scripts.value().read_global(1, name);
+            expect(value && value.value() && std::get_if<bool>(&value.value()->data) && *std::get_if<bool>(&value.value()->data), std::string("Spawn_Unit: ") + name);
+        }
+        // Three creations, then the two commands on the staged ship, in script order.
+        expect(report.value().commands.size() == 5, "Spawn_Unit: creations and same-step commands are queued in script order");
+        std::uint64_t sequence{};
+        std::uint64_t wing_base{}, ship_base{};
+        for (const auto& request : report.value().commands) {
+            const auto translated = foc::tactical_ai_detail::translate_order(request);
+            expect(translated.has_value(), "Spawn_Unit: the command translates"); if (!translated) return;
+            const auto* creation = std::get_if<t::ScriptCreateObjectPayload>(&translated.value().payload);
+            if (creation && creation->type == wing_type) wing_base = creation->identity;
+            else if (creation && creation->type == ship_type) ship_base = creation->identity;
+            expect(world.submit(t::PlayerCommand{{0, translated.value().issuer, sequence++}, translated.value().units, translated.value().payload}).has_value(),
+                "Spawn_Unit: the command submits");
+        }
+        fixture_squadrons.back() = empty;
+        auto step = world.step(executor);
+        expect(static_cast<bool>(step), "Spawn_Unit: the creation tick commits");
+        if (!step) return;
+        // The committed grouping is the staged one: member k carries wing_base + k, its team wing_base + 5 + team index.
+        const auto references = world.script_references();
+        std::map<std::uint64_t, eawr::sim::EntityId> by_reference(references.begin(), references.end());
+        std::vector<std::size_t> committed_teams;
+        bool grouped = by_reference.size() >= wing_members + 3;
+        for (const auto& squadron : world.squadrons()) {
+            const auto team = by_reference.find(wing_base + wing_members + committed_teams.size());
+            if (squadron.members.size() == 0 || team == by_reference.end() || team->second != squadron.container) continue;
+            for (std::size_t at = 0; at < squadron.members.size(); ++at) {
+                const auto member = by_reference.find(wing_base + committed_teams.size() * wing_team + at);
+                grouped = grouped && member != by_reference.end() && member->second == squadron.members[at];
+            }
+            committed_teams.push_back(squadron.members.size());
+        }
+        expect(grouped && committed_teams == layout->teams, "Spawn_Unit: the staged grouping equals the committed grouping");
+        const auto ship_ref = by_reference.find(ship_base);
+        const auto landed = ship_ref == by_reference.end() ? std::optional<t::UnitState>{} : world.unit_state(ship_ref->second);
+        expect(landed && landed->type_id == ship_type && landed->position.x == q(50) && landed->position.y == q(60),
+            "Spawn_Unit: a same-step Teleport on the staged ship reaches the committed ship");
+        const auto log = world.record();
+        auto replay = t::TacticalSession::from_replay(log, {}, durability, motion, std::nullopt, {}, {}, {}, economy);
+        expect(replay && replay.value().step(executor).has_value() && replay.value().state_sha256() == world.state_sha256(),
+            "Spawn_Unit: the recorded creation reproduces the same world");
+        const auto hash = world.state_sha256();
+        if (reference.empty()) reference = hash;
+        else expect(reference == hash, "Spawn_Unit: the spawned world agrees on 1 and 8 workers");
+    }
+}
+
 void mod_ai_calls() {
     script_creation_contracts();
+    script_spawn_contracts();
     script_created_attachment_contracts();
     World world;
     world.host->setup.players[1].name = "Admiral Test";

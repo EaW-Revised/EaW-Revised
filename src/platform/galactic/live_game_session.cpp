@@ -33,6 +33,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/core/perf_diag/feed_writer.hpp"
 #include "eawr/core/perf_diag/sim_feed.hpp"
+#include "eawr/core/perf_diag/thread_cpu.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "save_repository.hpp"
 #include "live_save_transport.hpp"
@@ -144,6 +145,8 @@ std::shared_ptr<const LiveAutoResolveOutcome> outcome_view(const campaign::AutoR
     result->result = source.result;
     result->record.reserve(source.record.size());
     for (const auto& row : source.record) result->record.push_back({row.original_type, row.owner});
+    result->structure_losses.reserve(source.structure_losses.size());
+    for (const auto& row : source.structure_losses) result->structure_losses.push_back({row.original_type, row.owner});
     return result;
 }
 }
@@ -692,6 +695,7 @@ core::Result<std::vector<std::uint8_t>> encode_auto_summary_hint(
     value.planet = summary.planet; value.invader = summary.invader; value.defender = summary.defender;
     value.land = summary.land; value.result = summary.result; value.planet_type = std::move(planet_type);
     for (const auto& row : summary.record) value.record.push_back({row.original_type, row.owner});
+    for (const auto& row : summary.structure_losses) value.structure_losses.push_back({row.original_type, row.owner});
     return campaign::encode_auto_resolve_outcome(value);
 }
 core::Result<std::shared_ptr<const LiveAutoResolveOutcome>> decode_auto_summary_hint(
@@ -1652,6 +1656,7 @@ public:
     }
 
     void run() noexcept {
+        const core::perf_diag::ThreadLabel gc_label("gc-sim"); // a no-op without a telemetry feed
         try {
             loop();
         } catch (const std::exception& error) {
@@ -1751,7 +1756,7 @@ public:
     // has to execute its resume). The schedule below only decides WHEN a step may be requested (ADR-013), from the
     // agreed galaxy clock. Singleplayer never enters this function.
     void lockstep_loop() {
-        const ThreadWorkerAdapter executor(options_.workers, ThreadWorkerAdapter::Dispatch::by_cost);
+        const ThreadWorkerAdapter executor(options_.workers, ThreadWorkerAdapter::Dispatch::by_cost, {}, "gc-worker");
         // A paused lockstep session keeps ticking at the normal rate so the resume can be agreed.
         const auto interval_for = [&](const auto& clock) {
             if (session_->mode() == campaign::SessionMode::battle)
@@ -1945,7 +1950,7 @@ public:
             if (stopping_) return;
         }
         if (options_.step_driver) { lockstep_loop(); return; }
-        const ThreadWorkerAdapter executor(options_.workers, ThreadWorkerAdapter::Dispatch::by_cost);
+        const ThreadWorkerAdapter executor(options_.workers, ThreadWorkerAdapter::Dispatch::by_cost, {}, "gc-worker");
         // ADR-013: speed only sets the interval of this wall-clock schedule (LivePaceSchedule).
         LivePaceSchedule schedule;
         schedule.rebase(Clock::now(), tick_interval(frame_.latest->clock().strategic_speed));
@@ -2142,7 +2147,7 @@ public:
     // #8058 diagnostics (write-only; the simulation thread is the only producer).
     core::perf_diag::SimFeed feed_;
     // #8058 P6: with a telemetry feed running, the writer drains feed_ (declared after it: detached before it dies).
-    core::perf_diag::FeedAttachment feed_attachment_{feed_, "galactic"};
+    core::perf_diag::FeedAttachment feed_attachment_{feed_, "galactic", options_.workers};
     core::perf_diag::ThreadCpuStamp cpu_start_{};
     double pace_lag_ms_{};
     bool clock_reset_{}, diag_in_battle_{}, gc_profile_owned_{}, gc_previous_valid_{};

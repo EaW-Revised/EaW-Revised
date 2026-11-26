@@ -269,16 +269,17 @@ struct SurfaceOrbitTarget {
     return result;
 }
 
-// Project preview binding: a selected local fleet and a map destination become
-// an ordinary typed drop. Reuse WGM-16..22 search and the published movement
-// access table; never draw a direct line through an intermediate conflict.
-[[nodiscard]] inline std::optional<std::vector<sim::galactic::PlanetId>> destination_path(
-    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId source,
-    ObjectId destination, std::span<const InputPlanet> planets, bool combat_skip = false) {
+// One observer search context (graph, access table, options): building the graph is the
+// expensive part, so a query over many destinations builds it once.
+struct DestinationSearch {
+    sim::galactic::PlanetGraph graph;
+    std::vector<sim::galactic::PathPlanet> access;
+    sim::galactic::PathOptions options;
+};
+[[nodiscard]] inline std::optional<DestinationSearch> destination_search(
+    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local,
+    std::span<const InputPlanet> planets, bool combat_skip = false) {
     using namespace sim::galactic;
-    const auto target = std::find_if(planets.begin(), planets.end(), [&](const auto& row) { return row.id == destination; });
-    if (target == planets.end() || !target->discovered) return std::nullopt;
-    if (destination == source) return std::nullopt;
     const auto* movement = snapshot.movement();
     if (!movement || !snapshot.maximum_movement_distance()) return std::nullopt;
     auto graph = PlanetGraph::build(snapshot.planets(), snapshot.routes(), *snapshot.maximum_movement_distance());
@@ -303,9 +304,69 @@ struct SurfaceOrbitTarget {
     options.allow_defended = combat_skip;
     // WGM-18: multiplayer omits the local-reveal gate; the saved session flag decides, never the viewer.
     options.multiplayer = snapshot.victory() && snapshot.victory()->context.multiplayer;
-    auto path = find_planet_path(graph.value(), source, destination, access, options);
+    return DestinationSearch{std::move(graph).value(), std::move(access), options};
+}
+// Project preview binding: a selected local fleet and a map destination become
+// an ordinary typed drop. Reuse WGM-16..22 search and the published movement
+// access table; never draw a direct line through an intermediate conflict.
+[[nodiscard]] inline std::optional<std::vector<sim::galactic::PlanetId>> destination_path(
+    const DestinationSearch& search, ObjectId source, ObjectId destination, std::span<const InputPlanet> planets) {
+    const auto target = std::find_if(planets.begin(), planets.end(), [&](const auto& row) { return row.id == destination; });
+    if (target == planets.end() || !target->discovered) return std::nullopt;
+    if (destination == source) return std::nullopt;
+    auto path = sim::galactic::find_planet_path(search.graph, source, destination, search.access, search.options);
     if (!path || path.value().planets.size() < 2) return std::nullopt;
     return std::move(path).value().planets;
+}
+[[nodiscard]] inline std::optional<std::vector<sim::galactic::PlanetId>> destination_path(
+    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId source,
+    ObjectId destination, std::span<const InputPlanet> planets, bool combat_skip = false) {
+    const auto target = std::find_if(planets.begin(), planets.end(), [&](const auto& row) { return row.id == destination; });
+    if (target == planets.end() || !target->discovered || destination == source) return std::nullopt;
+    const auto search = destination_search(snapshot, local, planets, combat_skip);
+    if (!search) return std::nullopt;
+    return destination_path(*search, source, destination, planets);
+}
+
+// GFDH-03: everything a reachable set depends on besides the static graph: the source, combat
+// skipping, the session flag and the observer's access and discovery rows. Equal keys give equal
+// sets, so a held stack searches again only when one of these changes, never per publication.
+struct ReachKey {
+    ObjectId origin{};
+    bool combat_skip{}, multiplayer{};
+    std::optional<sim::math::Fixed> maximum_distance;
+    std::size_t routes{};
+    std::vector<sim::galactic::MovementAccess> access;
+    std::vector<std::pair<ObjectId, bool>> discovered;
+    friend bool operator==(const ReachKey&, const ReachKey&) = default;
+};
+[[nodiscard]] inline ReachKey reach_key(const sim::galactic::GalacticSnapshot& snapshot, PlayerId local,
+    ObjectId origin, std::span<const InputPlanet> planets, bool combat_skip) {
+    ReachKey key;
+    key.origin = origin; key.combat_skip = combat_skip;
+    key.multiplayer = snapshot.victory() && snapshot.victory()->context.multiplayer;
+    key.maximum_distance = snapshot.maximum_movement_distance();
+    key.routes = snapshot.routes().size();
+    if (const auto* movement = snapshot.movement())
+        for (const auto& row : movement->access) if (row.player == local) key.access.push_back(row);
+    key.discovered.reserve(planets.size());
+    for (const auto& planet : planets) key.discovered.emplace_back(planet.id, planet.discovered);
+    return key;
+}
+
+// GFDH-03: the planets whose empty orbit slots show while a fleet or ground stack is held: the
+// source itself and every planet a hyperspace path reaches (one graph build for the whole set).
+[[nodiscard]] inline std::vector<ObjectId> reachable_destinations(const sim::galactic::GalacticSnapshot& snapshot,
+    PlayerId local, ObjectId source, std::span<const InputPlanet> planets, bool combat_skip = false) {
+    std::vector<ObjectId> result;
+    if (!source) return result;
+    result.push_back(source);
+    const auto search = destination_search(snapshot, local, planets, combat_skip);
+    if (!search) return result;
+    for (const auto& planet : planets)
+        if (planet.id != source && destination_path(*search, source, planet.id, planets)) result.push_back(planet.id);
+    std::sort(result.begin(), result.end());
+    return result;
 }
 
 // GGS-11: use the same transport and destination-alliance admission as command execution.

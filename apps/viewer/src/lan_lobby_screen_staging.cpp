@@ -35,13 +35,14 @@ void EawrLanLobby::fill_host_seats() {
         if (auto* label = EAWR_CONTROL(EawrUiLabel, "IDC_TEXT_HOST_CLAN")) label->hide();
     } else {
         // #8130: the room opens with a seat for every playable row of the campaign (2..8) and starts with the humans present, so there is
-        // nothing for the host to choose. Until the campaign list is known, only the human seat ceiling bounds it.
+        // nothing for the host to choose. Until the campaign list is known, only the human seat ceiling bounds it. #8497: the campaign
+        // is the one the room opens on (the host's last pick), a co-op one sized to its side's human slots.
         seats->hide();
         if (auto* label = EAWR_CONTROL(EawrUiLabel, "IDC_TEXT_HOST_CLAN")) label->hide();
         const sim::galactic::MpLobbyCampaign* hostable = nullptr;
         if (impl_->galactic_backend && impl_->galactic_backend->content_ready())
-            hostable = eawr::campaign::first_hostable_lobby_campaign(impl_->galactic_backend->campaigns());
-        const auto capacity = hostable ? net::galactic_lobby_max_humans(*hostable, seat_limit)
+            hostable = net::galactic_lobby_host_campaign(impl_->galactic_backend->campaigns(), impl_->galactic_host_campaign);
+        const auto capacity = hostable ? net::galactic_lobby_max_humans(*hostable, seat_limit, impl_->staging_dialog_rows)
                                        : std::min(seat_limit, static_cast<std::uint32_t>(sim::galactic::galactic_max_human_seats));
         if (hostable != nullptr) impl_->galactic_capacity_fitted = true;
         if (capacity >= 2) {
@@ -136,7 +137,7 @@ bool EawrLanLobby::publish_staging_selection() {
 }
 
 std::uint32_t EawrLanLobby::galactic_wanted_humans(const sim::galactic::MpLobbyCampaign& campaign) const {
-    return net::galactic_lobby_max_humans(campaign, impl_->galactic_seat_limit);
+    return net::galactic_lobby_max_humans(campaign, impl_->galactic_seat_limit, impl_->staging_dialog_rows);
 }
 
 void EawrLanLobby::reopen_galactic_room(net::GalacticLobbyOptions options, const std::uint32_t humans) {
@@ -223,6 +224,8 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
     std::vector<std::string> ids;
     for (const BuiltGadget& gadget : dialog.gadgets) ids.push_back(gadget.id);
     state.dialog_rows = model::staging_row_count(ids);
+    impl.staging_dialog_rows = state.dialog_rows;
+    impl.capacity_noted = 0;
 
     if (auto* chat = EAWR_CONTROL(EawrUiEdit, "IDC_LAN_CHAT_EDIT")) {
         chat->set_max_length(static_cast<int>(model::lan_chat_max));

@@ -9,6 +9,7 @@
 #include "galactic_ai_execution_work.hpp"
 
 #include <algorithm>
+#include <array>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_set>
@@ -280,9 +281,22 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
         }
         return !(potential.threshold < unmatched);
     };
+    // WGA-508 (plan validity): a domain counts as attempted once any evaluated unit has a positive
+    // effectiveness against one of its target rows. For an attempted domain the plan is also refused when the total
+    // force left over the total force of the target exceeds the contrast threshold (main and escort totals), besides
+    // the classified breakdown test above.
+    std::array<bool, 2> attempted{};
+    const auto total_unmet = [&](bool escort, gc::ProductionDomain channel) {
+        if (!attempted[static_cast<std::size_t>(channel)]) return false;
+        for (std::size_t row = 0; row < input->contrast.size(); ++row) {
+            if (input->contrast[row].category || input->contrast[row].escort != escort || input->contrast[row].channel != channel) continue;
+            if (gg::total_force_unmet(potential.target_contrast[row].force, potential.current_contrast[row].force, potential.threshold)) return true;
+        }
+        return false;
+    };
     const auto deficits = [&] {
         for (const bool escort : {false, true}) for (const auto channel : {gc::ProductionDomain::ground, gc::ProductionDomain::space})
-            if (!breakdown_met(escort, channel)) return true;
+            if (!breakdown_met(escort, channel) || total_unmet(escort, channel)) return true;
         return false;
     };
     std::set<sim::EntityId> used;
@@ -339,6 +353,18 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
             goal.target && (facts.base || facts.instance_allowed) && facts.target_build_seconds.has_value(),
             goal.target && (facts.structure || facts.base) ? facts.target_build_seconds.value_or(Real{}) : facts.build_seconds};
     };
+    // Enumeration of the proposals (before any budget, team or production filter) marks the attempted domains.
+    if (potential.target_contrast.size() == input->contrast.size()) for (const auto proposal : proposals) {
+        const auto* info = host_->type(proposal);
+        if (!info) continue;
+        const auto& facts = input->types.at(proposal);
+        for (std::size_t row = 0; row < input->contrast.size(); ++row) {
+            if (!(Real{} < potential.target_contrast[row].force)) continue;
+            const auto factor = to_single(contrast_factor(*info, input->contrast[row].category)
+                * (input->contrast[row].channel == gc::ProductionDomain::ground ? facts.terrain_effectiveness : real(1)));
+            if (Real{} < factor) attempted[static_cast<std::size_t>(input->contrast[row].channel)] = true;
+        }
+    }
     std::vector<std::vector<std::size_t>> garrison_rows(proposals.size());
     for (std::size_t i = 0; i < proposals.size(); ++i) garrison_rows[i].resize(input->types.at(proposals[i]).garrisons.size());
     for (;;) {

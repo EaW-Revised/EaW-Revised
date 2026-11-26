@@ -16,6 +16,13 @@ namespace eawr::viewer::galactic {
 [[nodiscard]] inline float command_bar_component_scale(const data::ui::CommandBarComponent& style, float ui_scale) {
     return ui_scale * style.number(data::ui::Field::scale).value_or(1.0F);
 }
+// GHUD-S100: a focused ground slot's icon size. A landed company on a Pad_* component is drawn at its texture size times the
+// viewport scale only: the pad's authored Scale (Remake 1.5) does not enlarge it, idle or hovered (retail capture, Remake
+// stack, Fondor and Abregado-Rae, legacy #8489). A structure slot keeps its authored Scale (Remake 0.9 matched the capture).
+[[nodiscard]] inline float ground_slot_icon_scale(const bool company_pad, const data::ui::CommandBarComponent* style,
+    float ui_scale) {
+    return company_pad || !style ? ui_scale : command_bar_component_scale(*style, ui_scale);
+}
 // A face drawn under one pixel on either side is not drawn: a mod hides a button by authoring a Scale of 0.001, and its
 // caption, which is drawn from the same component, goes with it (legacy #8369).
 [[nodiscard]] inline bool button_face_collapsed(const data::ui::ReferenceRect& face_pixels) {

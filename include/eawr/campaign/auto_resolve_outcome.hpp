@@ -3,6 +3,9 @@
 #include "eawr/campaign/auto_resolve_round.hpp"
 #include "eawr/sim/galactic/session.hpp"
 
+#include <optional>
+#include <span>
+
 namespace eawr::campaign {
 
 struct AutoResolveDeath {
@@ -27,6 +30,9 @@ struct AutoResolveOutcomeApplication {
     std::string planet_type;
     std::vector<AutoResolveRecordEntry> record;
     std::vector<AutoResolveLearning> learning;
+    // WAR-43a: the planet's space special structures cleared with the loser's destroyed base. They die as scoring kills
+    // (the results screen lists them) but are not battle history (`record`), so the advisor counts stay WAR-64's.
+    std::vector<AutoResolveRecordEntry> structure_losses;
     friend bool operator==(const AutoResolveOutcomeApplication&, const AutoResolveOutcomeApplication&) = default;
 };
 struct AutoResolveOutcomeInputs {
@@ -51,6 +57,14 @@ struct AutoResolveOutcomeInputs {
 // return; real battle returns never use this (WGM-57: only structures that died in the fight leave).
 [[nodiscard]] bool auto_resolve_clears_space_structures(const AutoResolveOutcomeApplication& application,
     const sim::galactic::ControlPlanet* presence) noexcept;
+// WAR-43a: the results-screen losses of that clearing: every space special structure among `objects` (the planet's
+// production objects, in their order), by original type name, when WAR-43 clears them. When it clears nothing the objects
+// are never read, so an unresolvable structure type cannot fail an outcome that clears none; when it does clear them, a
+// structure whose type has no name fails (`type_name` returns nothing).
+[[nodiscard]] core::Result<std::vector<AutoResolveRecordEntry>> auto_resolve_structure_losses(
+    const AutoResolveOutcomeApplication& application, const sim::galactic::ControlPlanet* presence,
+    std::span<const sim::galactic::ProductionObject> objects,
+    const std::function<std::optional<std::string>(sim::galactic::TypeId)>& type_name);
 
 struct AutoResolveOutcomeServices {
     // WAR-U04LethalEffects: ordinary GC death path owns bounty, hero scheduling,

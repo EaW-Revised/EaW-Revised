@@ -151,6 +151,9 @@ struct VertexStream final {
     std::size_t sort_candidates{};
     Vec3 bounds_min{};
     Vec3 bounds_max{};
+    // #8471: set when bounds_min/max enclose exactly the vertices (the quad builder keeps them); a producer that
+    // appends vertices itself leaves it false and the backend measures the vertices.
+    bool bounds_valid{};
     std::uint64_t axis_samples{};
     double axis_max_sine_error{};
     std::uint64_t axis_reversed{};

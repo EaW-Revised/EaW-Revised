@@ -52,6 +52,9 @@ bool player_start_requested(const std::vector<std::wstring>& extra) {
         L"--eawr-render-profile", L"--eawr-depth-prepass", L"--eawr-allow-unknown-build", L"--eawr-engine-unverified",
         L"--eawr-audio", L"--eawr-mod-profile", L"--eawr-save-dir", L"--eawr-digest-cache", L"--eawr-game-root",
         L"--eawr-front-end", L"--eawr-aa",
+        // Frame diagnostics only record (no per-frame render-thread sync), so the player's settings still apply.
+        // --eawr-frame-diag-calibrate is not listed: it reads the main-thread getters per frame and stalls the render thread.
+        L"--eawr-frame-diag", L"--eawr-frame-diag-csv",
     };
     return std::all_of(extra.begin(), extra.end(), [&](const std::wstring& arg) {
         if (arg.rfind(L"--eawr-", 0) != 0) return true; // a value, an engine switch or another program's switch

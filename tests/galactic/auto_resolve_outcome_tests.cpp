@@ -79,6 +79,55 @@ void space_structure_clear_rule() {
     expect(!auto_resolve_clears_space_structures(a, &none) && !auto_resolve_clears_space_structures(a, nullptr),
         "a planet without a base has no base to destroy");
 }
+// WAR-43a (#8509): the structures WAR-43 clears are the results screen's losses; nothing else lists them.
+void structure_loss_rule() {
+    using gc::ProductionDomain; using gc::ProductionKind;
+    AutoResolveOutcomeApplication a; a.base_changed = true; a.result.winner = 1; a.result.station_level = 0;
+    gc::ControlPlanet loser; loser.starbase = {2, 2};
+    const auto object = [](eawr::sim::EntityId id, gc::TypeId type, gc::PlayerId owner, ProductionDomain domain, ProductionKind kind) {
+        gc::ProductionObject row; row.id = id; row.type = type; row.owner = owner; row.domain = domain; row.kind = kind; return row;
+    };
+    // The planet's objects in order: two yards of one type, a defence platform, then rows that are no space structure.
+    const std::vector<gc::ProductionObject> objects{
+        object(10, 7, 2, ProductionDomain::space, ProductionKind::structure), object(11, 8, 2, ProductionDomain::space, ProductionKind::structure),
+        object(12, 7, 2, ProductionDomain::space, ProductionKind::structure), object(13, 9, 2, ProductionDomain::ground, ProductionKind::structure),
+        object(14, 9, 2, ProductionDomain::space, ProductionKind::unit), object(15, 9, 0, ProductionDomain::space, ProductionKind::structure)};
+    std::size_t lookups = 0;
+    const auto names = [&lookups](gc::TypeId type) -> std::optional<std::string> {
+        ++lookups;
+        if (type == 7) return "Shipyard_A";
+        if (type == 8) return "Shipyard_B";
+        return std::nullopt; // type 9 has no binding
+    };
+    const std::vector<AutoResolveRecordEntry> yards{{"Shipyard_A", 2}, {"Shipyard_B", 2}, {"Shipyard_A", 2}};
+    const std::vector<gc::ProductionObject> only_space(objects.begin(), objects.begin() + 3);
+    expect(take(auto_resolve_structure_losses(a, &loser, only_space, names)) == yards,
+        "WAR-43a every cleared space structure is a loss, in the planet's structure order, duplicates kept");
+    // The live fill: the planet's real row mix; non-structures, ground structures and ownerless rows are skipped without a name lookup.
+    lookups = 0;
+    expect(take(auto_resolve_structure_losses(a, &loser, std::span(objects).first(4), names)) == yards && lookups == 3,
+        "WAR-43a ground structures are not space losses and are never looked up");
+    lookups = 0;
+    expect(take(auto_resolve_structure_losses(a, &loser, objects, names)) == yards && lookups == 3,
+        "WAR-43a space units and ownerless rows are skipped unread as well");
+    gc::ControlPlanet winner; winner.starbase = {1, 2};
+    auto land = a; land.land = true;
+    auto lowered = a; lowered.result.station_level = 1;
+    lookups = 0;
+    // Nothing cleared: the objects are never read, so an unbound structure type (type 9 here) cannot fail the outcome.
+    const std::vector<gc::ProductionObject> unbound{object(20, 9, 2, ProductionDomain::space, ProductionKind::structure)};
+    struct NoClear { const char* label; const AutoResolveOutcomeApplication* outcome; const gc::ControlPlanet* presence; };
+    const NoClear no_clear[] = {{"the winner's own base", &a, &winner}, {"a land outcome", &land, &loser},
+        {"a lowered base", &lowered, &loser}, {"no presence", &a, nullptr}};
+    for (const auto& row : no_clear) {
+        const auto result = auto_resolve_structure_losses(*row.outcome, row.presence, unbound, names);
+        expect(result && result.value().empty(), std::string("WAR-43a no losses and no failure for ") + row.label + " with an unbound structure type");
+    }
+    expect(lookups == 0, "WAR-43a a no-clear outcome never reads a structure type");
+    expect(!auto_resolve_structure_losses(a, &loser, unbound, names),
+        "WAR-43a a cleared structure whose type has no name fails the outcome");
+    expect(take(auto_resolve_structure_losses(a, &loser, {}, names)).empty(), "a destroyed base without structures adds no loss");
+}
 void planning_and_encoding() {
     auto f = fixture(); auto a = take(plan_auto_resolve_outcome(f.conflict, f.roster, f.outcome, f.inputs));
     expect(a.destroyed == std::vector<eawr::sim::EntityId>{f.outcome.allocations.front().id}
@@ -89,6 +138,22 @@ void planning_and_encoding() {
     for (std::size_t i = 0; i < bytes.size(); ++i)
         expect(!decode_auto_resolve_outcome(std::span(bytes).first(i)), "every truncated outcome is refused");
     auto trailing = bytes; trailing.push_back(0); expect(!decode_auto_resolve_outcome(trailing), "trailing outcome bytes refused");
+    {
+        // WAR-43a: the structure losses are an optional tail: absent, the bytes stay exactly those of the outcome alone.
+        auto cleared = a; cleared.structure_losses = {{"Shipyard_A", 2}, {"Shipyard_B", 2}};
+        const auto tail = take(encode_auto_resolve_outcome(cleared));
+        expect(tail.size() > bytes.size() && std::equal(bytes.begin(), bytes.end(), tail.begin()),
+            "WAR-43a structure losses only append a tail to the unchanged outcome bytes");
+        expect(take(decode_auto_resolve_outcome(tail)) == cleared, "WAR-43a structure losses round trip");
+        for (std::size_t i = bytes.size() + 1; i < tail.size(); ++i)
+            expect(!decode_auto_resolve_outcome(std::span(tail).first(i)), "every truncated structure-loss tail is refused");
+        auto empty_tail = bytes; for (int i = 0; i < 4; ++i) empty_tail.push_back(0);
+        expect(!decode_auto_resolve_outcome(empty_tail), "an empty structure-loss tail is never written, so it is refused");
+        auto land = cleared; land.land = true;
+        expect(!encode_auto_resolve_outcome(land), "land outcomes carry no space structure losses");
+        auto unnamed = cleared; unnamed.structure_losses.front().original_type.clear();
+        expect(!encode_auto_resolve_outcome(unnamed), "a structure loss needs its original type");
+    }
     auto immune = f;
     immune.inputs.lethal_closure = [](const auto&) { return eawr::core::Result<std::vector<eawr::sim::EntityId>>::success({}); };
     const auto survived = take(plan_auto_resolve_outcome(immune.conflict, immune.roster, immune.outcome, immune.inputs));
@@ -181,6 +246,45 @@ void bounty_service_order() {
     eawr::platform::ThreadWorkerAdapter workers(1); (void)take(game.step(workers));
     expect(order == std::vector<std::string>{"damage", "bounty"} && seen == a.deaths,
         "WAR-60 the bounty service runs once after lethal delivery with the ordered death list");
+}
+// WAR-43a (#8509): a non-empty structure_losses list is journalled as an optional tail and survives the replay and
+// checkpoint paths; the same outcome without it keeps the bytes (and so the journal) it always had.
+void structure_losses_replay() {
+    const auto f = fixture(); auto plain = take(plan_auto_resolve_outcome(f.conflict, f.roster, f.outcome, f.inputs));
+    auto cleared = plain; cleared.structure_losses = {{"Shipyard_A", 2}, {"Shipyard_B", 2}};
+    const auto plain_bytes = take(encode_auto_resolve_outcome(plain)); const auto cleared_bytes = take(encode_auto_resolve_outcome(cleared));
+    expect(cleared_bytes.size() > plain_bytes.size() && std::equal(plain_bytes.begin(), plain_bytes.end(), cleared_bytes.begin()),
+        "WAR-43a the journalled payload only gains the tail");
+    std::vector<std::string> hashes; std::optional<gc::GalacticReplay> corpus;
+    for (const std::size_t count : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter workers(count);
+        auto game = take(GameSession::create(f.setup));
+        if (count != 1) game.scramble_storage_for_testing();
+        AutoResolveOutcomeServices services;
+        services.war_u04_lethal_effects = [](auto&, auto) { return eawr::core::Result<void>::success(); };
+        game.set_auto_resolve_outcome_services(services);
+        check(game.stage_auto_resolve_outcome(cleared));
+        const auto tick = take(game.step(workers));
+        expect(game.auto_resolve_history().size() == 1 && game.auto_resolve_history().front() == cleared
+            && game.auto_resolve_history().front().structure_losses == cleared.structure_losses,
+            "WAR-43a the applied outcome keeps its structure losses");
+        const auto replay = take(gc::parse_replay(take(gc::write_replay(game.record()))));
+        expect(replay.setup.outcomes.size() == 1 && replay.setup.outcomes.front().payload == cleared_bytes
+            && take(decode_auto_resolve_outcome(replay.setup.outcomes.front().payload)).structure_losses == cleared.structure_losses,
+            "WAR-43a the recorded replay input carries the structure-loss tail");
+        auto replayed = take(GameSession::from_replay(replay)); replayed.set_auto_resolve_outcome_services(services);
+        const auto replay_tick = take(replayed.step(workers));
+        expect(replay_tick.state_sha256 == tick.state_sha256 && replayed.auto_resolve_history().size() == 1
+            && replayed.auto_resolve_history().front().structure_losses == cleared.structure_losses,
+            "WAR-43a the replay reaches the same hash and the same structure losses");
+        cp::Identities identities; identities.content = f.setup.content_identity; identities.campaign = f.setup.campaign_identity;
+        const auto checkpoint = take(cp::save_game_checkpoint(game, identities));
+        cp::GameLoadOptions options; options.auto_resolve_outcomes = services;
+        auto restored = take(cp::load_game_checkpoint(checkpoint, identities, options, workers));
+        expect(restored.session.state_sha256() == game.state_sha256(), "WAR-43a a checkpoint after the tail restores the same state");
+        if (count == 1) { hashes.push_back(tick.state_sha256); corpus = replay; }
+        else expect(hashes.front() == tick.state_sha256 && *corpus == replay, "WAR-43a structure-loss outcome equals on 1/2/4/8 workers");
+    }
 }
 void session_replay_checkpoint(const std::string& corpus_path) {
     const auto f = fixture(); const auto application = take(plan_auto_resolve_outcome(f.conflict, f.roster, f.outcome, f.inputs));
@@ -366,7 +470,7 @@ int case_galactic_auto_resolve_outcome_tests(int argc, char** argv) {
             return 0;
         }
         if (argc != 2) throw std::runtime_error("expected outcome corpus path");
-        space_structure_clear_rule(); planning_and_encoding(); container_record_and_land(); bounty_service_order(); session_replay_checkpoint(argv[1]); ring_and_failed_callback(); surface_retreat_before_cleanup();
+        space_structure_clear_rule(); structure_loss_rule(); planning_and_encoding(); structure_losses_replay(); container_record_and_land(); bounty_service_order(); session_replay_checkpoint(argv[1]); ring_and_failed_callback(); surface_retreat_before_cleanup();
     }
     catch (const std::exception& error) { expect(false, error.what()); }
     return galactic_test::failures ? 1 : 0;

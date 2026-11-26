@@ -6,6 +6,11 @@
 #include "eawr/presentation/ui/fleet_pathfinder.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include <godot_cpp/classes/input.hpp>
+#include <godot_cpp/classes/canvas_item_material.hpp>
+#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/classes/texture_rect.hpp>
+#include <algorithm>
 
 using namespace godot;
 namespace eawr::presentation::godot_backend {
@@ -249,6 +254,8 @@ void GalacticMode::State::cancel_fleet_drag() {
     if (dragged_fleet) ++fleet_drag_ends;
     dragged_fleet = 0; map_input.dragged = 0; map_input.hyperspace = false;
     dragged_stack.clear(); fleet_drag_planet = 0; hide_empty_fleet_slots(*this);
+    if (fleet_drag_highlight) fleet_drag_highlight->hide();
+    refresh_fleet_reach();
     dragged_cell_slot.reset(); dragged_cell_type.reset();
     dragged_members.clear();
     dragged_type_stack = false;
@@ -272,6 +279,65 @@ std::vector<std::uint8_t> GalacticMode::State::stack_icon_slots(const galactic_v
     return {};
 }
 
+bool GalacticMode::State::fleet_drag_held() const {
+    return dragged_fleet || dragged_ground_planet || (ground_hud.pressed_object && map_input.box_end);
+}
+
+void GalacticMode::State::hide_fleet_reach_slots() {
+    for (auto& [planet, slots] : fleet_reach_slots)
+        for (auto* button : slots) if (button) button->hide();
+}
+
+// GFDH-03: the source of the held stack and the planets a hyperspace path reaches from it. A held
+// fleet uses its own path admission (combat skipping); a held ground stack the plain one.
+void GalacticMode::State::refresh_fleet_reach() {
+    galactic_view::ObjectId origin{};
+    bool combat_skip = false;
+    if (published_snapshot && galaxy && fleet_drag_held()) {
+        if (dragged_fleet) {
+            if (const auto* source = local_fleet(*this, dragged_fleet); source && !source->motion.transit) {
+                origin = source->orbit;
+                const auto skip = published_snapshot->fleet_combat_skip(dragged_fleet);
+                combat_skip = skip && skip.value();
+            }
+        } else {
+            origin = dragged_ground_planet ? dragged_ground_planet : selected_planet;
+        }
+    }
+    // Same source, same publication: nothing to do (the per-frame path).
+    if (origin == fleet_reach_origin && (!origin || fleet_reach_publication == published_snapshot)) return;
+    std::vector<galactic_view::ObjectId> next;
+    if (origin) {
+        const auto planets = input_planets();
+        auto key = galactic_view::reach_key(*published_snapshot, galaxy->local.player, origin, planets, combat_skip);
+        fleet_reach_origin = origin; fleet_reach_publication = published_snapshot;
+        // A new publication with unchanged movement inputs keeps the set: no searches.
+        if (key == fleet_reach_key) return;
+        ++fleet_reach_builds;
+        next = galactic_view::reachable_destinations(*published_snapshot, galaxy->local.player, origin, planets, combat_skip);
+        fleet_reach_key = std::move(key);
+    } else {
+        fleet_reach_origin = 0; fleet_reach_publication = nullptr; fleet_reach_key = {};
+    }
+    if (next == fleet_reach_planets) return;
+    // Re-place the planets that gain or lose slots (ground drags do not re-place every planet).
+    hide_fleet_reach_slots();
+    const auto unplace = [this](const galactic_view::ObjectId id) {
+        if (const auto label = planet_label_records.find(id); label != planet_label_records.end()) label->second.placed = false;
+    };
+    for (const auto id : fleet_reach_planets) unplace(id);
+    for (const auto id : next) unplace(id);
+    hud_label_key.reset();
+    fleet_reach_planets = std::move(next);
+}
+
+galactic_view::ObjectId GalacticMode::State::fleet_reach_slot_planet(const Vector2 point) const {
+    for (const auto& [planet, slots] : fleet_reach_slots)
+        for (const auto* button : slots)
+            if (button && button->is_visible_in_tree() && button->get_global_rect().has_point(point)) return planet;
+    return 0;
+}
+
 void GalacticMode::State::fleet_drag_hover(const Vector2 point) {
     const auto change_planet = [this](const galactic_view::ObjectId planet) {
         if (planet == fleet_drag_planet) return;
@@ -284,7 +350,8 @@ void GalacticMode::State::fleet_drag_hover(const Vector2 point) {
                 label->second.placed = false;
         fleet_drag_planet = planet;
     };
-    if (!dragged_fleet && !dragged_ground_planet && !(ground_hud.pressed_object && map_input.box_end)) {
+    if (fleet_drag_highlight) fleet_drag_highlight->hide();
+    if (!fleet_drag_held()) {
         hide_empty_fleet_slots(*this); change_planet(0); return;
     }
     if (hud && pointer_over_panel(*hud, point)) {
@@ -301,6 +368,8 @@ void GalacticMode::State::fleet_drag_hover(const Vector2 point) {
     for (std::size_t icon = 0; icon < fleet_empty_slots.size() && !planet; ++icon)
         if (fleet_empty_shown[icon] && fleet_empty_slots[icon]->is_visible_in_tree()
             && fleet_empty_slots[icon]->get_global_rect().has_point(point)) planet = fleet_drag_planet;
+    // GFDH-03: another reachable planet's shown slot takes the pointer to that planet.
+    if (!planet) planet = fleet_reach_slot_planet(point);
     for (const auto& [key, badge] : fleet_badges) {
         if (planet) break;
         if (badge.shown && badge.button->is_visible_in_tree() && badge.button->get_global_rect().has_point(point))
@@ -308,6 +377,67 @@ void GalacticMode::State::fleet_drag_hover(const Vector2 point) {
     }
     if (!planet) if (const auto* picked = picked_planet(point.x, point.y)) planet = picked->id;
     change_planet(planet);
+    fleet_drag_pointer = point;
+    show_fleet_drag_highlight(point, planet);
+}
+
+// GFDH-01: the hovered map icon (a shown empty slot or a fleet stack) draws the g_planet_fleet
+// Mouse_Over_Texture_Name quad additively over its art: the third entry for an empty slot, the
+// first for a fleet. The hover admits the source planet or a planet a hyperspace path reaches.
+void GalacticMode::State::show_fleet_drag_highlight(const Vector2 point, const galactic_view::ObjectId planet) {
+    if (fleet_drag_highlight) fleet_drag_highlight->hide();
+    if (!planet || !fleet_drag_held()) return;
+    TextureButton* target = nullptr;
+    bool empty_target = false;
+    if (planet == fleet_drag_planet)
+        for (std::size_t icon = 0; icon < fleet_empty_slots.size() && !target; ++icon)
+            if (fleet_empty_shown[icon] && fleet_empty_slots[icon]->is_visible_in_tree()
+                && fleet_empty_slots[icon]->get_global_rect().has_point(point)) {
+                target = fleet_empty_slots[icon]; empty_target = true;
+            }
+    for (const auto& [key, badge] : fleet_badges) {
+        if (target) break;
+        if (key.first == planet && !badge.ground_planet && badge.shown && badge.button->is_visible_in_tree()
+            && badge.button->get_global_rect().has_point(point)) target = badge.button;
+    }
+    // A held ground stack admits only its source planet; a held fleet any planet it can reach.
+    if (!target || (dragged_fleet ? !std::binary_search(fleet_reach_planets.begin(), fleet_reach_planets.end(), planet)
+                                  : planet != fleet_reach_origin)) return;
+    const auto* style = command_catalog.find("g_planet_fleet");
+    if (!style) return;
+    const auto textures = style->list(data::ui::Field::mouse_over_texture_name);
+    const std::size_t texture_index = empty_target ? 2 : 0;
+    if (texture_index >= textures.size()) return;
+    auto texture = command_texture(textures[texture_index]);
+    const auto normal = target->get_texture_normal();
+    if (texture.is_null() || normal.is_null() || normal->get_width() <= 0) return;
+    if (!fleet_drag_highlight) {
+        fleet_drag_highlight = memnew(TextureRect);
+        fleet_drag_highlight->set_name("fleet_drag_highlight");
+        fleet_drag_highlight->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        fleet_drag_highlight->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+        fleet_drag_highlight->set_stretch_mode(TextureRect::STRETCH_SCALE);
+        Ref<CanvasItemMaterial> material; material.instantiate();
+        material->set_blend_mode(CanvasItemMaterial::BLEND_MODE_ADD);
+        fleet_drag_highlight->set_material(material);
+    }
+    if (fleet_drag_highlight->get_parent() != target) {
+        if (fleet_drag_highlight->get_parent()) fleet_drag_highlight->get_parent()->remove_child(fleet_drag_highlight);
+        target->add_child(fleet_drag_highlight);
+    }
+    if (fleet_drag_highlight_index != texture_index) {
+        // The quad adds its authored RGB independently of its stored alpha (GFDH-01).
+        if (auto image = texture->get_image(); image.is_valid()) {
+            image->convert(Image::FORMAT_RGB8);
+            texture = ImageTexture::create_from_image(image);
+        }
+        fleet_drag_highlight->set_texture(texture);
+        fleet_drag_highlight_index = texture_index;
+    }
+    const auto size = fleet_drag_highlight->get_texture()->get_size() * (target->get_size().x / normal->get_width());
+    fleet_drag_highlight->set_position((target->get_size() - size) * 0.5F);
+    fleet_drag_highlight->set_size(size);
+    fleet_drag_highlight->show();
 }
 
 bool GalacticMode::State::submit_fleet_stack(const galactic_view::DropIntent& intent,

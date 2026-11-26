@@ -81,13 +81,16 @@ sim::galactic::GalacticSetup synthetic_live_setup() {
 
 ViewResult build_live_view(const sim::galactic::GalacticSnapshot& snapshot,
     const GalaxySnapshotStub& metadata, const SeatId seat, const PlayerId neutral_owner,
-    const std::span<const ObjectId> scene_objects, const FleetMapVisibility visibility) {
+    const std::span<const ObjectId> scene_objects, const FleetMapVisibility visibility,
+    const sim::galactic::FleetIntelligence* const projection) {
     const auto local_seat = std::find_if(metadata.seats.begin(), metadata.seats.end(),
         [seat](const auto& row) { return row.id == seat; });
     if (local_seat == metadata.seats.end() || !local_seat->active)
         return {{}, "live view requires an active local seat"};
     const auto local = local_seat->player;
-    const auto intelligence = sim::galactic::observed_fleets(snapshot, local, {}, 0, visibility.planets);
+    sim::galactic::FleetIntelligence projected;
+    if (!projection) projected = sim::galactic::observed_fleets(snapshot, local, {}, 0, visibility.planets);
+    const auto& intelligence = projection ? *projection : projected;
     std::set<std::pair<ObjectId, PlayerId>> presence;
     for (const auto& row : intelligence.presence) presence.emplace(row.planet, row.owner);
     std::set<ObjectId> counted;

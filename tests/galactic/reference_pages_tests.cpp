@@ -242,7 +242,7 @@ void mod_label_scale() {
         const float after = texture_width * page::command_bar_component_scale(*component, 1.5F);
         require(after == before, "stock pip, fleet and status dimensions match main");
     }
-    // #8414: a ground pad or structure slot icon is the texture times viewport scale times the authored Scale.
+    // #8414: a natural-fit slot icon is the texture times viewport scale times the scale it is given.
     for (const auto& [authored, expected] : {std::pair{1.5F, 2.25F}, std::pair{0.9F, 1.35F}}) {
         eawr::data::ui::CommandBarComponent slot_style;
         slot_style.fields.push_back({eawr::data::ui::Field::scale, authored, 0});
@@ -255,6 +255,19 @@ void mod_label_scale() {
     eawr::data::ui::CommandBarComponent stock_slot;
     require(page::command_bar_component_scale(stock_slot, 1.5F) == 1.5F,
         "a slot component with no Scale keeps the viewport-only icon size");
+    // GHUD-S100 (#8489): a company pad's icon ignores the pad's authored Scale; a structure slot keeps its own.
+    {
+        eawr::data::ui::CommandBarComponent pad_style;
+        pad_style.fields.push_back({eawr::data::ui::Field::scale, 1.5F, 0});
+        eawr::data::ui::CommandBarComponent structure_style;
+        structure_style.fields.push_back({eawr::data::ui::Field::scale, 0.9F, 0});
+        require(page::ground_slot_icon_scale(true, &pad_style, 1.5F) == 1.5F,
+            "a company pad icon is the texture times the viewport scale only");
+        require(near(page::ground_slot_icon_scale(false, &structure_style, 1.5F), 1.35F),
+            "a structure slot icon applies its authored Scale");
+        require(page::ground_slot_icon_scale(false, nullptr, 1.5F) == 1.5F,
+            "a slot with no component keeps the viewport-only size");
+    }
     auto default_scale = variant;
     std::erase_if(default_scale.fields, [](const auto& field) { return field.field == eawr::data::ui::Field::scale; });
     require(page::command_bar_component_scale(default_scale, 1.5F) == 1.5F,

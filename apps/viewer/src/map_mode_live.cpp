@@ -991,7 +991,30 @@ std::optional<int> MapMode::process(const double delta) {
         ~FrameDiagExit() {
             if (!diag.enabled()) return;
             const bool live = state.live_session != nullptr;
-            diag.end_frame(live && state.live_session->frame_stale(), live && state.live_session->phase() == LiveSessionView::Phase::running, recording);
+            FrameDiag::FightCounts fight;
+            bool have_fight = false;
+            if (diag.feed_active() && live) {
+                // #8058 capture upgrade: what the frame showed (the fight intensity columns of the frame record).
+                // Only with a telemetry feed; a few counters and a loop over the snapshot instances.
+                const LiveSessionView& session = *state.live_session;
+                for (const auto& unit : session.visible_units()) {
+                    if (unit.own) ++fight.units;
+                    else if (unit.hostile) ++fight.enemy_units;
+                }
+                if (const auto snapshot = session.snapshot_at(static_cast<std::uint64_t>(std::max(0.0, session.presented_tick())))) {
+                    fight.projectiles = static_cast<std::uint32_t>(snapshot->projectiles().size());
+                    for (const auto& instance : snapshot->instances())
+                        if (instance.presentation_attack_target != sim::EntityId{}) ++fight.attacking;
+                }
+                if (state.battle_effects) {
+                    fight.effects = static_cast<std::uint32_t>(state.battle_effects->live_effects());
+                    fight.particles += static_cast<std::uint32_t>(state.battle_effects->particles());
+                }
+                if (state.unit_emitters) fight.particles += static_cast<std::uint32_t>(state.unit_emitters->particles());
+                have_fight = true;
+            }
+            diag.end_frame(live && state.live_session->frame_stale(), live && state.live_session->phase() == LiveSessionView::Phase::running,
+                recording, have_fight ? &fight : nullptr);
         }
     } frame_diag_exit{frame_diag, state, ui_recording};
     frame_diag.begin_frame();

@@ -455,6 +455,8 @@ void GalacticMode::State::stack_planet_ui(const galactic_view::PlanetUiDepthPlan
 
 void GalacticMode::State::update_planet_labels() {
     if (!hud || !planet_name_style) return;
+    // GFDH-03: a change of the held stack's reachable planets invalidates the labels it touches.
+    refresh_fleet_reach();
     const auto& label_flight = seat_flight();
     const HudLabelKey label_key{displayed_snapshot, camera.eye, camera.target, camera.up,
         camera.vertical_fov_degrees, camera.near_plane, camera.far_plane, camera.width, camera.height,

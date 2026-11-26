@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <vector>
 
@@ -53,6 +54,17 @@ void index_bytes_pad_with_degenerate_slots() {
     check(clipped[0] == 1 && clipped[2] == 2, "indices past the capacity are not written");
 }
 
+void packed_bytes_compare_exactly() {
+    const std::array<std::uint8_t, 4> previous{1, 2, 3, 4};
+    std::array<std::uint8_t, 4> current = previous;
+    check(same_bytes(previous.data(), 4, current.data(), 4), "identical bytes are unchanged");
+    current[3] = 5;
+    check(!same_bytes(previous.data(), 4, current.data(), 4), "one differing byte is a change");
+    check(!same_bytes(previous.data(), 4, previous.data(), 3), "a different size is a change");
+    check(same_bytes(nullptr, 0, nullptr, 0), "two empty buffers are the same");
+    check(!same_bytes(nullptr, 4, current.data(), 4), "a missing buffer is never the same");
+}
+
 void the_flag_turns_the_merge_off_only_with_off() {
     check(!merge_additive_from_argument("off"), "off turns the merge off");
     check(merge_additive_from_argument("on"), "on keeps the merge on");
@@ -65,6 +77,7 @@ void the_flag_turns_the_merge_off_only_with_off() {
 int main() {
     streams_are_laid_end_to_end();
     index_bytes_pad_with_degenerate_slots();
+    packed_bytes_compare_exactly();
     the_flag_turns_the_merge_off_only_with_off();
     return EXIT_SUCCESS;
 }

@@ -98,6 +98,9 @@ public:
     [[nodiscard]] const Contents& contents() const noexcept { return contents_; }
     [[nodiscard]] bool holds_slice(std::uint64_t snapshot, std::uint32_t virtual_tick_index) const noexcept;
     [[nodiscard]] bool holds_invasion(std::uint64_t handle) const noexcept;
+    // Whether an intent of the batch finishes (cancels) this queued build: the AI already failed its purchase row, the world still
+    // shows the queue entry until the slice applies.
+    [[nodiscard]] bool holds_finish(sim::EntityId build) const noexcept;
     // The lowest invasion handle an intent of the batch holds (0: none).
     [[nodiscard]] std::uint64_t lowest_invasion() const noexcept;
     [[nodiscard]] std::size_t intents() const noexcept;
@@ -160,6 +163,8 @@ public:
     // Whether a pending intent holds this invasion handle: the AI decided it, its slice has not applied yet, so the world has no
     // row for it. The world's counter cannot tell: it already stands at the end of the reserved block.
     [[nodiscard]] bool holds_invasion(std::uint64_t handle) const noexcept;
+    // Whether a pending intent finishes (cancels) this queued build: see OutboxBatch::holds_finish.
+    [[nodiscard]] bool holds_finish(sim::EntityId build) const noexcept;
     [[nodiscard]] const std::vector<OutboxSlice>& pending_slices() const noexcept { return slices_; }
     // Changes whenever the pending work or the lane frontier changes (never read by gameplay).
     [[nodiscard]] std::uint64_t generation() const noexcept { return generation_; }

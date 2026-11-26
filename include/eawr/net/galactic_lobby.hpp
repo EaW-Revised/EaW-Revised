@@ -64,9 +64,18 @@ inline constexpr std::size_t galactic_lobby_max_human_sides = sim::galactic::gal
 [[nodiscard]] std::size_t galactic_lobby_human_row_limit(const sim::galactic::MpLobbyCampaign& campaign, std::size_t dialog_rows) noexcept;
 
 // The most humans a campaign room is opened for (its capacity, #8130): a multiplayer campaign's playable factions
-// (every player takes a faction row), a co-op campaign (one side, co-op seats) the seat ceiling; at least two, at most `seat_limit`
-// (the transport's seats) and the human seat ceiling (eight), so a room is never opened for a number the campaign cannot start with.
-[[nodiscard]] std::uint32_t galactic_lobby_max_humans(const sim::galactic::MpLobbyCampaign& campaign, std::uint32_t seat_limit) noexcept;
+// (every player takes a faction row); a co-op campaign (one side, co-op seats) the human slots of its side, which are the side's
+// own row plus the staging dialog's rows the campaign's rows leave free (the dialog stacks a co-op seat there, #8497), or the seat
+// ceiling when no dialog is known (`dialog_rows` 0). At least two, at most `seat_limit` (the transport's seats) and the human seat
+// ceiling (eight), so a room is never opened for a number the campaign cannot start with.
+[[nodiscard]] std::uint32_t galactic_lobby_max_humans(const sim::galactic::MpLobbyCampaign& campaign, std::uint32_t seat_limit,
+    std::size_t dialog_rows = 0) noexcept;
+
+// The row a new campaign room opens on (#8497): the campaign the host last picked (so a room opened again keeps its mode,
+// Multiplayer or Co-op) while the catalog still lists it with a playable faction, else the catalog's first row with one (the
+// catalog order puts multiplayer rows first). Nullptr when no row can host.
+[[nodiscard]] const sim::galactic::MpLobbyCampaign* galactic_lobby_host_campaign(std::span<const sim::galactic::MpLobbyCampaign> campaigns,
+    std::string_view preferred) noexcept;
 
 enum class LobbyGameMode : std::uint8_t { skirmish, galactic };
 // Which text the room's options carry. An empty or unrecognised option blob is a skirmish room (its own codec refuses it).

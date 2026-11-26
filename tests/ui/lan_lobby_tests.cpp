@@ -835,6 +835,17 @@ int main() {
         && !eawr::viewer::room_campaign_tab("mp", "", false, true),
         "campaign changes and staging re-entry choose the room tab while browsing preserves the chosen tab");
     {
+        // #8497: the "campaign has room for N" line comes only when the room holds fewer, and once per room for that number.
+        using eawr::viewer::room_capacity_note_due;
+        std::uint32_t noted = 0;
+        expect(!room_capacity_note_due(3, 3, noted) && !room_capacity_note_due(5, 3, noted) && noted == 0,
+            "a room holding enough players is told nothing");
+        expect(room_capacity_note_due(3, 6, noted) && noted == 6, "a campaign with room for more is named once");
+        expect(!room_capacity_note_due(3, 6, noted) && !room_capacity_note_due(3, 6, noted) && !room_capacity_note_due(3, 5, noted),
+            "picking it (or a smaller one) again repeats nothing");
+        expect(room_capacity_note_due(3, 8, noted) && noted == 8 && !room_capacity_note_due(3, 8, noted), "a larger number is named once more");
+    }
+    {
         using eawr::viewer::campaign_tabs;
         const auto both = campaign_tabs(true, true, true);
         expect(both.multiplayer_shown && both.coop_shown && both.coop_selected && !campaign_tabs(true, true, false).coop_selected,

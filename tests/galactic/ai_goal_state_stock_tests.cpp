@@ -125,6 +125,21 @@ struct EngineContractAccess {
             at->second.ready = true; at->second.finished = true; at->second.result = false;
         }
     }
+    // A goal waits in the attach queue and a later pass drops it before the next drain: the state the queue's own drain
+    // allows ("a goal a later pass dropped leaves the queue unattached"), as it stands when a battle starts.
+    static void drop_queued_goal(Engine& e, tactical::PlayerId player, std::uint64_t goal_id) {
+        const auto write = e.native_record_scope();
+        auto* owner = e.player_ai(player);
+        const auto in_proposed = owner ? std::find_if(owner->proposed.begin(), owner->proposed.end(), [&](const Goal& g) { return g.id == goal_id; })
+            : decltype(owner->proposed.begin()){};
+        auto* goal = owner ? e.find_goal(*owner, goal_id) : nullptr;
+        if (!goal && (!owner || in_proposed == owner->proposed.end())) throw std::runtime_error("queued goal fixture missing");
+        e.queue_attach(*owner, goal ? *goal : *in_proposed);
+        std::erase_if(owner->active, [&](const Goal& g) { return g.id == goal_id; });
+        std::erase_if(owner->proposed, [&](const Goal& g) { return g.id == goal_id; });
+        e.native_records_replaced(); e.mark_native_state_changed();
+    }
+    static std::size_t waiting_attaches(const Engine& e) { return e.pending_attach_.size(); }
     static void phase_global(Engine& e, int value) {
         const auto write = e.native_record_scope();
         e.native_records_changed(0, {27, 31}); e.mark_native_state_changed();
@@ -1088,10 +1103,34 @@ void global_value_admission_contracts() {
 }
 } // namespace
 
+// The attach queue may name a goal that a later pass dropped before the drain reached it. Capturing the AI state at a
+// campaign battle's start (the checkpoint and the sync digests) must accept that state, and a restore must keep it.
+void queued_attach_of_dropped_goal_contract() {
+    const std::vector<lifecycle::PlayerSelection> selections{{1, "FIXTURE", "NORMAL", {}, {}}, {2, "FIXTURE", "NORMAL", {}, {}}};
+    eawr::platform::ThreadWorkerAdapter executor(1);
+    Owner control(fixture_setup(), fixture_data(), fixture_plans(), selections);
+    control.begin(fixture_snapshot(), executor, selections); policy(control, 1); policy(control, 2);
+    const auto goal = must(control.engine->allocate_galactic_goal(1, 0, control.engine->target_of_object(10)->id));
+    ai::EngineContractAccess::drop_queued_goal(*control.engine, 1, goal->goal);
+    expect(ai::EngineContractAccess::waiting_attaches(*control.engine) == 1 && !control.engine->galactic_goal(1, goal->goal),
+        "a dropped goal still waits in the attach queue");
+    ai::GoalStateContributor saved(control.engine, fixture_identity());
+    const auto bytes = saved.capture();
+    expect(bool(bytes), bytes ? "a queued attach of a dropped goal captures" : bytes.error().message);
+    if (!bytes) return;
+    expect(bool(saved.state_hash()) && must(saved.record_sync_hash()) == must(saved.record_sync_hash(true)), "the stale queue entry digests incrementally and cold alike");
+    Owner resumed(fixture_setup(), fixture_data(), fixture_plans(), selections);
+    must(resumed.world->bind(fixture_snapshot(), {}, executor, 0, 1000));
+    ai::GoalStateContributor restored(resumed.engine, fixture_identity()); must(restored.restore(bytes.value()));
+    expect(ai::EngineContractAccess::waiting_attaches(*resumed.engine) == 1 && must(restored.capture()).components == bytes.value().components,
+        "a restore keeps the queue entry byte-identically");
+}
+
 void goal_state_contracts() {
     own_global_value_write_is_read_back();
     shared_global_value_contracts();
     global_value_admission_contracts();
+    queued_attach_of_dropped_goal_contract();
     std::string reference;
     const std::vector<lifecycle::PlayerSelection> selections{{1, "FIXTURE", "NORMAL", {}, {}}, {2, "FIXTURE", "NORMAL", {}, {}}};
     for (const auto workers : {1U, 2U, 4U, 8U}) {

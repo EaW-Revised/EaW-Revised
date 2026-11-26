@@ -751,6 +751,17 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         if (!p->planet_types.contains(conflict.planet)) return fail<std::optional<AutoResolveOutcomeApplication>>("missing original planet type");
         auto application = plan_auto_resolve_outcome(conflict, roster, *step.value().state.outcome, outcome_inputs(p, roster, conflict.planet));
         if (!application) return core::Result<std::optional<AutoResolveOutcomeApplication>>::failure(application.error());
+        // WAR-43a: the space specials that the loser's destroyed base takes with it are results-screen losses. Nothing is
+        // read from the planet's structures unless the base is destroyed, so a no-clear outcome can never fail here.
+        std::span<const gc::ProductionObject> planet_objects;
+        if (snapshot.production()) for (const auto& production : snapshot.production()->planets) if (production.planet == conflict.planet) {
+            planet_objects = production.objects;
+            break;
+        }
+        auto structure_losses = auto_resolve_structure_losses(application.value(), control_planet(snapshot, conflict.planet), planet_objects,
+            [p](gc::TypeId id) -> std::optional<std::string> { const auto* type = bound(p->plan, p->types, id); return type ? std::optional<std::string>(type->name) : std::nullopt; });
+        if (!structure_losses) return core::Result<std::optional<AutoResolveOutcomeApplication>>::failure(structure_losses.error());
+        application.value().structure_losses = std::move(structure_losses).value();
         return core::Result<std::optional<AutoResolveOutcomeApplication>>::success(std::move(application).value());
     };
     result.outcomes.bounty = [p, originals_owned](gc::GalacticSession& galaxy, const AutoResolveOutcomeApplication& a) -> core::Result<void> {

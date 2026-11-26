@@ -397,6 +397,7 @@
           "file": "src/script/foc/tactical_object_bindings.cpp",
           "registrars": {
             "add": "global",
+            "global": "global",
             "register_binding": "global",
             "method": "member",
             "player": "member",
@@ -545,6 +546,7 @@
           "file": "src/script/foc/tactical_object_bindings.cpp",
           "registrars": {
             "add": "global",
+            "global": "global",
             "register_binding": "global",
             "method": "member",
             "player": "member",
@@ -636,6 +638,7 @@
           "file": "src/script/foc/tactical_object_bindings.cpp",
           "registrars": {
             "add": "global",
+            "global": "global",
             "register_binding": "global",
             "method": "member",
             "player": "member",
@@ -735,6 +738,7 @@
           "file": "src/script/foc/tactical_object_bindings.cpp",
           "registrars": {
             "add": "global",
+            "global": "global",
             "register_binding": "global",
             "method": "member",
             "player": "member",

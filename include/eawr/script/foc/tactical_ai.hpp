@@ -506,6 +506,9 @@ struct AiSetup {
     // True once the host fills hint_objects from the map data. While false the lookups still answer from the list but
     // note per call that map hint objects are not hosted, so an empty answer is never silent.
     bool hint_objects_hosted{false};
+    // Where Spawn_Special_Weapon stands its object: the map's first special-weapon source (raised by its Layer_Z_Adjust).
+    // Absent: the origin (our choice; original behavior without a source is not verified).
+    std::optional<sim::math::Vec3> special_weapon_source;
 };
 
 // The AI XML files the goal system reads (#449), as logical paths.

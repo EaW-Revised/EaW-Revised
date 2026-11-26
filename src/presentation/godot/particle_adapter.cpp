@@ -277,6 +277,13 @@ float eawr_particle_fog() {
 
 [[nodiscard]] Vector3 axis_convert(const particles::Vec3 value) { return {value.x, value.z, -value.y}; }
 
+// #8471: a stream's kept particle-space bounds in render axes (the conversion only swaps axes and negates one).
+[[nodiscard]] AABB render_bounds(const particles::VertexStream& stream) {
+    const Vector3 low{stream.bounds_min.x, stream.bounds_min.z, -stream.bounds_max.y};
+    const Vector3 high{stream.bounds_max.x, stream.bounds_max.z, -stream.bounds_min.y};
+    return AABB(low, high - low);
+}
+
 [[nodiscard]] std::optional<Image::Format> image_format(const assets::PixelFormat format) {
     switch (format) {
     case assets::PixelFormat::rgba8: return Image::FORMAT_RGBA8;
@@ -353,12 +360,15 @@ public:
         // Merged emitters (set_merge_additive) own no draw resources; see Group.
         Group* group{};
         std::vector<std::uint32_t> raw_indices;
-        std::uint64_t stream_hash{};
         std::size_t live_vertices{};
-        // The stream the group holds for this emitter as of its last commit (stage_merged), which pack_merged
-        // compares with: a stream packed twice before one commit must still dirty the group.
-        std::uint64_t committed_hash{};
+        // #8471: the packed bytes the group holds for this emitter as of its last commit (stage_merged), which
+        // pack_merged compares with byte for byte (the packed bytes are what the GPU gets). The buffers swap with
+        // vertex_bytes/attribute_bytes, so nothing is allocated per frame. A stream packed twice before one commit
+        // is always reported changed (packed_since_commit), so it still dirties the group.
+        PackedByteArray previous_vertex_bytes;
+        PackedByteArray previous_attribute_bytes;
         std::size_t committed_vertices{};
+        bool packed_since_commit{};
         bool stream_unchanged{};
         bool in_live{};
         AABB bounds;
@@ -743,22 +753,36 @@ public:
     // Worker: pack one merged emitter's stream; the group strides are read-only here.
     void pack_merged(Emitter& emitter, const particles::VertexStream& stream) {
         const Group& group = *emitter.group;
-        const auto hash = particles::stream_hash(stream);
-        emitter.stream_unchanged = emitter.committed_vertices == stream.vertices.size() && hash == emitter.committed_hash;
-        emitter.stream_hash = hash;
+        // #8471: the committed bytes are the current ones until a second pack before one commit; keep them as the
+        // previous buffers (a swap, no copy) and pack into the other pair.
+        const bool comparable = !emitter.packed_since_commit && emitter.committed_vertices == stream.vertices.size()
+            && emitter.raw_indices == stream.indices;
+        if (!emitter.packed_since_commit) {
+            std::swap(emitter.vertex_bytes, emitter.previous_vertex_bytes);
+            std::swap(emitter.attribute_bytes, emitter.previous_attribute_bytes);
+        }
+        emitter.packed_since_commit = true;
         emitter.live_vertices = stream.vertices.size();
-        emitter.vertex_bytes.resize(static_cast<int64_t>(stream.vertices.size() * group.vertex_stride));
-        emitter.attribute_bytes.resize(static_cast<int64_t>(stream.vertices.size() * group.attribute_stride));
+        const auto vertex_size = static_cast<int64_t>(stream.vertices.size() * group.vertex_stride);
+        const auto attribute_size = static_cast<int64_t>(stream.vertices.size() * group.attribute_stride);
+        emitter.vertex_bytes.resize(vertex_size);
+        emitter.attribute_bytes.resize(attribute_size);
         auto* const vertex_out = emitter.vertex_bytes.ptrw();
         auto* const attribute_out = emitter.attribute_bytes.ptrw();
+        // prepare() set the bounds already when the stream carries them.
+        const bool known_bounds = stream.bounds_valid;
         for (std::size_t index = 0; index < stream.vertices.size(); ++index) {
             const auto& vertex = stream.vertices[index];
             detail::pack_particle_vertex(vertex, vertex_out + index * group.vertex_stride,
                 attribute_out + index * group.attribute_stride + group.colour_offset,
                 attribute_out + index * group.attribute_stride + group.uv_offset);
-            emitter.bounds.expand_to(axis_convert(vertex.position));
+            if (!known_bounds) emitter.bounds.expand_to(axis_convert(vertex.position));
         }
-        emitter.raw_indices.assign(stream.indices.begin(), stream.indices.end());
+        emitter.stream_unchanged = comparable && detail::same_bytes(emitter.previous_vertex_bytes.ptr(),
+            emitter.previous_vertex_bytes.size(), vertex_out, vertex_size)
+            && detail::same_bytes(emitter.previous_attribute_bytes.ptr(), emitter.previous_attribute_bytes.size(),
+                attribute_out, attribute_size);
+        if (!comparable) emitter.raw_indices.assign(stream.indices.begin(), stream.indices.end());
     }
 
     // Caller thread, once per nonempty upload of a merged emitter.
@@ -767,7 +791,7 @@ public:
         if (stream.vertices.empty()) {
             emitter.live_vertices = 0;
             emitter.committed_vertices = 0;
-            emitter.committed_hash = 0;
+            emitter.packed_since_commit = false;
             leave_group(id, emitter);
             return;
         }
@@ -779,8 +803,8 @@ public:
         } else if (!emitter.stream_unchanged) {
             group.dirty = true;
         }
-        emitter.committed_hash = emitter.stream_hash;
         emitter.committed_vertices = emitter.live_vertices;
+        emitter.packed_since_commit = false;
         if (measure_uploads && batch_census.load(std::memory_order_relaxed)) record_census(emitter, stream);
     }
 
@@ -1014,7 +1038,7 @@ public:
         if (found != emitters_.end() && found->second.group != nullptr) {
             found->second.live_vertices = 0;
             found->second.committed_vertices = 0;
-            found->second.committed_hash = 0;
+            found->second.packed_since_commit = false;
             leave_group(id, found->second);
             return;
         }
@@ -1191,7 +1215,6 @@ public:
         if (stream.vertices.empty()) {
             emitter.census_hash = 0;
             emitter.live_vertices = 0;
-            emitter.stream_hash = 0;
             return;
         }
         if (batch_census.load(std::memory_order_relaxed)) {
@@ -1199,7 +1222,10 @@ public:
             emitter.census_identical = hash == emitter.census_hash;
             emitter.census_hash = hash;
         }
-        emitter.bounds = AABB(axis_convert(stream.vertices.front().position), Vector3());
+        // #8471: the quad builder already kept its vertices' bounds; other producers get the per-vertex expansion.
+        const bool known_bounds = stream.bounds_valid;
+        emitter.bounds = known_bounds ? render_bounds(stream)
+            : AABB(axis_convert(stream.vertices.front().position), Vector3());
         if (emitter.group != nullptr) {
             pack_merged(emitter, stream);
             return;
@@ -1219,7 +1245,7 @@ public:
                 detail::pack_particle_vertex(vertex, vertex_out + index * vertex_stride,
                     attribute_out + index * attribute_stride + emitter.colour_offset,
                     attribute_out + index * attribute_stride + emitter.uv_offset);
-                emitter.bounds.expand_to(axis_convert(vertex.position));
+                if (!known_bounds) emitter.bounds.expand_to(axis_convert(vertex.position));
                 if (fog_.attenuation_at_source_xy) emitter.source_points.emplace_back(vertex.position.x, vertex.position.y);
             }
             if (emitter.changed_indices) {
@@ -1254,7 +1280,7 @@ public:
                 vertex_out[index] = axis_convert(vertex.position);
                 color_out[index] = Color(vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w);
                 uv_out[index] = Vector2(vertex.u, vertex.v);
-                emitter.bounds.expand_to(vertex_out[index]);
+                if (!known_bounds) emitter.bounds.expand_to(vertex_out[index]);
                 if (fog_.attenuation_at_source_xy) emitter.source_points.emplace_back(vertex.position.x, vertex.position.y);
             }
             indices.resize(static_cast<int64_t>(emitter.prepared_shape.indices));

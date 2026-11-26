@@ -587,6 +587,18 @@ void test_launch_plan() {
     CHECK(std::find(args.begin(), args.end(), L"--eawr-launcher-start") != args.end());
     inputs.extra = {L"--eawr-aa", L"ss=2"};
     CHECK(player_start_requested(inputs.extra));
+    // Frame diagnostics keep the player start (saved settings apply); calibrate stalls the render thread and stays evidence.
+    inputs.extra = {L"--eawr-frame-diag"};
+    CHECK(player_start_requested(inputs.extra));
+    args = godot_arguments(inputs);
+    CHECK(std::find(args.begin(), args.end(), L"--eawr-launcher-start") != args.end());
+    inputs.extra = {L"--eawr-frame-diag", L"--eawr-frame-diag-csv", L"C:\\x\\frames.csv"};
+    CHECK(player_start_requested(inputs.extra));
+    args = godot_arguments(inputs);
+    CHECK(std::find(args.begin(), args.end(), L"--eawr-launcher-start") != args.end());
+    inputs.extra = {L"--eawr-frame-diag-calibrate"};
+    CHECK(!player_start_requested(inputs.extra));
+    inputs.extra = {L"--eawr-aa", L"ss=2"};
     inputs.no_fog = true;
     args = godot_arguments(inputs);
     CHECK(std::find(args.begin(), args.end(), L"--eawr-launcher-start") != args.end());

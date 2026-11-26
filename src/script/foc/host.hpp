@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -214,9 +215,18 @@ inline core::Result<ValueList> galactic_immediate_query(BindingContext& context,
     return result;
 }
 
+struct PendingScope;
+inline const ViewUnit* pending_unit(const Host& host, sim::EntityId id);
+
+// A committed object by ID or script reference, else (inside a binding call) one of the caller's own staged creations.
+inline const ViewUnit* unit_by_id(const Host& host, const sim::EntityId id) {
+    if (const ViewUnit* unit = host.view->find(id)) return unit;
+    return (id & tactical::script_creation_namespace) != 0 ? pending_unit(host, id) : nullptr;
+}
+
 inline const ViewUnit* live_object(const Host& host, const Value& value) {
     const Handle* found = as_handle(value, handle_game_object);
-    return found == nullptr ? nullptr : host.view->find(found->id);
+    return found == nullptr ? nullptr : unit_by_id(host, found->id);
 }
 
 inline Value position_value(const math::Vec3& position) {
@@ -270,27 +280,10 @@ inline std::optional<math::Vec3> position_of(const Host& host, const Value& valu
 
 // SSU-03/FH-40: a caller sees its own creation facts before ordered world commit.
 // No other script instance reads or mutates this transaction's commands.
-inline std::optional<ViewUnit> pending_created_object(const Host& host, const BindingContext& context, const Value& value) {
-    const auto* object = as_handle(value, handle_game_object);
-    if (!object || (object->id & tactical::script_creation_namespace) == 0) return std::nullopt;
-    for (const auto& command : context.staged_commands()) {
-        if (command.verb != verb_create_object || command.arguments.size() != 5) continue;
-        const auto* identity = as_handle(command.arguments[4], handle_game_object);
-        const auto* type = as_handle(command.arguments[1], handle_type);
-        const auto* owner = as_handle(command.arguments[3], handle_player);
-        const auto point = position_of(host, command.arguments[2]);
-        if (!identity || identity->id != object->id || !type || !owner || !point) continue;
-        ViewUnit unit;
-        unit.id = object->id;
-        unit.type = type->id;
-        unit.owner = static_cast<tactical::PlayerId>(owner->id);
-        unit.position = *point;
-        return unit;
-    }
-    return std::nullopt;
-}
-
-// The script's own staged births follow the committed roster in creation order.
+// A creation command stages every object the commit will make, under the references the commit hands out: the command's
+// base reference plus k, members first in creation order, then the team containers, grouped by the one rule the commit
+// uses (tactical::SquadronTable::spawn_layout). A staged object answers its type, owner and the creation point; where the
+// ordered commit finally puts it is not known before the commit.
 inline std::vector<ViewUnit> pending_created_objects(const Host& host, const BindingContext& context) {
     std::vector<ViewUnit> result;
     for (const auto& command : context.staged_commands()) {
@@ -300,15 +293,82 @@ inline std::vector<ViewUnit> pending_created_objects(const Host& host, const Bin
         const auto* owner = as_handle(command.arguments[3], handle_player);
         const auto point = position_of(host, command.arguments[2]);
         if (!identity || !type || !owner || !point) continue;
-        ViewUnit unit;
-        unit.id = identity->id;
-        unit.type = type->id;
-        unit.owner = static_cast<tactical::PlayerId>(owner->id);
-        unit.position = *point;
-        result.push_back(std::move(unit));
+        const auto layout = host.world != nullptr ? host.world->motion().squadrons.spawn_layout(type->id)
+                                                  : std::optional<tactical::SpawnLayout>(tactical::SpawnLayout{1, {}});
+        if (!layout) continue;
+        const auto* squadron = layout->teams.empty() || host.world == nullptr ? nullptr
+            : host.world->motion().squadrons.find_squadron(type->id);
+        const auto first = identity->id;
+        const auto team_id = [&](const std::size_t member) -> sim::EntityId {
+            std::size_t end = 0;
+            for (std::size_t team = 0; team < layout->teams.size(); ++team) {
+                end += layout->teams[team];
+                if (member < end) return first + layout->members + team;
+            }
+            return 0;
+        };
+        const auto base = [&](const sim::EntityId id, const tactical::TypeId kind) {
+            ViewUnit unit;
+            unit.id = id;
+            unit.type = kind;
+            unit.owner = static_cast<tactical::PlayerId>(owner->id);
+            unit.position = *point;
+            return unit;
+        };
+        for (std::size_t member = 0; member < layout->members; ++member) {
+            auto unit = base(first + member, squadron != nullptr && member < squadron->members.size() ? squadron->members[member] : type->id);
+            if (squadron != nullptr) { unit.craft = true; unit.squadron = team_id(member); }
+            result.push_back(std::move(unit));
+        }
+        std::size_t begin = 0;
+        for (std::size_t team = 0; team < layout->teams.size(); ++team) {
+            auto unit = base(first + layout->members + team, type->id);
+            unit.container = true;
+            for (std::size_t member = begin; member < begin + layout->teams[team]; ++member) unit.members.push_back(first + member);
+            begin += layout->teams[team];
+            result.push_back(std::move(unit));
+        }
     }
     return result;
 }
+
+inline std::optional<ViewUnit> pending_created_object(const Host& host, const BindingContext& context, const Value& value) {
+    const auto* object = as_handle(value, handle_game_object);
+    if (!object || (object->id & tactical::script_creation_namespace) == 0) return std::nullopt;
+    for (auto& unit : pending_created_objects(host, context))
+        if (unit.id == object->id) return std::move(unit);
+    return std::nullopt;
+}
+
+// The binding call in progress, so the shared object lookups (live_object) see the caller's own staged creations the way
+// the dedicated queries do. Set around every object method and global; the cache keeps the rows a lookup handed out
+// valid until the call ends.
+struct PendingScope {
+    explicit PendingScope(const BindingContext& context) noexcept : previous_(current_) {
+        if (current_ == nullptr) cache_.clear();
+        current_ = &context;
+    }
+    ~PendingScope() { current_ = previous_; }
+    PendingScope(const PendingScope&) = delete;
+    PendingScope& operator=(const PendingScope&) = delete;
+    [[nodiscard]] static const ViewUnit* find(const Host& host, const sim::EntityId id) {
+        if (current_ == nullptr) return nullptr;
+        const auto staged = current_->staged_commands().size();
+        if (staged != staged_seen_ || cache_.empty()) {
+            for (auto& unit : pending_created_objects(host, *current_)) cache_.push_back(std::move(unit));
+            staged_seen_ = staged;
+        }
+        for (auto at = cache_.rbegin(); at != cache_.rend(); ++at) if (at->id == id) return &*at;
+        return nullptr;
+    }
+private:
+    const BindingContext* previous_;
+    static inline thread_local const BindingContext* current_ = nullptr;
+    static inline thread_local std::size_t staged_seen_ = 0;
+    static inline thread_local std::deque<ViewUnit> cache_;
+};
+
+inline const ViewUnit* pending_unit(const Host& host, const sim::EntityId id) { return PendingScope::find(host, id); }
 
 struct UnitDestination {
     sim::EntityId object{};

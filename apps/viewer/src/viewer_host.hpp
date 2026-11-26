@@ -74,6 +74,7 @@ private:
     bool configure_preview_render_overrides(const godot::PackedStringArray& arguments);
     void apply_preview_render_overrides();
     static void write_window_title(const std::string& title);
+    void reapply_window_title();
     eawr::presentation::ui::OwnedTitle window_title_;
     // The settings file whose sibling keeps this player's window place (#8382); empty for evidence runs.
     std::optional<std::filesystem::path> window_memory_settings_;

@@ -1213,7 +1213,13 @@ core::Result<void> GoalStateContributor::validate(const Engine& e, const detail:
             return owner && (std::any_of(owner->active.begin(), owner->active.end(), [&](const auto& g) { return g.id == id; })
                 || std::any_of(owner->proposed.begin(), owner->proposed.end(), [&](const auto& g) { return g.id == id; }));
         };
-        for (const auto& pending : e.pending_attach_) check(has_goal(pending.player, pending.goal));
+        // A queued attach may outlive its goal: a later pass can drop (or finish) a goal that waits for the per-tick attach
+        // budget, and the drain (drain_attaches) then skips the entry. That state is legal at every barrier, a campaign
+        // battle's start and a save included, so only a goal identity the owner issued is required (below its next goal id), not a live goal.
+        for (const auto& pending : e.pending_attach_) {
+            const auto* owner = e.player_ai(pending.player);
+            check(owner && pending.goal && pending.goal < owner->next_goal_id);
+        }
         for (const auto& [object, pad] : e.pad_reservations_) check(object && has_goal(pad.player, pad.goal));
     } catch (const std::exception& error) { return fail<void>(error.what()); }
     return core::Result<void>::success();

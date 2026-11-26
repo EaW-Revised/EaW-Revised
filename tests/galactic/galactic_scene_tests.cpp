@@ -129,7 +129,7 @@ void production_names_localize_once(const data::Catalog& catalog) {
     assert(art.at("Crusader_Gunship").text_id == "TEXT_UNIT_GUNSHIP");
     // P-1/P-2: the shared resolver preserves an untranslated line's slot.
     assert(art.at("Crusader_Gunship").encyclopedia == "Line one\n\nLine two");
-    assert(art.at("Modded_Ship").text == "Modded_Ship" && art.at("Modded_Ship").encyclopedia.empty());
+    assert(art.at("Modded_Ship").text == "TEXT_MISSING" && art.at("Modded_Ship").encyclopedia.empty());
     assert(art.at("Modded_Ship").hero_rank == 25);
     const auto& inherited = art.at("Modded_Variant");
     assert(inherited.text == "Crusader Gunship" && inherited.text_id == "TEXT_UNIT_GUNSHIP");
@@ -173,7 +173,7 @@ void production_names_localize_once(const data::Catalog& catalog) {
         assert(fleet_marker_model(none, "stock.alo", lookup) == "stock.alo");
     }
     const auto unlocalized = load_production_art(catalog);
-    assert(unlocalized.at("Crusader_Gunship").text == "Crusader_Gunship");
+    assert(unlocalized.at("Crusader_Gunship").text == "TEXT_UNIT_GUNSHIP");
     assert(unlocalized.at("Crusader_Gunship").text_id == "TEXT_UNIT_GUNSHIP");
 }
 

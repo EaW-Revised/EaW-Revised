@@ -1385,7 +1385,10 @@ core::Result<void> NativeActions::restore(const NativeState& state) {
             std::string difference;
             if (purchase == staged.end()) difference = "no reconstructed purchase for this queue entry";
             else if (purchase->second.completed) difference = "its purchase is already completed";
-            else if (purchase->second.failed) difference = "its purchase already failed";
+            else if (purchase->second.failed) {
+                // A cancel the AI decided whose slice has not applied: the row is failed already, the world's entry leaves at the apply tick.
+                if (!pending_finish_ || !pending_finish_(entry.build_id)) difference = "its purchase already failed";
+            }
             else if (purchase->second.player != entry.builder) difference = "builder differs" + pair(purchase->second.player, entry.builder);
             else if (purchase->second.price != entry.price) difference = "price differs" + pair(purchase->second.price.raw(), entry.price.raw());
             else if (purchase->second.producer != planet.planet) difference = "producer differs" + pair(purchase->second.producer, planet.planet);

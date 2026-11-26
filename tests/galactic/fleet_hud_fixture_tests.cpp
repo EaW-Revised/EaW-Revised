@@ -6,11 +6,109 @@
 #include "galactic/ground_roster.hpp"
 #include "../presentation/galactic/hud_clock_fixture.hpp"
 #include "galactic/galaxy_view.hpp"
+#include "galactic/fleet_projection_cache.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
 #include <cstdlib>
+#include <string>
+#include <string_view>
+
+namespace {
+
+// #8428: the fleet HUD's incremental projection (the developer verify mode's comparison) equals a full projection of
+// every publication across a split, a merge, a move (departure, transit, arrival), a sight change and a presentation
+// index change, and reprojects only the planets whose rows changed. The live view built from the shared projection
+// equals the one that projects by itself.
+void incremental_fleet_projection_matches_full(const std::string_view fixture) {
+    namespace gc = eawr::sim::galactic;
+    namespace view = eawr::viewer::galactic;
+    const std::string label = "#8428 " + std::string(fixture) + ": ";
+    auto setup = view::synthetic_live_setup();
+    view::configure_synthetic_hud_clock(setup);
+    std::vector<gc::FleetDisplayType> traits;
+    std::vector<gc::FleetDisplayVisibility> visibility;
+    std::map<gc::TypeId, std::string> names;
+    view::configure_fleet_hud_fixture(setup, 1, fixture, traits, visibility, names);
+    auto created = gc::GalacticSession::create(setup);
+    if (!created) { galactic_test::expect(false, label + created.error().message); return; }
+    auto session = std::move(created).value();
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    const auto metadata = view::synthetic_galaxy();
+    std::vector<std::pair<eawr::sim::EntityId, std::int64_t>> indices;
+    std::vector<eawr::sim::EntityId> departing;
+    // Rank callbacks stand in for the authored art: any stable answer per type.
+    const auto inputs = [&] {
+        return view::FleetProjectionInputs{1, traits, 8, visibility,
+            [](const gc::TypeId type) -> std::optional<std::uint32_t> { return type % 7; }, indices,
+            [](const gc::TypeId type) -> std::optional<std::int64_t> {
+                return type == 1003 ? std::optional<std::int64_t>{1} : std::nullopt; },
+            departing, 0};
+    };
+    view::IncrementalFleetProjection cache;
+    std::size_t partial_planets{}, reused{}, checks{};
+    const auto check = [&](const std::string& what) {
+        const auto snapshot = session.snapshot();
+        const auto before = cache.receipts();
+        const auto& incremental = cache.update(snapshot, inputs());
+        const auto full = view::project_observed_fleets(*snapshot, inputs());
+        galactic_test::expect(view::same_fleet_projection(incremental, full), label + what + ": incremental equals full");
+        if (cache.receipts().partial > before.partial) partial_planets += cache.last_changed().size();
+        if (cache.receipts().reused > before.reused) ++reused;
+        ++checks;
+        const view::FleetMapVisibility map{visibility, {}, false, false};
+        const auto shared = view::build_live_view(*snapshot, metadata, 1, view::synthetic_neutral_owner, {}, map, &incremental);
+        const auto own = view::build_live_view(*snapshot, metadata, 1, view::synthetic_neutral_owner, {}, map);
+        galactic_test::expect(shared.view && own.view && shared.view->fleets == own.view->fleets,
+            label + what + ": the live view from the shared projection equals its own");
+    };
+    std::uint64_t sequence{};
+    const auto order = [&](const auto& command, const std::string& what) {
+        const auto submitted = session.submit({{session.completed_tick(), gc::SeatId{1}, ++sequence}, command});
+        galactic_test::expect(bool(submitted), label + what + " is admitted");
+    };
+    const auto step = [&](const std::string& what) {
+        const auto stepped = session.step(executor);
+        if (!stepped) { galactic_test::expect(false, label + what + ": " + stepped.error().message); return false; }
+        check(what);
+        return true;
+    };
+    if (!step("startup")) return;
+    galactic_test::expect(cache.last_full(), label + "the first publication projects every planet");
+    if (!step("quiet tick")) return;
+    galactic_test::expect(!cache.last_full(), label + "a tick without publication-wide changes is not a full projection");
+    order(gc::TransferFleetMembers{{{601, 7003}}, 0, 2}, "split");
+    if (!step("split")) return;
+    order(gc::MergeFleets{602, 601}, "merge");
+    if (!step("merge")) return;
+    if (setup.movement) {
+        order(gc::MoveFleet{601, {101, 102}, {}}, "move");
+        bool arrived = false;
+        for (int tick = 0; tick < 600 && !arrived; ++tick) {
+            if (!step("move tick " + std::to_string(tick))) return;
+            const auto fleets = session.snapshot()->fleets();
+            arrived = std::any_of(fleets.begin(), fleets.end(), [](const auto& fleet) {
+                return fleet.id == 601 && fleet.orbit == 102 && !fleet.motion.transit; });
+        }
+        galactic_test::expect(arrived, label + "the moved fleet arrives at its destination");
+    }
+    // A sight change reprojects that planet alone, on the same publication.
+    for (auto& row : visibility) if (row.planet == 103) row.current_visible = true;
+    check("sight change");
+    galactic_test::expect(!cache.last_full() && cache.last_changed().size() == 1 && cache.last_changed().front() == 103,
+        label + "a sight change reprojects only its planet");
+    // A presentation index belongs to every card: everything is reprojected.
+    indices = {{7001, 0}};
+    check("presentation index");
+    galactic_test::expect(cache.last_full(), label + "a presentation index change projects every planet");
+    if (!step("after index")) return;
+    galactic_test::expect(checks > 4 && partial_planets > 0, label + "partial updates happened");
+    static_cast<void>(reused);
+}
+
+} // namespace
 
 int main() {
+    for (const auto fixture : {"fleet-contents", "fleet-slot"}) incremental_fleet_projection_matches_full(fixture);
     namespace gc = eawr::sim::galactic;
     namespace view = eawr::viewer::galactic;
     for (const auto name : {"fleet-presence", "fleet-count", "fleet-contents", "fleet-heroes"}) {

@@ -991,6 +991,11 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
                 return call(context, arguments);
             };
         }
+        // Lookups inside the call see the caller's own staged creations.
+        binding = [call = std::move(binding)](BindingContext& context, const ValueList& arguments) {
+            const PendingScope scope(context);
+            return call(context, arguments);
+        };
         if (auto added = scripts.register_binding(name, std::move(binding)); !added) errors.push_back(added.error());
     };
     register_story_plot_bindings(scripts, host, errors); // Get_Story_Plot (#5495)

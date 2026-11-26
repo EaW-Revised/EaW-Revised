@@ -41,7 +41,7 @@ def distance(a, b):
 @unittest.skipUnless(RUNTIME and GAME_ROOT and os.environ.get("EAWR_GODOT_EXECUTABLE"),
                      "requires installed game and GPU viewer")
 class GcBattleColoursRuntime(unittest.TestCase):
-    def run_case(self, directory, label, mode, own=False, toggle=None):
+    def run_case(self, directory, label, mode, own=False, toggle=None, seat=None, full=False):
         case = directory / label
         case.mkdir()
         settings = case / "settings.cfg"
@@ -64,7 +64,8 @@ class GcBattleColoursRuntime(unittest.TestCase):
             "--eawr-galactic-coop-preview", "yes", "--eawr-galactic-battle", "synthetic",
             "--eawr-galactic-battle-frames", "3600", "--eawr-settings-file", str(settings),
             "--eawr-lighting", "sh", "--eawr-shadows", "on", "--eawr-environment", "map",
-            "--eawr-report", str(report), "--eawr-audio", "off"], cwd=ROOT, env=environment,
+            "--eawr-report", str(report), "--eawr-audio", "off"]
+            + (["--eawr-galactic-seat", str(seat)] if seat else []), cwd=ROOT, env=environment,
             capture_output=True, text=True, timeout=600, check=False)
         (case / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -78,6 +79,8 @@ class GcBattleColoursRuntime(unittest.TestCase):
         before = {row["entity"]: tuple(row["rgb"]) for row in live.get("colours_before_toggle", [])
                   if row["entity"] in mine}
         print(f"GC colour capture {label}: {capture}" + (f" early {early}" if toggle else ""))
+        if full:
+            return campaign, live
         return mine, others, before
 
     def test_coop_colours(self):
@@ -88,15 +91,15 @@ class GcBattleColoursRuntime(unittest.TestCase):
         on, on_other, on_before = self.run_case(directory, "toggle_on", 0, toggle="60:1")
         off, off_other, off_before = self.run_case(directory, "toggle_off", 1, toggle="60:0")
         self.assertGreaterEqual(len(b), 2, b)
-        # B: both of the side's ships keep the faction look. C: my own ship keeps it, the team mate's is tinted.
+        # B: both of the side's ships keep the colour-off faction look. C (#8359, 11-25): my own ship takes the faction's
+        # coloured team colour (Factions.xml Color), the team mate's is a tint; none keeps the colour-off look.
         self.assertEqual(len(set(b.values())), 1, b)
         faction = next(iter(b.values()))
         for label, rows in (("shades", shades), ("own colours", own)):
             self.assertEqual(set(rows), set(b), label)
-            self.assertIn(faction, rows.values(), label)
-            tinted = [rgb for rgb in rows.values() if rgb != faction]
-            self.assertTrue(tinted, label)
-            self.assertTrue(all(distance(rgb, faction) >= 90 for rgb in tinted), (label, rows))
+            self.assertNotIn(faction, rows.values(), (label, rows))
+            self.assertGreaterEqual(len(set(rows.values())), 2, (label, rows))
+            self.assertTrue(any(distance(rgb, faction) >= 90 for rgb in rows.values()), (label, rows))
         self.assertNotEqual(shades, own)
         # Enemies always keep their faction look, with the option off or on.
         for rows in (shades_other, own_other, on_other, off_other):
@@ -106,6 +109,30 @@ class GcBattleColoursRuntime(unittest.TestCase):
         self.assertEqual(on, shades)
         self.assertEqual(off_before, shades)
         self.assertEqual(off, b)
+
+    def test_main_player_same_from_both_seats(self):
+        # GCC-08 (owner decision 11-25, legacy #8359): the main colour goes to #1 of the faction's lobby slot, the same on
+        # every peer: the co-op battle seen from the first and from the second human seat renders identical colours.
+        directory = Path(tempfile.mkdtemp(prefix="eawr-gc-main-"))
+        campaign, first = self.run_case(directory, "seat_first", 1, full=True)
+        owner = campaign["local"]["player"]
+        own_seats = sorted(row["seat"] for row in first["gc_colour_seats"]
+                           if row["player"] == owner and row["side"] != 0)
+        self.assertGreaterEqual(len(own_seats), 2, first["gc_colour_seats"])
+        _, second = self.run_case(directory, "seat_second", 1, seat=own_seats[1], full=True)
+
+        def by_seat(live):
+            rows = {}
+            for row in live["rendered_colours"]:
+                if row["player"] == owner and row["controller_seat"] in own_seats[:2]:
+                    rows.setdefault(row["controller_seat"], set()).add(tuple(row["rgb"]))
+            return rows
+
+        a, b = by_seat(first), by_seat(second)
+        self.assertEqual(set(a), set(own_seats[:2]), first["rendered_colours"])
+        self.assertEqual(a, b)  # the same colours on both screens
+        self.assertTrue(all(len(colours) == 1 for colours in a.values()), a)
+        self.assertNotEqual(a[own_seats[0]], a[own_seats[1]])  # #1 main, #2 a mate shade, whichever seat is local
 
 
 if __name__ == "__main__":

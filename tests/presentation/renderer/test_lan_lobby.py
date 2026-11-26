@@ -307,7 +307,7 @@ class LanLobbyStructure(unittest.TestCase):
         # room opens with staged capacity like a skirmish room, and it starts with the humans present.
         staging = (SRC / "lan_lobby_screen_staging.cpp").read_text(encoding="utf-8")
         internal = (SRC / "lan_lobby_screen_internal.hpp").read_text(encoding="utf-8")
-        self.assertIn("net::galactic_lobby_max_humans(*hostable, seat_limit)", staging)
+        self.assertIn("net::galactic_lobby_max_humans(*hostable, seat_limit, impl_->staging_dialog_rows)", staging)
         self.assertIn("match_->configure_staging_capacity(true);", staging)
         self.assertNotIn("configure_staging_capacity(false)", staging)
         self.assertNotIn("configure_staging_capacity(impl.host_options.game_type != galactic_game_type)", staging)
@@ -316,6 +316,19 @@ class LanLobbyStructure(unittest.TestCase):
         self.assertNotIn("galactic_lobby_default_humans", staging)
         chat = (SRC / "lan_lobby_screen_chat.cpp").read_text(encoding="utf-8")
         self.assertIn("campaign_display_name(impl_->galactic_campaign)", chat)
+
+    def test_a_reopened_campaign_room_keeps_the_hosts_mode_and_names_its_size_once(self):
+        # #8497: a room opened again (also after leaving) opens on the host's last picked campaign, so Co-op stays Co-op; its co-op
+        # capacity follows the staging dialog's rows; the "has room for N" line goes through the once-per-room check.
+        staging = (SRC / "lan_lobby_screen_staging.cpp").read_text(encoding="utf-8")
+        galactic = (SRC / "lan_lobby_screen_galactic.cpp").read_text(encoding="utf-8")
+        self.assertIn("net::galactic_lobby_host_campaign(impl_->galactic_backend->campaigns(), impl_->galactic_host_campaign)", staging)
+        self.assertIn("net::galactic_lobby_host_campaign(campaigns, impl.galactic_host_campaign)", galactic)
+        self.assertNotIn("first_hostable_lobby_campaign", staging + galactic)
+        self.assertIn("impl.galactic_host_campaign = campaign.name;", galactic)
+        self.assertIn("impl.staging_dialog_rows = state.dialog_rows;", staging)
+        self.assertIn("impl.capacity_noted = 0;", staging)
+        self.assertIn("viewer::room_capacity_note_due(held, wanted, impl.capacity_noted)", galactic)
 
     def test_the_host_tells_the_room_how_many_rows_its_dialog_draws(self):
         # The room plans no human row the dialog cannot draw: the host hands its dialog's row count to the backend before it pumps.

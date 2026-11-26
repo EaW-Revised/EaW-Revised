@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iterator>
 #include <utility>
+#include <variant>
 
 namespace eawr::script::foc::galactic_ai {
 
@@ -64,6 +65,18 @@ bool OutboxBatch::holds_invasion(std::uint64_t handle) const noexcept {
         if (intent.record.first_invasion <= handle && handle < intent.record.next_invasion) return true;
     return false;
 }
+
+namespace {
+bool finishes(const std::vector<OutboxSlice>& slices, sim::EntityId build) noexcept {
+    if (!build) return false;
+    for (const auto& slice : slices) for (const auto& intent : slice.intents)
+        if (const auto* finish = std::get_if<sim::galactic::GalacticSession::NativeActionShadow::FinishRequest>(&intent.record.request);
+            finish && finish->build == build) return true;
+    return false;
+}
+} // namespace
+
+bool OutboxBatch::holds_finish(sim::EntityId build) const noexcept { return finishes(contents_.slices, build); }
 
 std::uint64_t OutboxBatch::lowest_invasion() const noexcept {
     std::uint64_t floor{};
@@ -169,6 +182,10 @@ bool IntentOutbox::holds_invasion(std::uint64_t handle) const noexcept {
     for (const auto& slice : slices_) for (const auto& intent : slice.intents)
         if (intent.record.first_invasion <= handle && handle < intent.record.next_invasion) return true;
     return false;
+}
+
+bool IntentOutbox::holds_finish(sim::EntityId build) const noexcept {
+    return own_.holds_finish(build) || finishes(slices_, build);
 }
 
 std::size_t IntentOutbox::pending_intents() const noexcept {

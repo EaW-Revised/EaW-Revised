@@ -233,7 +233,8 @@ void GalacticMode::State::write_report_controls(std::ostringstream& output) cons
 
 void GalacticMode::State::write_report_phases(std::ostringstream& output) const {
     output << ",\n  \"presentation_phases\": [";
-    constexpr std::array phase_names{"main", "snapshot", "instances", "animation", "sample", "bind", "material_clock", "corruption", "camera_hud", "submit", "routes", "hud_facts", "hud_commands", "hud_fleets", "hud_ground", "hud_orbit", "hud_radar", "hud_labels", "hud_weapon", "hud_total", "lighting", "visibility"};
+    constexpr std::array phase_names{"main", "snapshot", "instances", "animation", "sample", "bind", "material_clock", "corruption", "camera_hud", "submit", "routes", "hud_facts", "hud_commands", "hud_fleets", "hud_ground", "hud_orbit", "hud_radar", "hud_labels", "hud_weapon", "hud_total", "lighting", "visibility",
+        "reveal_visibility", "live_view", "fleet_projection", "fleet_icons", "fleet_ground", "fleet_badges", "fleet_cards", "fleet_layouts", "fleet_info"};
     static_assert(phase_names.size() == static_cast<std::size_t>(FramePhase::count));
     const auto phase_count = options.zoom_timing ? frame_phase_costs.size() : static_cast<std::size_t>(FramePhase::hud_total);
     for (std::size_t index = 0; index < phase_count; ++index) {

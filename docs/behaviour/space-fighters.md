@@ -1097,3 +1097,18 @@ that is referenced solely as a `Create_Team_Type` therefore ignores an authored
 change nothing; the size on the creating type decides the chunking (FL-06). A
 container type used directly as a creating type is not covered by this rule and
 stays unclaimed.
+
+## FL-22: Repeated starting-type counts
+
+**FL-22 (not verified).** The current adapter assumes a selected starting tier retains every
+row in authored order, including repeated unit types. Each row's live cap is
+looked up by its resolved type: the first matching type in that selected tier
+supplies the count for every occurrence. Thus rows `A,2`, `B,3`, `A,7` produce
+three entries with caps 2, 3, 2. A first count of zero remains zero; a later
+positive duplicate does not replace it. This is neither a sum nor last-value
+replacement. The first nonempty-tier fallback remains WSL-11.
+
+Reserve selection is independent and already uses its first matching type in
+its selected reserve tier. A missing matching type supplies zero; a negative
+first reserve remains unlimited. This assumption changes the load-time profiles used
+by the existing hangar service, without changing service phases or deadlines.

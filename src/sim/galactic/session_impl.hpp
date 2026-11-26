@@ -305,6 +305,7 @@ public:
     [[nodiscard]] std::span<const CensusObject> actor_inputs() const;
     [[nodiscard]] bool raid_qualified(FleetId, PlanetId) const;
     void refresh_fleet_combat_skip(FleetId);
+    void declare_fresh_fleet_blocker(FleetId);
     void notify_fleet_approach(FleetId, PlanetId, bool notify, std::size_t preceding_events);
     // WGM-150: departure accounting only; adds to the left planet's accrued piracy income.
     void accrue_departure_piracy(FleetId, PlayerId owner, PlanetId source, const std::vector<FleetMember>& departing);

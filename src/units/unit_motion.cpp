@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -441,6 +442,7 @@ void append_spawner_motion_profiles(const UnitTables& tables, tactical::MotionTa
         spawner.type_id = assets::object_type_crc(unit.id);
         const auto entries = [&](const auto& starting, const auto& reserves) {
             std::vector<tactical::SpawnEntryProfile> result;
+            std::map<tactical::TypeId, std::int32_t> starting_counts;
             for (const auto& entry : starting) {
                 const auto id = assets::object_type_crc(entry.squadron);
                 // WSL-04/16a: generic spawners accept ordinary ships in either tactical mode.
@@ -457,7 +459,8 @@ void append_spawner_motion_profiles(const UnitTables& tables, tactical::MotionTa
                 row.squadron = id;
                 row.ship = ship;
                 row.arrival = ship && spawned->campaign_hyperspace;
-                row.starting = entry.count;
+                // FL-22: enumerate every row, but count lookup takes the first match for its type.
+                row.starting = starting_counts.try_emplace(id, entry.count).first->second;
                 row.reserve = 0;
                 if (campaign || spawn_policy.mode == SpawnPolicy::Mode::skirmish) {
                     const auto reserve = std::find_if(reserves.begin(), reserves.end(), [&](const auto& candidate) {

@@ -466,6 +466,7 @@ core::Result<void> GalacticSession::Impl::retreat_departure(PlayerId player, Pla
             impl.insert(fleet); ++impl.next_id; ++impl.live_object_count;
             impl.record_fleet_shell(fleet.id, player, source);
             for (const auto& member : fleet.members) impl.relocate_actor(member.id, player, source, fleet.id);
+            impl.declare_fresh_fleet_blocker(fleet.id);
             std::erase_if(planet->landed, living);
             std::vector<EntityId> departed;
             for (const auto& member : fleet.members) departed.push_back(member.id);

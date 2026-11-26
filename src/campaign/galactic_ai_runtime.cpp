@@ -372,6 +372,10 @@ public:
     [[nodiscard]] bool lane_holds_invasion(std::uint64_t handle) const noexcept {
         return lane_batch.holds_invasion(handle) || outbox.holds_invasion(handle);
     }
+    // Whether a decided-but-unapplied intent finishes (cancels) this queued build.
+    [[nodiscard]] bool lane_holds_finish(sim::EntityId build) const noexcept {
+        return lane_batch.holds_finish(build) || outbox.holds_finish(build);
+    }
     // A faulted attempt drops what its batch decided; a closed (finished) batch is final and stays.
     void abandon_open_batch() {
         if (lane_batch.open()) lane_batch.abandon();
@@ -2733,6 +2737,9 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                 });
                 runtime->actions->bind_invasion_pending([weak](std::uint64_t request) {
                     const auto owner = weak.lock(); return owner && owner->lane_holds_invasion(request);
+                });
+                runtime->actions->bind_pending_finish([weak](sim::EntityId build) {
+                    const auto owner = weak.lock(); return owner && owner->lane_holds_finish(build);
                 });
                 runtime->actions->bind_pending_freestore_replay([weak](ga::QualifiedFreestore& staged) -> core::Result<void> {
                     const auto owner = weak.lock();

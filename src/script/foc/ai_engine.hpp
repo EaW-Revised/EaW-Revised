@@ -958,10 +958,13 @@ public:
     // whether the goal is active, and the potential or running plan's definition. Read between ticks; never saved or hashed.
     struct GalacticGoalObservation {
         std::string function, desire, plan;
+        std::string selection; // the retained potential plan's picks, cost and contrast, in plain text; empty without one
         std::uint64_t goal{}, target{}, running_plan{};
         bool active{}, planned{};
     };
     [[nodiscard]] std::vector<GalacticGoalObservation> galactic_goal_observations(tactical::PlayerId) const;
+    // Observer output only: the upper-case type name for a type id, empty when the type is unknown.
+    [[nodiscard]] std::string galactic_type_name(tactical::TypeId) const;
     [[nodiscard]] core::Result<void> service_galactic_system(tactical::PlayerId, galactic_ai::Service,
         authoritative::ScriptScheduler&, std::uint64_t& sequence);
     [[nodiscard]] core::Result<void> commit_galactic_events(authoritative::ScriptScheduler&, std::uint64_t& sequence);

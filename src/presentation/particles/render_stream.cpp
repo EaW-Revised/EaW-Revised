@@ -75,6 +75,7 @@ void append_quad(VertexStream& stream, const Particle& particle, const Vec3 axis
     }
     stream.bounds_min = bounds_min;
     stream.bounds_max = bounds_max;
+    stream.bounds_valid = true;
 }
 
 void mix_hash(std::uint64_t& hash, const std::uint32_t value) {
@@ -126,6 +127,7 @@ void VertexStream::clear() {
     sorted_particles.clear();
     sort_candidates = 0;
     bounds_min = bounds_max = {};
+    bounds_valid = false;
 }
 
 ParticleBounds particle_bounds(const std::span<const EmitterRenderPlan> plans,

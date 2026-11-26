@@ -590,6 +590,11 @@ void planet_names() {
         test::ui::write_text(xml / registry, "<Files/>");
     test::ui::write_text(xml / "units.xml", R"xml(<Units>
 <SpaceUnit Name="Kuat"><Text_ID>TEXT_UNIT</Text_ID></SpaceUnit>
+<SpaceUnit Name="NameBase"><Text_ID> TEXT_OBJECT_STAR_SYSTEM_CORUSCANT </Text_ID></SpaceUnit>
+<SpaceUnit Name="NameInherited"><Variant_Of_Existing_Type>NameBase</Variant_Of_Existing_Type></SpaceUnit>
+<SpaceUnit Name="NameMissing"><Variant_Of_Existing_Type>NameBase</Variant_Of_Existing_Type><Text_ID> TEXT_MISSING_NAME </Text_ID></SpaceUnit>
+<SpaceUnit Name="NameAbsent"/>
+<SpaceUnit Name="NameEmpty"><Text_ID> </Text_ID></SpaceUnit>
 <SpaceProp Name="HoverAsteroid"><Behavior>SPACE_OBSTACLE, IDLE</Behavior>
 <Is_Impassable_Asteroid>Yes</Is_Impassable_Asteroid><Is_Valid_Target>No</Is_Valid_Target><Text_ID/></SpaceProp>
 <SpaceProp Name="HoverValid"><Variant_Of_Existing_Type>HoverAsteroid</Variant_Of_Existing_Type>
@@ -647,6 +652,11 @@ void planet_names() {
     expect(static_cast<bool>(text), "planet fixture text DB loads");
     if (!text) return;
     const auto* objects = &catalog.value().catalog;
+    expect(ui::unit_card_looks("NameInherited", objects, &text.value()).name == "Coruscant"
+        && ui::unit_card_looks("NameMissing", objects, &text.value()).name == "TEXT_MISSING_NAME"
+        && ui::unit_card_looks("NameAbsent", objects, &text.value()).name.empty()
+        && ui::unit_card_looks("NameEmpty", objects, &text.value()).name.empty(),
+        "object card names use the effective Text_ID, the missing key, or an empty name when no ID is authored");
     expect(!ui::world_encyclopedia_admitted("HoverAsteroid", objects)
         && !ui::world_encyclopedia_admitted("HoverValid", objects),
         "CARD-20: impassable mouse contacts and valid-target/name metadata alone admit no world tooltip");

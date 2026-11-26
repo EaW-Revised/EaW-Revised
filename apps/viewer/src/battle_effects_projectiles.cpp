@@ -87,6 +87,7 @@ struct ScreenAxes final {
 }
 
 void grow_bounds(particles::VertexStream& stream, const V point) {
+    stream.bounds_valid = true; // #8471: push() is this file's only vertex writer, so the bounds are exact
     if (stream.vertices.size() == 1) {
         stream.bounds_min = point;
         stream.bounds_max = point;

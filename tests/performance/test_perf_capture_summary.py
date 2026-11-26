@@ -189,6 +189,41 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(min(t.n for t in capture.sources[0].ticks), 11)
         self.assertEqual(len(capture.sources[0].ticks), 20 + 30)
 
+    def test_context_threads_memory_and_fight_rows_are_read_and_printed(self):
+        rows = feed_lines(ticks=60)
+        rows.insert(1, dict(r="context", t=1, cpu="Test CPU @ 3.0GHz", cores=12, logical=20, p_cores=8, e_cores=4, p_logical=16,
+                            topology=True, gpu="Test GPU", gpu_type="discrete", gpu_driver="Vendor 1.2.3", gpu_api="1.3",
+                            renderer="forward_plus", rd_driver="vulkan", res=[2560, 1440], window="fullscreen", vsync="on",
+                            fps_cap=120, render_thread="separate", render_thread_setting="separate",
+                            video={"detail_level": 2}, threads={"hardware": 20, "sim": {"setting": 0, "automatic": 18,
+                            "mode": "automatic", "resolved": 18}, "particles": {"setting": 8, "automatic": 8, "mode": "manual",
+                            "resolved": 8}}))
+        rows[2:2] = [dict(r="source", src=1, label="galactic", workers=18, t=0)]
+        for second in range(1, 11):
+            rows.append(dict(r="thr", t=second * 1_000_000, th=[["sim", 0.9, 1], ["main", 0.5 + second / 100, 1], ["t99", 0.1, 0]]))
+            rows.append(dict(r="mem", t=second * 1_000_000, commit_mb=1000 + second, ws_mb=800 + second, pf_s=50.0 * second))
+        for n in range(1, 41):
+            rows.append(dict(r="frame", n=n, t=n * 16000, ms=10.0 + n / 4, main=5.0, render=6.0, gpu=7.0, lock=0.0, stale=0,
+                             u=10 * n, eu=5 * n, atk=n, proj=3 * n, fx=n, part=100 * n, dc=500 + n, obj=900 + n))
+        capture = self.load(rows)
+        self.assertEqual(capture.contexts[0]["cores"], 12)
+        self.assertEqual(capture.sources[1].workers, 18)
+        self.assertEqual(len(capture.threads), 10)
+        self.assertEqual(len(capture.mem), 10)
+        self.assertEqual(capture.frames[-1].fight["proj"], 120)
+        text = "\n".join(summary.report(capture, None, False, 16.7))
+        self.assertIn("8 performance + 4 efficiency cores", text)
+        self.assertIn("gpu: Test GPU", text)
+        self.assertIn("sim 18 (automatic, automatic would be 18)", text)
+        self.assertIn("particles 8 (manual", text)
+        self.assertIn("hottest labeled thread: sim", text)
+        self.assertIn("commit MiB: first 1001, last 1010, max 1010", text)
+        self.assertIn("== fight intensity (40 frames)", text)
+        self.assertIn("draw calls", text)
+        self.assertIn("Q4", text)
+        # Frame time rises with the fight in this series: the correlation is reported as positive.
+        self.assertGreater(summary.correlation([float(f.fight["u"]) for f in capture.frames], [f.ms for f in capture.frames]), 0.99)
+
     def test_main_prints_and_rejects_empty(self):
         path = write(self.tmp.name, "feed.jsonl", feed_lines(ticks=100))
         self.assertEqual(summary.main([str(path)]), 0)

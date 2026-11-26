@@ -39,6 +39,7 @@ REVIEWED = {
     # The perf telemetry feed writer (#8058): writes its own JSONL and capture files; the only reads are the Linux /proc counters.
     "include/eawr/core/perf_diag/feed_writer.hpp": "opt-in write-only telemetry feed, no asset read",
     "src/core/perf_diag_feed_writer.cpp": "opt-in write-only telemetry feed, reads only OS counters, no asset read",
+    "src/core/perf_diag_threads.cpp": "per-thread CPU counters and CPU model for the telemetry feed, reads only /proc counters, no asset read",
 }
 
 

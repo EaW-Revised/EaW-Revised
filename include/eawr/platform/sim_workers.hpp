@@ -53,8 +53,9 @@ public:
     // Optional clock for deterministic dispatch tests. It must be monotonic, safe to call
     // from every worker, and never throw; empty uses the steady clock.
     using ClockRead = std::function<std::chrono::steady_clock::time_point()>;
+    // `label` names the pool threads for the telemetry feed per-thread CPU rows ("sim-worker-3"); empty = "pool".
     explicit ThreadWorkerAdapter(std::size_t worker_count, Dispatch dispatch = Dispatch::always_pool,
-        ClockRead clock = {});
+        ClockRead clock = {}, std::string_view label = {});
     ~ThreadWorkerAdapter() override;
 
     ThreadWorkerAdapter(const ThreadWorkerAdapter&) = delete;

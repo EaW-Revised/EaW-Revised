@@ -34,6 +34,16 @@ inline void write_index_bytes(const std::span<const std::uint32_t> topology, con
     }
 }
 
+// #8471: whether two packed buffers hold the same bytes; buffers of different sizes never do. The merged
+// emitters compare the bytes they packed this frame with the ones the group last took (exact, unlike a hash).
+[[nodiscard]] inline bool same_bytes(const std::uint8_t* previous, const std::int64_t previous_size,
+                                     const std::uint8_t* current, const std::int64_t current_size) noexcept {
+    if (previous_size != current_size || previous_size < 0) return false;
+    if (previous_size == 0) return true;
+    return previous != nullptr && current != nullptr
+        && std::memcmp(previous, current, static_cast<std::size_t>(previous_size)) == 0;
+}
+
 // `--eawr-particle-merge-additive [on|off]`: the merge is on by default; the flag turns it off only
 // with the value "off". A bare flag, "on" or any other next argument leaves it on (the next
 // argument is another option then, not a value).

@@ -129,6 +129,7 @@ bool LiveSessionView::prepare_head(const vfs::Vfs& filesystem, const std::string
             godot::UtilityFunctions::printerr(godot::String(core::format_diagnostic(diagnostic).c_str()));
     gc_palette_.clear();
     gc_seat_colours_.clear();
+    gc_model_seat_colours_.clear();
     gc_seat_colours_ready_ = false;
     gc_colour_toggle_.reset();
     gc_follow_mate_ = options_.borrowed_battle

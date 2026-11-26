@@ -147,8 +147,8 @@ core::Result<TacticalSession::Impl::CompanyBirth> TacticalSession::Impl::spawn_c
             }
             // FL-06: one authored purchase may produce several teams, all after its craft.
             birth.members = members;
-            for (std::size_t begin = 0; begin < members.size();) {
-                const auto count = squadron_team_size(members.size() - begin, maximum);
+            std::size_t begin = 0;
+            for (const auto count : squadron_team_sizes(members.size(), maximum)) {
                 auto container = add(deployed, math::Vec3{point.x, point.y, layer_z},
                     request.placement == CompanyPlacement::reinforcement ? math::identity_quat() : request.prototype.rotation,
                     0, true);

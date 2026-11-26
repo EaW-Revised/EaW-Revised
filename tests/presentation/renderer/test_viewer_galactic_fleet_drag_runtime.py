@@ -260,6 +260,7 @@ var shift = 0
 var viewport: SubViewport
 var enemy_target = %s
 var route_samples = []
+var lifted = []
 func _initialize():
     var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
     # A standalone viewport keeps its native GUI cursor in event coordinates.
@@ -328,6 +329,16 @@ func _process(delta):
         mouse(source, true)
     if frame == 32: motion([source[0] + 24, source[1]], true)
     if frame == 34: motion(target, true)
+    if slots != "" and (frame == 33 or frame == 36):
+        # GFDH-03: once the stack is lifted, every reachable planet other than the hovered one
+        # shows its empty slots as display-only drop targets.
+        for node in current_scene.find_children("fleet_reach_slot_*", "", true, false):
+            if node is Control and node.is_visible_in_tree():
+                var tint = node.self_modulate
+                lifted.append({"frame": frame, "name": str(node.name), "tint": [tint.r8, tint.g8, tint.b8]})
+        var file = FileAccess.open(slots.get_base_dir().path_join("pickup.json"), FileAccess.WRITE)
+        file.store_string(JSON.stringify(lifted))
+        file.close()
     if frame == 37 and enemy_target:
         var enemy = current_scene.find_child("fleet_presence_102_0", true, false)
         assert(enemy != null and enemy.is_visible_in_tree(), "enemy drop target must draw")
@@ -356,7 +367,10 @@ func _process(delta):
     if waiting: return false
     if frame == 37 + shift or frame == 40 + shift:
         var receiver = current_scene.find_child("fleet_route_preview", true, false)
-        route_samples.append(receiver.get_meta("route_preview") if receiver else {})
+        var sample = receiver.get_meta("route_preview") if receiver else {}
+        var highlight = current_scene.find_child("fleet_drag_highlight", true, false)
+        sample["slot_highlight"] = highlight != null and highlight.is_visible_in_tree()
+        route_samples.append(sample)
     if frame == 40 + shift:
         print("FLEET DRAG active=", viewport.gui_is_dragging(), " hovered=", viewport.gui_get_hovered_control(), " pointer=", viewport.get_mouse_position())
         viewport.get_texture().get_image().save_png(%s)
@@ -744,6 +758,16 @@ func _process(delta):
         # #3072: hovering a planet during a drag shows its empty local stack
         # icons; a drop on one moves the fleet there and asks for that slot.
         data = self.native_drag("world-slot")
+        # GFDH-03: lifting the fleet shows the empty slots of the planets it can reach (other than
+        # the hovered one), in the debug build's fixed drop-slot colour (not the faction colour).
+        lifted = json.loads((pathlib.Path(data["evidence_directory"]) / "pickup.json").read_text(encoding="utf-8"))
+        self.assertTrue(lifted, "a lifted fleet shows the empty slots of the planets it can reach")
+        self.assertTrue(all(row["tint"] == [25, 85, 151] for row in lifted), lifted)
+        # GFDH-01: the hovered empty slot draws its authored rollover.
+        self.assertTrue(data["held_route_samples"][-1]["slot_highlight"], "hovered destination slot highlights during drag")
+        self.assertEqual(data["fleet_hud"]["drag"]["reach_slots"], [], "reach slots hide after the drop")
+        # The reachable set is searched once per held stack, not per publication while it is held.
+        self.assertEqual(data["fleet_hud"]["drag"]["reach_builds"], 1)
         drag = data["fleet_hud"]["drag"]
         self.assertEqual((drag["orders"], drag["last_kind"], drag["last_source"], drag["last_destination"]), (1, 0, 601, 102))
         self.assertEqual(drag["empty_slots"], [], "empty slots hide after the drop")

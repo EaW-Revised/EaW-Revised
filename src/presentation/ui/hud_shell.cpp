@@ -1082,6 +1082,8 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
     if (objects == nullptr || objects->find(type, data::Category::game_object) == nullptr) return out;
     auto resolved = objects->resolve(type, data::Category::game_object);
     if (!resolved) return out;
+    // The original caches an empty display name until a nonempty Text_ID is looked up.
+    out.name.clear();
     const auto trimmed = [](const std::string& value) {
         return core::trim(value, core::xml_whitespace);
     };
@@ -1106,7 +1108,7 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
     if (const data::EffectiveValue* id = resolved.value().value("Text_ID")) {
         const std::string key = trimmed(id->value.raw_text);
         const data::ui::TextEntry* entry = text != nullptr && !key.empty() ? text->find(key) : nullptr;
-        if (entry != nullptr) out.name = data::ui::to_utf8(entry->value);
+        out.name = entry != nullptr ? data::ui::to_utf8(entry->value) : key;
     }
     const auto tokens = [&](const std::string_view tag) {
         std::vector<std::string> result;

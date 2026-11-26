@@ -173,11 +173,27 @@ std::vector<Engine::GalacticGoalObservation> Engine::galactic_goal_observations(
         row.goal = goal.id; row.target = goal.target; row.running_plan = goal.plan; row.active = goal.active;
         if (goal.function < player->functions.size()) row.function = player->functions[goal.function].goal_name;
         row.desire = numeric::decimal::format_shortest(numeric::ActiveBackend::to_binary64(goal.desire.repr));
-        if (goal.potential) { row.planned = true; row.plan = plans().at(goal.potential->plan).name; }
+        if (goal.potential) {
+            row.planned = true; row.plan = plans().at(goal.potential->plan).name;
+            const auto& potential = *goal.potential;
+            const auto text = [](Real value) { return numeric::decimal::format_shortest(numeric::ActiveBackend::to_binary64(value.repr)); };
+            std::size_t existing{}, produced{};
+            for (const auto source : potential.sources) (source == 0 ? existing : produced) += 1;
+            Real target_total{}, current_total{};
+            for (const auto& entry : potential.target_contrast) target_total += entry.force;
+            for (const auto& entry : potential.current_contrast) current_total += entry.force;
+            row.selection = "valid=" + std::to_string(potential.valid) + " picks=" + std::to_string(potential.units.size())
+                + " existing=" + std::to_string(existing) + " produced=" + std::to_string(produced) + " cost=" + text(potential.cost)
+                + " threshold=" + text(potential.threshold) + " contrast_target=" + text(target_total) + " contrast_left=" + text(current_total);
+        }
         if (const auto* plan = this->plan(goal.plan)) { row.planned = true; row.plan = plans().at(plan->definition).name; }
         result.push_back(std::move(row));
     }
     return result;
+}
+std::string Engine::galactic_type_name(tactical::TypeId id) const {
+    const auto* found = host_->type(id);
+    return found ? found->name : std::string{};
 }
 std::optional<std::uint64_t> Engine::galactic_goal_for_plan(tactical::PlayerId id, std::uint64_t plan) const {
     if (plan == 0) return {};

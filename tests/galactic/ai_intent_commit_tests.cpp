@@ -505,6 +505,48 @@ void refusal_after_completion() {
         "the completed purchase keeps its object and is not marked failed");
 }
 
+// #8588: the AI's purchase row is failed as soon as its window finishes (cancels) the build, but the world's queue entry stays until
+// the window's slice applies. A save in that gap holds the failed row beside the live queue entry: the restore accepts the pair only
+// while a pending slice finishes that build, and still refuses it otherwise.
+void restore_of_a_cancel_waiting_in_the_outbox() {
+    const eawr::sim::InlineExecutor executor;
+    auto world = take(gc::GalacticSession::create(commit_fixture()));
+    auto funding = std::make_shared<eawr::script::foc::ai::GalacticFunding>();
+    const std::array policy{eawr::script::foc::ai::EvaluatedFundingTemplate{1, {{1, f(1)}}, {}}};
+    take(funding->initialize(1, policy, f(200))); take(funding->reserve(1, {7, 1, f(100), {}, {}, {}}));
+    ga::NativeActions actions(world, funding, {}, {{1, f(1)}}, {}, &executor,
+        [](auto) { return eawr::core::Result<Fixed>::success(f(4)); });
+    actions.bind_handlers();
+    ga::ActionRequest request; request.kind = ga::ActionKind::produce; request.player = 1; request.target = 2; request.type = 1;
+    const auto accepted = take(actions.admit_paid(request, 7));
+    expect(accepted.admitted && actions.purchases().contains(accepted.request), "the build is retained by the native owner");
+    if (!accepted.admitted) return;
+    const auto build = accepted.request;
+    const Shadow::IntentRecord finish{Shadow::FinishRequest{build, false, f(1)}, build + 1, build + 1, 1, 1};
+    ga::IntentOutbox outbox(ga::standard_async_schedule);
+    expect(!outbox.holds_finish(build), "an empty outbox holds no finish");
+    ga::OutboxBatch batch(ga::standard_async_schedule);
+    static_cast<void>(batch.begin(10, {}, 0, {build + 2, 1}));
+    batch.begin_virtual_tick(1);
+    batch.sink()(1, finish);
+    expect(batch.holds_finish(build) && !batch.holds_finish(build + 1) && !batch.holds_finish(0),
+        "a batch holds the finish of exactly the build its intent names");
+    batch.end();
+    outbox.adopt(batch.take());
+    expect(outbox.holds_finish(build) && !outbox.holds_finish(build + 1), "the outbox holds the adopted finish until its slice applies");
+    // The AI's window fails the purchase at once (the world's outcome arrives in the window); the world still queues the entry.
+    gc::GalacticSession::NativeProductionOutcome cancelled; cancelled.player = 1; cancelled.build = build; cancelled.completed = false;
+    take(actions.apply_delivery(ga::NativeActions::Delivery{cancelled}));
+    expect(actions.purchases().at(build).failed, "the window failed the purchase row");
+    const auto saved = take(actions.capture());
+    const auto refused = actions.restore(saved);
+    expect(!refused && refused.error().message.find("its purchase already failed") != std::string::npos,
+        "without a pending finish the failed row beside a live queue entry is refused");
+    actions.bind_pending_finish([&outbox](eawr::sim::EntityId id) { return outbox.holds_finish(id); });
+    expect(actions.restore(saved).has_value(), "with the finish still waiting in the outbox the same save restores");
+    expect(take(actions.capture()).components == saved.components, "the restored purchase rows are exactly the saved ones");
+}
+
 // The refusal consequences map onto fields the native owner already persists.
 void refusal_consequences() {
     const eawr::sim::InlineExecutor executor;
@@ -1633,6 +1675,7 @@ int case_galactic_ai_intent_commit_tests() {
         barrier_commit();
         refusal_consequences();
         refusal_after_completion();
+        restore_of_a_cancel_waiting_in_the_outbox();
         bill_overrun_is_refused();
         bill_slices_never_pass_the_price();
         adopted_price_bills_to_completion();

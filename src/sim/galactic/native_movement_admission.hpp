@@ -180,6 +180,7 @@ void execute_native_movement(Owner& owner, const GameCommand& command, std::uint
         owner.insert(remnant); ++owner.next_id; ++owner.live_object_count;
         owner.record_fleet_shell(remnant.id, remnant.owner, remnant.orbit);
         for (const auto& member : remnant.members) owner.relocate_actor(member.id, remnant.owner, remnant.orbit, remnant.id);
+        owner.declare_fresh_fleet_blocker(remnant.id);
         owner.dirty[static_cast<std::size_t>(StateSection::session)] = true;
         // EnTT insertion may relocate FleetData: reacquire it below.
         auto e = event; e.kind = GalacticEventKind::fleet_created; e.subject = remnant.id; e.value = remnant.orbit; events.push_back(e);

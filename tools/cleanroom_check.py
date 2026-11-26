@@ -34,6 +34,8 @@ ALLOWED_TOKENS = {
     "InputClass", "PixelClass", "WeightClass", "GraphicalWrapper", "GDExtensionClassLibraryPtr",
     "setUpClass", "tearDownClass", "PriorityClass", "GetPriorityClass", "SetPriorityClass",
     "SchedulingClass", "RegisterClassW", "GetClassNameW", "pcPriClassBase", "PriClass",
+    # Windows API field of PROCESSOR_RELATIONSHIP (GetLogicalProcessorInformationEx): the efficiency class of a core.
+    "EfficiencyClass",
     # Shader asset names the game's models reference (alDefault.fx, alMissingShader).
     "alDefault", "alMissingShader",
     # Lua receiver types the game's own scripts spell (GameScoring.lua, GalacticFreeStore.lua).

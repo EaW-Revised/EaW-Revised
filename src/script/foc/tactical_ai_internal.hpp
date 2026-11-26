@@ -47,6 +47,12 @@ void register_battle_distribution(authoritative::ScriptScheduler& scripts, const
 // The object methods only a battle scheduler binds (tactical_object_bindings.cpp); a galactic scheduler gets none.
 void register_battle_object_bindings(authoritative::ScriptScheduler& scripts, const HostPtr& host,
     std::vector<core::Diagnostic>& errors);
+// The shared staging of a script creation (Create_Generic_Object, Spawn_Unit, Spawn_Special_Weapon): validates, queues one
+// ordered, replayed creation command and answers its base reference. `units` also admits a squadron or lone craft type.
+core::Result<std::uint64_t> stage_script_creation(const HostPtr& host, authoritative::BindingContext& context, const std::string& verb,
+    const AiType* type, const std::optional<sim::math::Vec3>& position, const authoritative::Handle* owner, bool units);
+// The type a name string or type handle argument names; null when it names none.
+const AiType* named_type(const detail::Host& host, const authoritative::Value& value);
 // The presentation verbs only a battle scheduler binds (tactical_presentation_bindings.cpp): story camera, fades, environment.
 void register_tactical_presentation(authoritative::ScriptScheduler& scripts, const HostPtr& host,
     std::vector<core::Diagnostic>& errors);

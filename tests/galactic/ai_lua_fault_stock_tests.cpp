@@ -115,7 +115,9 @@ int run_all() {
     std::set<std::string> faulted_plans, clean_plans;
     bool odd = false;
     for (auto& [path, text] : poisoned->modules) {
-        if (!eawr::script::foc::ai::galactic_goals::plan_directory_index(path) || text.find("function main") == std::string::npos) continue;
+        // A stock plan does not define main itself: its require chain brings in the state machine library, which does. The wrapper
+        // poisoned_plan appends runs after those requires, so it wraps that main. A plan is a script that defines Definitions.
+        if (!eawr::script::foc::ai::galactic_goals::plan_directory_index(path) || text.find("function Definitions") == std::string::npos) continue;
         const auto start = path.find_last_of('/') + 1;
         auto name = path.substr(start, path.size() - start - 4);
         std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });

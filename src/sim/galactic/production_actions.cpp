@@ -217,6 +217,17 @@ void GalacticSession::Impl::refresh_containing_fleet_combat_skip(EntityId actor)
         parent = at_parent->second.container;
     }
 }
+void GalacticSession::Impl::declare_fresh_fleet_blocker(FleetId id) {
+    // WGEP-24 / #8490: every fresh fleet constructs its starbase-cancel declaration as true, whichever
+    // route created it (split, create, movement remnant, surface retreat), not only setup and production.
+    if (!production || !production->fleet_blockers || !fleets.contains(id)) return;
+    auto& rows = *production->fleet_blockers;
+    const auto at = std::lower_bound(rows.begin(), rows.end(), id, [](const auto& row, auto key) { return row.fleet < key; });
+    if (at != rows.end() && at->fleet == id) return;
+    rows.insert(at, {id, false, false, true});
+    dirty[static_cast<std::size_t>(StateSection::production)] = true;
+    refresh_fleet_combat_skip(id);
+}
 void GalacticSession::Impl::refresh_fleet_combat_skip(FleetId id) {
     if (!production || !production->fleet_blockers || !fleets.contains(id)) return;
     auto& blockers = *production->fleet_blockers;
@@ -1171,7 +1182,7 @@ core::Result<void> GalacticSession::stage_native_production_finish(NativeActionS
     const auto refund_view = shadow.snapshot(); // outcome notice sees the refund publication, before queue removal publishes
     auto row = refund_view->production()->planets[prepared.planet_index]; auto& queue = row.queues[prepared.domain_index];
     queue.erase(queue.begin() + static_cast<std::ptrdiff_t>(prepared.entry_index));
-    if (prepared.entry_index == 0 && !queue.empty()) session_detail::native_production_start(queue.front(), shadow.data_->base->clock().galactic_frame);
+    if (prepared.entry_index == 0 && !queue.empty()) session_detail::native_production_start_next(queue, refund_view->production()->players, shadow.data_->base->clock().galactic_frame);
     shadow.data_->production_rows.insert_or_assign(row.planet, std::move(row)); shadow.data_->population_stale = true;
     shadow.data_->events.push_back({shadow.data_->base->completed_tick(), GalacticEventKind::production_cancelled, {},
         refund_view->production()->planets[prepared.planet_index].planet, prepared.entry.build_id, prepared.entry.type, GalacticRejectReason::none});

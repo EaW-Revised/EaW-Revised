@@ -71,4 +71,8 @@ std::vector<Real> production_preferences(std::span<const Real> excess_seconds) {
     return out;
 }
 
+bool total_force_unmet(Real target_total, Real unmatched_total, Real threshold) {
+    return Real{} < target_total && threshold < to_single(unmatched_total / target_total);
+}
+
 } // namespace eawr::script::foc::ai::galactic_goals

@@ -1,4 +1,5 @@
 #include "particle_workers.hpp"
+#include "eawr/core/perf_diag/thread_cpu.hpp"
 #include "eawr/presentation/particles/lane_guard.hpp"
 
 #include "eawr/presentation/particles/worker_count.hpp"
@@ -134,6 +135,7 @@ public:
 private:
     void loop() {
         name_current_thread();
+        const core::perf_diag::ThreadLabel thread_label("particle-lane"); // a no-op without a telemetry feed
         std::unique_lock lock(mutex_);
         for (;;) {
             wake_.wait(lock, [this] { return stopping_ || (pending_ && !finished_ && !running_); });
@@ -177,7 +179,8 @@ private:
     std::thread thread_;
 };
 
-ParticleWorkers::ParticleWorkers(const std::size_t count) : pool_(std::max<std::size_t>(count, 1)) {}
+ParticleWorkers::ParticleWorkers(const std::size_t count)
+    : pool_(std::max<std::size_t>(count, 1), platform::ThreadWorkerAdapter::Dispatch::always_pool, {}, "particle-worker") {}
 
 particles::HelpBoard* ParticleWorkers::help_board() const noexcept {
     // Only the lane publishes: on any other thread nobody would be waiting to help.

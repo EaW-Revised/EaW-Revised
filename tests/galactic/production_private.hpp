@@ -33,6 +33,7 @@ void base_and_tech_completion();
 void construct_story_notices();
 galactic::GalacticSetup blocker_setup();
 void live_starbase_blockers();
+void split_fleet_starbase_blockers();
 void ground_structure_sale();
 void content_and_placement();
 void shared_technology_writer();

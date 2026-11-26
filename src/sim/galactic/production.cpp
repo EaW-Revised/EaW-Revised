@@ -32,7 +32,6 @@ Fixed remaining(const ProductionEntry& entry, std::uint64_t frame) {
     const auto elapsed = frame > entry.start_frame ? frame - entry.start_frame : 0;
     return Fixed::from_ratio(static_cast<std::int64_t>(elapsed >= entry.duration_frames ? 0 : entry.duration_frames - elapsed), galactic_frames_per_second).value();
 }
-void start(ProductionEntry& entry, std::uint64_t frame) { session_detail::native_production_start(entry, frame); }
 Fixed paid(const ProductionEntry& entry) { return session_detail::native_production_paid(entry); }
 bool prerequisites(const PlanetProduction& planet, const ProductionOffer& type, std::span<const Fleet> fleets,
     bool servicing = true) {
@@ -1543,7 +1542,7 @@ void GalacticSession::Impl::execute_production(const GameCommand& command, std::
         const auto cancelled = queue[index];
         events.push_back(event);
         queue.erase(queue.begin() + static_cast<std::ptrdiff_t>(index));
-        if (index == 0 && !queue.empty()) start(queue.front(), clock.galactic_frame);
+        if (index == 0 && !queue.empty()) session_detail::native_production_start_next(queue, production->players, clock.galactic_frame);
         changed(); notify(GalacticEventKind::production_cancelled, cancelled); return;
     }
     const auto why = production_admission({state, planet, player, account, sorted_fleets(),
@@ -1690,7 +1689,7 @@ core::Result<void> GalacticSession::finish_native_production_task(EntityId build
     auto refund = add_credits(prepared.owner, paid(prepared.entry), multiplier);
     if (!refund) return core::Result<void>::failure(refund.error());
     queue.erase(queue.begin() + static_cast<std::ptrdiff_t>(prepared.entry_index));
-    if (prepared.entry_index == 0 && !queue.empty()) start(queue.front(), impl.clock.galactic_frame);
+    if (prepared.entry_index == 0 && !queue.empty()) session_detail::native_production_start_next(queue, impl.production->players, impl.clock.galactic_frame);
     if (planet.queues[0].empty() && planet.queues[1].empty()) impl.active_producers.erase(prepared.planet_index);
     impl.population_stale = true; impl.dirty[8] = impl.dirty[1] = impl.dirty[0] = true;
     const auto old = impl.snapshot->events(); std::vector<GalacticEvent> events(old.begin(), old.end());
@@ -1728,7 +1727,7 @@ core::Result<void> GalacticSession::Impl::service_production(const PartitionExec
                 const auto index = n - 1; const auto* type = offer(planet, queue[index].type);
                 if (!prerequisites(planet, *type, fleet_inputs)) {
                     notices[i].cancelled.push_back(queue[index]); queue.erase(queue.begin() + static_cast<std::ptrdiff_t>(index));
-                    if (index == 0 && !queue.empty()) start(queue.front(), clock.galactic_frame);
+                    if (index == 0 && !queue.empty()) session_detail::native_production_start_next(queue, production->players, clock.galactic_frame);
                 }
             }
             // GFD-09: revalidation precedes front countdown/completion,
@@ -1758,7 +1757,7 @@ core::Result<void> GalacticSession::Impl::service_production(const PartitionExec
             if ((domain == 1 && type->kind != ProductionKind::starbase && planet.starbase_owner != front.builder)
                 || (type->kind == ProductionKind::starbase && !pending_conflict && notices[i].blocked)) {
                 const auto cancelled = front; queue.erase(queue.begin());
-                if (!queue.empty()) start(queue.front(), clock.galactic_frame);
+                if (!queue.empty()) session_detail::native_production_start_next(queue, production->players, clock.galactic_frame);
                 dirty[8] = true; dirty[0] = true; population_stale = true;
                 notify(GalacticEventKind::production_cancelled, cancelled);
                 break; // WGEP-37/38: return from this planet's service
@@ -1887,7 +1886,7 @@ core::Result<void> GalacticSession::Impl::service_production(const PartitionExec
                 }
                 if (native_production_outcome_handler)
                     native_production_outcome_handler({finished.builder, finished.build_id, completed_object, true});
-                if (!queue.empty()) start(queue.front(), clock.galactic_frame);
+                if (!queue.empty()) session_detail::native_production_start_next(queue, production->players, clock.galactic_frame);
             } else {
                 if (front.pay_as_you_go && front.full_seconds.raw() > 0) {
                     const auto elapsed = std::max(Fixed{}, math::subtract(front.last_remaining, current).value());

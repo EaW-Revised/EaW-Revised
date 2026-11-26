@@ -1202,4 +1202,42 @@ void live_starbase_blockers() {
         }) == (pending ? 0 : 1), "automatic cancellation notification emitted exactly once");
     }
 }
+// #8490 / WGEP-24: a fleet formed after setup (here a split into a fresh fleet) blocks a station purchase
+// once it holds the orbit, for the human purchase and the AI's eligibility query alike, and stops
+// blocking when it leaves.
+void split_fleet_starbase_blockers() {
+    eawr::sim::InlineExecutor serial;
+    auto config = blocker_setup(); config.fleets[0].orbit = 2;
+    const auto source = config.fleets[0].id; const auto member = config.fleets[0].members.at(0).id;
+    auto game = take(galactic::GalacticSession::create(config));
+    submit(game, {{0, {2}, 1}, galactic::TransferFleetMembers{{{source, member}}, 0, 0}});
+    (void)take(game.step(serial));
+    galactic::FleetId split{};
+    for (const auto& fleet : game.snapshot()->fleets()) if (fleet.owner == 2) split = fleet.id;
+    expect(split != 0 && split != source, "the split formed a fresh fleet");
+    const auto& rows = *game.snapshot()->production()->fleet_blockers;
+    const auto row = std::find_if(rows.begin(), rows.end(), [&](const auto& r) { return r.fleet == split; });
+    expect(row != rows.end() && row->cancels_starbase_production && !row->pending_deletion,
+        "a fresh fleet declares that it cancels starbase production");
+    expect(std::is_sorted(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.fleet < b.fleet; }),
+        "blocker declarations stay ordered by fleet ID");
+    const auto ai_query = [&](const galactic::GalacticSnapshot& snap) {
+        const auto& production = *snap.production(); const auto& producer = production.planets[0];
+        return galactic::production_admission({production, producer, production.players[0], snap.player_economy()->players[0],
+            snap.fleets(), producer.target_owner, nullptr, 10000, 1}, &producer.offers[0], galactic::ProductionDomain::space, true);
+    };
+    submit(game, orbit(1, {2}, 1, split, 1));
+    (void)take(game.step(serial));
+    expect(ai_query(*game.snapshot()) == galactic::ProductionAdmission::slots, "AI eligibility refuses a station under the split fleet");
+    submit(game, buy(2, 1, 1, 1000, galactic::ProductionDomain::space));
+    auto result = take(game.step(serial));
+    expect(result.snapshot->production()->planets[0].queues[1].empty(), "human station purchase refused under the split fleet");
+    expect(result.snapshot->events().back().value == static_cast<std::uint64_t>(galactic::ProductionAdmission::slots), "split fleet uses the station slot rejection");
+    submit(game, orbit(3, {2}, 2, split, 2));
+    (void)take(game.step(serial));
+    expect(ai_query(*game.snapshot()) == galactic::ProductionAdmission::allowed, "AI eligibility allows the station after the fleet leaves");
+    submit(game, buy(4, 2, 1, 1000, galactic::ProductionDomain::space));
+    (void)take(game.step(serial));
+    expect(game.snapshot()->production()->planets[0].queues[1].size() == 1, "human station purchase allowed after the fleet leaves");
+}
 } // namespace galactic_production_test

@@ -23,14 +23,17 @@
 #include "eawr/core/perf_diag/marker.hpp"
 #include "eawr/core/perf_diag/pattern.hpp"
 #include "eawr/core/perf_diag/pc_context.hpp"
+#include "eawr/core/perf_diag/thread_cpu.hpp"
 #include "eawr/core/perf_diag/verdict.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <psapi.h>
 #elif defined(__linux__)
 #include <sys/resource.h>
+#include <unistd.h>
 #endif
 
 namespace eawr::core::perf_diag {
@@ -172,6 +175,47 @@ PcCounters read_pc_counters() noexcept {
     return out;
 }
 
+namespace {
+
+// This process's memory in MiB and its page-fault count (a cumulative counter); valid = false where unreadable.
+struct ProcessMemory final {
+    bool valid{};
+    std::uint64_t commit_mib{};      // private bytes the process committed
+    std::uint64_t working_set_mib{}; // resident in RAM
+    std::uint64_t page_faults{};     // cumulative, soft and hard
+};
+
+ProcessMemory read_process_memory() noexcept {
+    ProcessMemory out;
+#if defined(_WIN32)
+    using Function = BOOL(WINAPI*)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+    static const Function query = reinterpret_cast<Function>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo")));
+    if (query == nullptr) return out;
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    counters.cb = sizeof counters;
+    if (!query(GetCurrentProcess(), reinterpret_cast<PPROCESS_MEMORY_COUNTERS>(&counters), sizeof counters)) return out;
+    out.commit_mib = static_cast<std::uint64_t>(counters.PrivateUsage) >> 20;
+    out.working_set_mib = static_cast<std::uint64_t>(counters.WorkingSetSize) >> 20;
+    out.page_faults = counters.PageFaultCount;
+    out.valid = true;
+#elif defined(__linux__)
+    std::ifstream in("/proc/self/statm", std::ios::binary);
+    std::uint64_t size = 0, resident = 0;
+    if (!(in >> size >> resident)) return out;
+    const long page = sysconf(_SC_PAGESIZE);
+    const std::uint64_t bytes = page > 0 ? static_cast<std::uint64_t>(page) : 4096;
+    out.commit_mib = (size * bytes) >> 20;
+    out.working_set_mib = (resident * bytes) >> 20;
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) out.page_faults = static_cast<std::uint64_t>(usage.ru_minflt + usage.ru_majflt);
+    out.valid = true;
+#endif
+    return out;
+}
+
+} // namespace
+
 struct FeedWriter::Impl {
     // One attached session feed and everything the writer derives from it.
     struct PendingHitch final {
@@ -195,6 +239,7 @@ struct FeedWriter::Impl {
     struct Source final {
         int id{};
         std::string label;
+        std::size_t workers{};
         SimFeed* feed{};
         bool live{true};
         TickHitchDetector hitch;
@@ -236,6 +281,19 @@ struct FeedWriter::Impl {
     std::deque<HitchEntry> frame_hitches;
     std::atomic<bool> capture_requested{false};
     std::uint64_t reported_frame_drops{};
+    // Main-thread frame phases (source id -1): the producer interns names, the writer announces them once per segment.
+    SpscRing<FramePhases> frame_phases{4096};
+    PhaseTable<256> frame_phase_table;
+    std::deque<std::string> frame_phase_names; // stable storage behind frame_phase_table
+    std::vector<bool> frame_phase_announced;
+    std::uint64_t reported_phase_drops{};
+    // The context record: the viewer's fields, rewritten at every segment start and when they change.
+    std::mutex context_mutex;
+    std::string context_fields;
+    bool context_dirty{};
+    ThreadCpuSampler thread_sampler;
+    ProcessMemory memory_before;
+    std::uint64_t memory_before_us{};
 
     std::ofstream file;
     std::filesystem::path segment_path;
@@ -333,12 +391,67 @@ struct FeedWriter::Impl {
             std::fill(source->announced.begin(), source->announced.end(), false);
             for (std::size_t id = 0; id < source->names.size(); ++id) announce_phase(*source, static_cast<PhaseId>(id));
         }
+        std::fill(frame_phase_announced.begin(), frame_phase_announced.end(), false);
+        announce_frame_phases();
+        write_context(false);
+    }
+    // The main-thread frame phases (source -1): names announced once per segment, when first used.
+    void announce_frame_phases() {
+        const std::size_t count = frame_phase_table.size();
+        if (frame_phase_announced.size() < count) frame_phase_announced.resize(count, false);
+        for (std::size_t id = 0; id < count; ++id) {
+            if (frame_phase_announced[id]) continue;
+            frame_phase_announced[id] = true;
+            out += "{\"r\":\"phase-name\",\"src\":-1,\"id\":";
+            put_u(out, id);
+            out += ",\"name\":";
+            put_s(out, frame_phase_table.name(static_cast<PhaseId>(id)));
+            out += "}\n";
+        }
+    }
+    // The context record: the machine's CPU as aggregates plus whatever the viewer gave. `only_if_dirty`: the
+    // once-per-batch call writes nothing unless the viewer changed the text.
+    void write_context(const bool only_if_dirty) {
+        std::string fields;
+        {
+            const std::lock_guard lock(context_mutex);
+            if (only_if_dirty && !context_dirty) return;
+            context_dirty = false;
+            fields = context_fields;
+        }
+        const CpuInfo& cpu = cpu_info();
+        out += "{\"r\":\"context\",\"t\":";
+        put_u(out, now_us());
+        out += ",\"cpu\":";
+        put_s(out, cpu.model);
+        out += ",\"cores\":";
+        put_u(out, cpu.cores);
+        out += ",\"logical\":";
+        put_u(out, cpu.logical);
+        out += ",\"p_cores\":";
+        put_u(out, cpu.performance_cores);
+        out += ",\"e_cores\":";
+        put_u(out, cpu.efficiency_cores);
+        out += ",\"p_logical\":";
+        put_u(out, cpu.performance_logical);
+        out += ",\"topology\":";
+        out += cpu.topology_known ? "true" : "false";
+        if (!fields.empty()) {
+            out += ',';
+            out += fields;
+        }
+        out += "}\n";
+        count_record();
     }
     void announce_source(const Source& source) {
         out += "{\"r\":\"source\",\"src\":";
         put_i(out, source.id);
         out += ",\"label\":";
         put_s(out, source.label);
+        if (source.workers != 0) {
+            out += ",\"workers\":";
+            put_u(out, source.workers);
+        }
         out += ",\"t\":";
         put_u(out, now_us());
         out += "}\n";
@@ -621,6 +734,24 @@ struct FeedWriter::Impl {
             put_f(out, frame.ui_lock_ms);
             out += ",\"stale\":";
             put_u(out, (frame.flags & FrameFlags::stale) != 0 ? 1 : 0);
+            if ((frame.flags & FrameFlags::fight) != 0) {
+                out += ",\"u\":";
+                put_u(out, frame.units);
+                out += ",\"eu\":";
+                put_u(out, frame.enemy_units);
+                out += ",\"atk\":";
+                put_u(out, frame.attacking);
+                out += ",\"proj\":";
+                put_u(out, frame.projectiles);
+                out += ",\"fx\":";
+                put_u(out, frame.effects);
+                out += ",\"part\":";
+                put_u(out, frame.particles);
+                out += ",\"dc\":";
+                put_u(out, frame.draw_calls);
+                out += ",\"obj\":";
+                put_u(out, frame.objects);
+            }
             out += "}\n";
             count_record();
             frame_history.push_back(frame);
@@ -650,6 +781,27 @@ struct FeedWriter::Impl {
                 out += "}\n";
                 count_record();
             }
+        }
+    }
+
+    void drain_frame_phases() {
+        FramePhases phases;
+        while (frame_phases.pop(phases)) {
+            announce_frame_phases();
+            out += "{\"r\":\"fph\",\"n\":";
+            put_u(out, phases.frame);
+            out += ",\"ph\":[";
+            const std::uint32_t count = std::min<std::uint32_t>(phases.count, FramePhases::max_entries);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                if (i != 0) out += ',';
+                out += '[';
+                put_u(out, phases.entries[i].id);
+                out += ',';
+                put_f(out, phases.entries[i].ms);
+                out += ']';
+            }
+            out += "]}\n";
+            count_record();
         }
     }
 
@@ -740,6 +892,47 @@ struct FeedWriter::Impl {
             out += "}\n";
             count_record();
         }
+        {
+            // Which thread is busy: shares of one core (1.0 = one thread-equivalent), named threads first.
+            const std::vector<ThreadShare> shares = thread_sampler.sample(now);
+            if (!shares.empty()) {
+                out += "{\"r\":\"thr\",\"t\":";
+                put_u(out, now);
+                out += ",\"th\":[";
+                bool first = true;
+                for (const ThreadShare& share : shares) {
+                    if (!first) out += ',';
+                    first = false;
+                    out += '[';
+                    put_s(out, share.name);
+                    out += ',';
+                    put_f(out, share.share, 3);
+                    out += ',';
+                    out += share.labeled ? '1' : '0';
+                    out += ']';
+                }
+                out += "]}\n";
+                count_record();
+            }
+            // This process's memory and paging: private commit and working set in MiB, page faults per second.
+            const ProcessMemory memory = read_process_memory();
+            if (memory.valid) {
+                out += "{\"r\":\"mem\",\"t\":";
+                put_u(out, now);
+                out += ",\"commit_mb\":";
+                put_u(out, memory.commit_mib);
+                out += ",\"ws_mb\":";
+                put_u(out, memory.working_set_mib);
+                out += ",\"pf_s\":";
+                if (memory_before.valid && now > memory_before_us && memory.page_faults >= memory_before.page_faults)
+                    put_f(out, static_cast<double>(memory.page_faults - memory_before.page_faults) * 1e6 / static_cast<double>(now - memory_before_us), 1);
+                else out += "-1";
+                out += "}\n";
+                count_record();
+                memory_before = memory;
+                memory_before_us = now;
+            }
+        }
         for (const auto& holder : sources) {
             Source& source = *holder;
             if (!source.live) continue;
@@ -788,6 +981,16 @@ struct FeedWriter::Impl {
                 count_record();
             }
         }
+        const std::uint64_t phase_drops = frame_phases.dropped();
+        if (phase_drops != reported_phase_drops) {
+            reported_phase_drops = phase_drops;
+            out += "{\"r\":\"dropped\",\"src\":-2,\"t\":";
+            put_u(out, now);
+            out += ",\"total\":";
+            put_u(out, phase_drops);
+            out += "}\n";
+            count_record();
+        }
         const std::uint64_t frame_drops = frames.dropped();
         if (frame_drops != reported_frame_drops) {
             reported_frame_drops = frame_drops;
@@ -809,7 +1012,9 @@ struct FeedWriter::Impl {
                     drain_source(*source);
                     if (force_hitches) finalize_ready_hitches(*source, true);
                 }
+            write_context(true);
             drain_frames();
+            drain_frame_phases();
             const std::uint64_t now = now_us();
             if (now >= last_second_us + 1'000'000) {
                 last_second_us = now;
@@ -1059,11 +1264,12 @@ struct FeedWriter::Impl {
     }
 
     // ---------------------------------------------------------------- sources
-    int attach(SimFeed& feed, const std::string_view label) {
+    int attach(SimFeed& feed, const std::string_view label, const std::size_t workers) {
         const std::lock_guard lock(sources_mutex);
         auto source = std::make_unique<Source>();
         source->id = static_cast<int>(sources.size());
         source->label = std::string(label);
+        source->workers = workers;
         source->feed = &feed;
         const int id = source->id;
         announce_source(*source);
@@ -1188,11 +1394,11 @@ void FeedWriter::stop_process() noexcept {
 
 bool FeedWriter::active() noexcept { return active_pointer().load(std::memory_order_acquire) != nullptr; }
 
-int FeedWriter::attach_active(SimFeed& feed, const std::string_view label) {
+int FeedWriter::attach_active(SimFeed& feed, const std::string_view label, const std::size_t workers) {
     if (!active()) return -1;
     const std::lock_guard global(active_mutex());
     FeedWriter* const writer = active_pointer().load(std::memory_order_acquire);
-    return writer == nullptr ? -1 : writer->impl_->attach(feed, label);
+    return writer == nullptr ? -1 : writer->impl_->attach(feed, label, workers);
 }
 
 void FeedWriter::detach_active(const int source) noexcept {
@@ -1208,6 +1414,35 @@ void FeedWriter::request_capture_active() noexcept {
 
 void FeedWriter::push_frame_active(const FrameRecord& record) noexcept {
     if (FeedWriter* const writer = active_pointer().load(std::memory_order_acquire)) writer->impl_->frames.push(record);
+}
+
+PhaseId FeedWriter::intern_frame_phase_active(const std::string_view name) noexcept {
+    FeedWriter* const writer = active_pointer().load(std::memory_order_acquire);
+    if (writer == nullptr) return no_phase;
+    Impl& impl = *writer->impl_;
+    const PhaseId found = impl.frame_phase_table.find(name);
+    if (found != no_phase) return found;
+    if (impl.frame_phase_table.size() == impl.frame_phase_table.capacity()) return no_phase;
+    try {
+        impl.frame_phase_names.emplace_back(name);
+    } catch (...) {
+        return no_phase;
+    }
+    return impl.frame_phase_table.intern(impl.frame_phase_names.back());
+}
+
+void FeedWriter::push_frame_phases_active(const FramePhases& phases) noexcept {
+    if (FeedWriter* const writer = active_pointer().load(std::memory_order_acquire)) writer->impl_->frame_phases.push(phases);
+}
+
+void FeedWriter::set_context_active(const std::string_view fields) {
+    FeedWriter* const writer = active_pointer().load(std::memory_order_acquire);
+    if (writer == nullptr) return;
+    Impl& impl = *writer->impl_;
+    const std::lock_guard lock(impl.context_mutex);
+    if (impl.context_fields == fields) return;
+    impl.context_fields = std::string(fields);
+    impl.context_dirty = true;
 }
 
 std::string FeedWriter::current_segment() const {

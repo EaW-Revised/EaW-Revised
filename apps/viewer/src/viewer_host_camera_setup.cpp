@@ -296,7 +296,8 @@ void ViewerHost::close_active_modes() {
 void ViewerHost::_notification(const int what) {
     switch (what) {
     case NOTIFICATION_TRANSLATION_CHANGED:
-        // The engine rewrites the main window title (adding its own "(DEBUG)") on this; put ours back.
+        // The engine rewrites the main window title (adding its own "(DEBUG)") on this; put ours back. The first
+        // rewrite right after _ready reaches only the root window: _ready queues a deferred re-apply for it.
         window_title_.reapply(write_window_title);
         break;
     case NOTIFICATION_EXIT_TREE:
